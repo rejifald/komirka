@@ -1,0 +1,187 @@
+---
+title: Open decisions
+description: The honest undecided list — every open design question, its options, and the current lean.
+---
+
+A design document that hides its open questions is marketing. Everything else on this site reads as contract; this page is the delta between contract and certainty. Each entry states the question, the options on the table, and the current lean. A lean is not a promise — if you have production experience that bears on any of these, that is exactly the feedback this phase exists to collect.
+
+| # | Question | Current lean |
+| --- | --- | --- |
+| 1 | Is `default` part of a knob's identity hash? | Yes — keep it in |
+| 2 | Env-varying public values in build-once SPAs | Bless a runtime-injected JSON mode; shape TBD |
+| 3 | Ship the Node file source in v0.1? | Yes |
+| 4 | Server targets: zero-runtime-dep vs runtime validation | Two-tier: bake what is build-constant, runtime-bind the rest |
+| 5 | Final naming | Undecided; `knob` is provisional |
+| 6 | v0.1 proof gate | Ship only if the demo clearly wins |
+
+## 1. Is `default` part of the identity hash?
+
+The identity contract on the rest of this site includes `default` — presence and value — in the hashed subset. That reflects the current lean, but it is the most revisitable line in the identity design, so it is recorded here as open.
+
+**Option A — include it (current lean).** A changed default *is* different configuration: two copies of a library that fall back to different values are not running the same contract. Including `default` means a dual-installed package whose newer copy bumped a default trips `DescriptorMismatchError` instead of silently resolving different values depending on which copy your import graph happened to reach.
+
+**Option B — exclude it (treat it like `doc`).** Library authors could bump a default in a patch release without breaking identity across duplicated package copies. The price: the mismatch becomes invisible, and `cfg.get()` quietly returns `3` in one module and `5` in another.
+
+The lean is A: a loud error beats a silent wrong value. The escape hatch already exists and is cheap:
+
+```ts
+// @acme/mailer v1.4.0
+const retries = knob({
+  key: "MAILER_RETRIES",
+  schema: z.coerce.number().int(),
+  exposure: "public",
+  default: 3,
+});
+
+// @acme/mailer v1.5.0 — only the default changed
+const retries = knob({
+  key: "MAILER_RETRIES",
+  schema: z.coerce.number().int(),
+  exposure: "public",
+  default: 5,
+});
+```
+
+With `default` in the hash, an app that binds one copy and reads through the other fails loudly, and the error hands you the fix:
+
+```text
+DescriptorMismatchError: "MAILER_RETRIES" is bound under a different descriptor.
+  bound:    default: 3   (knobv1:xxh128:9f2a…)
+  reading:  default: 5   (knobv1:xxh128:c41b…)
+  diff: default
+  To accept the newer descriptor at your composition root:
+    bind(knobs, sources, { unify: [{ accept: retries, aliases: ["knobv1:xxh128:9f2a…"] }] })
+```
+
+The residual cost lands on library authors: a default bump is an identity-breaking change and should be released like one. `unify` resolutions always re-validate with the caller's schema, so accepting the newer descriptor never downgrades validation. If real-world friction shows this generating more `unify` boilerplate than it prevents bugs, option B gets a second hearing — but the burden of proof sits on the silent side.
+
+## 2. Env-varying public values for build-once-promote-many SPAs
+
+This is the predicted number-one GitHub issue, so it gets named before anyone files it.
+
+The bake pipeline inlines public literal values into the client artifact at build time. For secrets that is a feature — bake never resolves secret values, which is what preserves build-once-deploy-many for the server side. But *public* values are frozen at bake time, and teams that promote one immutable artifact from staging to production need `API_BASE_URL` to differ per environment without a rebuild.
+
+**Option A — do nothing; document rebuild-per-environment.** Cheapest and honest (`knobs bake` once per environment in the CI matrix). It also angers precisely the teams with the strictest promotion pipelines — the ones most likely to care about this library.
+
+**Option B — a runtime-injected JSON mode (lean).** The deploy environment serves a small public document, conventionally `/config.json`; the client fetches it once at boot and resolves it as an ordinary async source through `load()`, so every read after boot is sync. Values still validate against the same knob schemas. The browser entry still contains no secret-capable sources, so a secret knob pointed at that document fails with `ExposureError` — the document cannot become a side-channel for secrets.
+
+**Option C — HTML injection.** The server templates the same JSON into a script tag; saves a request, couples you to a serving layer. Probably a documented variant of B rather than a separate mode.
+
+The undecided part is the shape, not the need. In the current contract the pieces already compose as a userland recipe — a provider `SourceRef` plus `load()`:
+
+```ts
+// candidate recipe — sketch, not contract; the blessed shape is TBD
+const apiBase = knob({
+  key: "API_BASE_URL",
+  schema: z.string().url(),
+  exposure: "public",
+  sources: [{ provider: "runtime-config" }, { env: "API_BASE_URL" }],
+});
+
+// browser boot: runtimeConfigProvider is a userland provider that
+// fetches /config.json once; all reads are sync forever after
+const cfg = await load([apiBase], [runtimeConfigProvider]);
+```
+
+```json
+{
+  "API_BASE_URL": "https://api.example.com",
+  "CDN_ORIGIN": "https://cdn.example.com"
+}
+```
+
+Open shape questions: does core bless a first-class browser source or only document the provider recipe; should bake emit a JSON Schema for the document so the *deploy* pipeline can validate it before serving; and how the baked shim's identity-hash check (`StaleBakeError`) interacts with values that arrive at runtime instead of bake time. Current lean: bless exactly one runtime-injected mode, and keep it out of v0.1 unless the proof-gate demo (below) demands it.
+
+## 3. Ship the Node file source in v0.1?
+
+**Option A — ship `fromFiles` in v0.1 (lean yes).** **Option B — env-only v0.1, files in v0.2.**
+
+The argument for shipping is that `fromFiles` is what makes `freshness: "live"` real. Live env vars are physically impossible on Node — a running process's OS environment never changes. Files are the one re-readable source with a mainstream deployment story: Kubernetes volume-mounted ConfigMaps update in place via the `..data` symlink swap (`subPath` mounts never update). Without a file source, `LiveBinding`, `epoch()`, `refresh()`, `health()`, and keep-last-good are paper features that no one can run — and a v0.1 that documents machinery it cannot demonstrate fails the honesty bar this project set for itself.
+
+```ts
+import { knob, bind } from "knobs";
+import { fromFiles } from "knobs/node";
+
+const rateLimit = knob({
+  key: "RATE_LIMIT",
+  schema: z.coerce.number().int().positive(),
+  exposure: "public",
+  sources: [{ file: "/etc/app-config/RATE_LIMIT" }],
+  freshness: "live",
+});
+
+const live = bind([rateLimit], [fromFiles()]); // : LiveBinding
+
+// per-request pin — the documented pattern
+app.use((req, res, next) => {
+  res.locals.cfg = live.snapshot(); // one coherent Snapshot per request
+  next();
+});
+
+app.get("/healthz", (req, res) => {
+  res.json(live.health()); // staleness + last validation error, per knob
+});
+```
+
+The argument against is scope: poll-on-read throttling (`maxStalenessMs`), single-coherent-pass reads so multi-knob files never tear, keep-last-good plus `onInvalid`, and filesystem quirks across platforms are a real test surface for a first release. The lean stays yes — the file source is the difference between "live is designed" and "live exists."
+
+## 4. Server bake targets: zero-runtime-dep or runtime validation?
+
+For the client target there is no tension: public values are validated at bake time, then inlined next to a ~30-line shim that imports nothing. Zero runtime dependency *and* validated — validation just happened earlier, which is safe because the values are build-constant.
+
+For servers the tension is structural. Validators are BYO Standard Schema objects — closures. They do not serialize into a generated module, and bake deliberately never resolves secret values. So for any value that varies per deployment (every secret, every per-environment var), **zero-runtime-dep and runtime schema validation are mutually exclusive**. You cannot inline what you refuse to resolve, and you cannot re-validate without the validator.
+
+The lean is a two-tier story rather than pretending one mechanism covers both:
+
+- **Tier 1 — build-constant values: bake them.** This is how StitchAPI consumes the library — a devDependency, bake at build time, zero runtime dependency in the published package.
+- **Tier 2 — runtime-varying values: runtime-bind them.** The server imports the library as a normal dependency and binds at boot with full schema validation. The contract already permits this: mandatory bake attaches to the *trust boundary* — untrusted client targets — and trusted servers may runtime-bind.
+
+```ts
+// Tier 2: the library is a real dependency here, and that is the point —
+// secrets validate at runtime, where the value actually lives
+import { bind } from "knobs";
+import { fromProcessEnv } from "knobs/node";
+import { serverKnobs } from "./config/knobs";
+
+const cfg = bind(serverKnobs, [fromProcessEnv()]);
+// anything missing or invalid dies here, at boot, in ONE aggregated
+// MissingConfigError listing every offender — not request by request
+```
+
+The open sub-question is what the *optional* baked server wiring module checks. It already reads env dynamically — computed access over a key array, never static `process.env.KEY`, so DefinePlugin cannot fold values into literals. Candidates: presence-only checks at boot (schema-free, still catches the deploy that forgot a var), or pure enumeration with no checks at all. What is **not** on the table: serializing validators via generated code, or a mini validation DSL embedded in baked output — both collide head-on with BYO Standard Schema and the bundle-frugality gate.
+
+## 5. Final naming
+
+`knob` is a working name, for the package and the descriptor both. The criteria: one noun that works for both the unit and the npm package; available or winnable on npm; greppable (search-unique in a codebase); no reactivity connotation; and ideally paired with a natural word for a group of them.
+
+One name is rejected rather than parked: **atom**. jotai and recoil own that word, and an atom implies subscription and re-render — exactly the mental model this library refuses. There is no watch or subscribe API, by design; borrowing reactivity vocabulary would promise it.
+
+Parked candidates, grouped by family:
+
+- **Control-room:** `knob` / `panel` (the current working pair — descriptor / group), `dial`, `setpoint`
+- **Sewing and weaving** (pairs with the Stitch ecosystem): `notions`, `bobbin`, `loom`, `weft`
+- **Smallest-unit:** `grain`, `mote`, `filament`, `quark`
+- **Wordplay on "conf":** `confit`, `confetti`
+
+Current lean: none. The docs use `knob` consistently so the eventual rename is a mechanical find-and-replace plus an npm availability check before first publish. Naming does not gate design review, and bikeshedding it before the proof gate passes would be effort spent in the wrong order.
+
+## 6. The v0.1 proof gate
+
+The last open decision is whether to ship at all, and it has a pass/fail procedure attached. Before a v0.1 tag exists, one public demo repository must show a **single knobs file, consumed unchanged** — never forked per runtime — by:
+
+1. **A Node server** — runtime `bind` over `fromProcessEnv()`, plus one `freshness: "live"` knob over `fromFiles()` proving keep-last-good and `epoch()` against an edited file.
+2. **A Cloudflare Worker** — per-request binding over `fromWorkerEnv(env)`: the case import-time validators structurally cannot handle, demonstrated rather than asserted.
+3. **A Vite client** — a baked target running on the zero-runtime-dep shim, with `knobs bake --check` green in CI.
+4. **A planted leak** — a hand-rolled high-entropy string smuggled into client code, and `knobs bake --check` failing the build via the allowlist scan. The gate is not that the scan exists; it is that it visibly catches the plant.
+5. **A vitest suite with zero `process.env` mutation** — every test constructs its own fixture and passes it into factories:
+
+```ts
+import { snapshotOf } from "knobs/testing";
+
+const cfg = snapshotOf([
+  [apiBase, "https://test.local"],
+  [poolSize, 2],
+]); // still validated; no globals touched; safe under parallel test runners
+```
+
+The bar is comparative, not aesthetic: the demo must **clearly beat t3-env plus hand-rolling** — fewer lines at the call sites, guarantees the incumbents structurally cannot make (per-request Worker binding, fail-closed secrets, a build that fails on a planted leak, tests without env mutation), and no asterisks. If it does not clearly win, the honest outcome is to publish the demo and the learnings and stop. The ecosystem does not need a fifth config library that is merely different.

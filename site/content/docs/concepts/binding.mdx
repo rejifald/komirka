@@ -1,0 +1,238 @@
+---
+title: Binding and snapshots
+description: Values exist only inside explicit bindings — eager validation by default, three doors of laziness, load() for async sources, and the pinned Snapshot API.
+---
+
+## Values exist only inside bindings
+
+A `Knob<T>` is an inert descriptor. Importing it costs nothing, reads nothing, validates nothing. The value comes into existence in exactly one place: a **binding**, where you hand a set of knobs and a set of source implementations to `bind()` (or `load()`, for async sources).
+
+```ts
+import { z } from "zod";
+import { knob, defineKnobs, bind } from "knobs";
+import { fromProcessEnv } from "knobs/node";
+
+export const dbUrl = knob({
+  key: "DATABASE_URL",
+  schema: z.string().url(),
+  doc: "Primary Postgres connection string",
+  // exposure defaults to "secret" — fail closed
+});
+
+export const poolSize = knob({
+  key: "DB_POOL_SIZE",
+  schema: z.coerce.number().int().min(1),
+  exposure: "public",
+  default: 10,
+});
+
+export const dbKnobs = defineKnobs([dbUrl, poolSize]);
+
+// the composition root — the only place sources are actually read
+const cfg = bind(dbKnobs, [fromProcessEnv()]);
+
+cfg.get(dbUrl);    // string — sync, typed from the schema's output
+cfg.get(poolSize); // number
+```
+
+There is no ambient binding to fall back to: no module-scope cache, no global registry, no value stashed on the knob object itself. Asking a snapshot for a knob it never bound is a named error, never a silent default:
+
+```ts
+const cfg = bind([dbUrl], [fromProcessEnv()]);
+
+cfg.get(poolSize);
+// UnboundKnobError: DB_POOL_SIZE is not in the set bound by this snapshot.
+//   Bound here: DATABASE_URL
+//   Fix: add DB_POOL_SIZE to the bind() call that created this snapshot.
+```
+
+`get()` has a three-way contract: a hit, `UnboundKnobError`, or `DescriptorMismatchError` when the same key was bound under a *different* descriptor. The mismatch error carries both canonical descriptors, a field-level diff, and a paste-able `unify` snippet — see the identity page for that story.
+
+## Eager by default: one aggregated failure
+
+`bind()` validates **exactly the listed set, now** — not "everything the app ever declared". Groups are declared near their call sites, so what you bind is what that composition root actually needs. If anything is missing or invalid, you get one aggregated `MissingConfigError` listing every problem, not a whack-a-mole of one-failure-per-restart:
+
+```ts
+const cfg = bind([dbUrl, poolSize, smtpPassword], [fromProcessEnv()]);
+```
+
+```text
+MissingConfigError: 3 of 3 knobs failed to bind
+
+  ✖ DATABASE_URL    missing — no source produced a value
+                    tried: env DATABASE_URL
+  ✖ DB_POOL_SIZE    invalid — expected number, received "many"
+                    from: env DB_POOL_SIZE
+  ✖ SMTP_PASSWORD   invalid — 1 issue at (root)
+                    from: env SMTP_PASSWORD
+                    (message withheld: exposure is "secret")
+```
+
+Two details worth noticing. For secret knobs the report shows issue counts and paths only — validator messages echo received values, so they are treated as untrusted and never printed. And `default` gets no privileged path: a defaulted value is validated at bind exactly like a sourced one, so a bad default dies at boot, not in production.
+
+## The three doors
+
+| Door | At bind time | At first read |
+| --- | --- | --- |
+| `bind(knobs, sources)` | presence **and** validation | nothing left to fail |
+| `bind.lazy(knobs, sources)` | presence only | validation |
+| `bind.unchecked(knobs, sources)` | nothing | presence and validation |
+
+`bind.lazy` is the half-lazy door: raw presence is still checked eagerly, so a missing variable dies at bind — the classic 3am failure, where an unset var is only discovered hours later on the first cold code path, is structurally gone. What it defers is validator execution, for when validators are expensive or the set is large.
+
+```ts
+const cfg = bind.lazy(serverKnobs, [fromProcessEnv()]);
+// missing env vars have already thrown MissingConfigError here;
+// schemas run on first cfg.get(...) per knob
+```
+
+`bind.unchecked` checks nothing until first read. The name carries the warning; reach for it only when eager checks are genuinely wrong, like a multi-subcommand CLI where `--help` must not demand deploy credentials:
+
+```ts
+const cfg = bind.unchecked(deployKnobs, [fromProcessEnv()]);
+
+if (command === "deploy") {
+  cfg.get(deployToken); // presence + validation happen here, per knob
+}
+```
+
+## Async sources: load() resolves once, reads stay sync
+
+`bind()` accepts sync sources only. Sources carry a kind discriminant, so handing an async provider to `bind()` is a compile error — and if the types are bypassed, a runtime error before anything is read:
+
+```ts
+bind([apiKey], [ssmProvider]);
+//              ~~~~~~~~~~~
+// compile error: async source is not assignable to bind()
+// at runtime: AsyncSourceInBindError: source "ssm" is async — use `await load(...)`
+```
+
+`load()` is the async door. It resolves every source **once**, up front; every read after that is synchronous forever. There is no per-read network hop hiding behind `get()`:
+
+```ts
+import { load } from "knobs";
+import { fromProcessEnv } from "knobs/node";
+import { ssmProvider } from "./providers/ssm"; // a plain async function you own
+
+const cfg = await load([dbUrl, apiKey], [fromProcessEnv(), ssmProvider]);
+
+cfg.get(apiKey); // string — no await, resolved at load time
+```
+
+The same shape of rule applies to validators: async-ness can be input-dependent, so every validation site checks for a thenable and throws `AsyncValidatorInSyncBindingError` if a schema goes async inside a sync binding.
+
+## The Snapshot API
+
+A `Snapshot` is always pinned and immutable — it is the only type cross-package APIs accept. Validated outputs are contractually immutable too (deep-frozen in dev mode), so nothing downstream can mutate a config value another module already read.
+
+```ts
+cfg.get(dbUrl);    // string — throws the named errors above on failure
+cfg.tryGet(dbUrl); // { ok: true, value } | { ok: false, issues } — non-throwing read
+cfg.explain(dbUrl); // provenance: which source won, which key resolved
+cfg.toJSON();       // full dump — secrets redacted by construction
+```
+
+`explain()` answers "where did this value actually come from" without exposing it:
+
+```json
+{
+  "knob": "DATABASE_URL",
+  "identity": "knobv1:xxh128:5f21c09a…",
+  "resolved": { "source": "env", "key": "DATABASE_URL" },
+  "value": "[redacted: exposure is secret]"
+}
+```
+
+`toJSON()` is safe to log because redaction is structural, not best-effort. And the guard goes one level deeper: secret *values* themselves refuse serialization, so an SSR payload cannot smuggle one out by accident:
+
+```ts
+const page = { props: { db: cfg.get(dbUrl) } };
+JSON.stringify(page);
+// ExposureError: secret value DATABASE_URL cannot be serialized
+// (serialization guard — same trap fires for structuredClone)
+```
+
+For handing a *subset* of a snapshot to a library, `cfg.pick(dbKnobs)` returns a runtime-restricted `Scope` — reading a non-member throws `NotInScopeError`, and the root snapshot is deliberately not assignable where a `Scope` is expected. The library DI page covers this pattern in full.
+
+## Config flows at construction time, not call time
+
+The intended shape: one composition root binds, factories receive their slice at construction, and request handlers never touch config at all.
+
+```ts
+import type { Scope, ConfigOf } from "knobs";
+
+// a factory declares the exact slice it needs, in its type
+export function createPool(cfg: Scope<ConfigOf<typeof dbKnobs>>) {
+  return new Pool({ url: cfg.get(dbUrl), max: cfg.get(poolSize) });
+}
+```
+
+```ts
+// app entrypoint — the composition root
+const root = bind([...dbKnobs, ...mailerKnobs], [fromProcessEnv()]);
+
+const pool = createPool(root.pick(dbKnobs));
+const mailer = createMailer(root.pick(mailerKnobs));
+// handlers receive pool and mailer — not root, not process.env
+```
+
+This is also what makes testing boring, in the good way — construct a literal snapshot per test and pass it in, with zero `process.env` mutation:
+
+```ts
+import { snapshotOf } from "knobs/testing";
+
+const cfg = snapshotOf([[dbUrl, "pg://localhost/test"], [poolSize, 2]]);
+const pool = createPool(cfg.pick(dbKnobs)); // still validated — a bad literal fails here
+```
+
+## Why there is no ambient binding
+
+Import-time and module-global config assumes a process-global environment that exists once and never changes. Cloudflare Workers break that assumption structurally: `env` arrives as a *parameter*, per invocation, and an import-time validator can never see it. Worse, a module-scope cache in that world is a cross-tenant bleed — the first request's env populates the cache, and every later request in that isolate reads the first request's values.
+
+Explicit binding matches the platform's physics instead:
+
+```ts
+import { bind } from "knobs";
+import { fromWorkerEnv } from "knobs/workers";
+import { appKnobs } from "./config";
+
+export default {
+  fetch(request: Request, env: Env) {
+    // bound per invocation — this request's env, no one else's
+    const cfg = bind(appKnobs, [fromWorkerEnv(env)]);
+    return handle(request, cfg);
+  },
+};
+```
+
+Because there is no ambient store, the failure mode of a mis-wired read is a thrown `UnboundKnobError` at the offending line — never a stale or cross-request value.
+
+## Source refs are data; implementations are injected
+
+A knob's `sources` field is ordered *data* — plain JSON refs naming what to read, in precedence order. It never contains an implementation, which is why descriptors round-trip as JSON and why tools like bake can enumerate them without executing app code:
+
+```ts
+const sendgridKey = knob({
+  key: "SENDGRID_API_KEY",
+  schema: z.string().min(1),
+  sources: [
+    { provider: "ssm", key: "/prod/sendgrid/api-key" }, // preferred
+    { env: "SENDGRID_API_KEY" },                        // local-dev fallback
+  ],
+});
+```
+
+The *how* is supplied at the binding, per runtime, and the descriptor never changes:
+
+```ts
+// Node server: provider first, process env as fallback
+const cfg = await load([sendgridKey], [ssmProvider, fromProcessEnv()]);
+
+// Cloudflare Worker: the env ref resolves against the request's env bag
+const cfg = bind([sendgridKey], [fromWorkerEnv(env)]);
+
+// tests: no sources at all — a literal, validated snapshot
+const cfg = snapshotOf([[sendgridKey, "SG.test-key"]]);
+```
+
+This split is also the browser-safety story: the universal `knobs` entry ships no secret-capable source implementations at all. `fromProcessEnv` and `fromFiles` live in `knobs/node`, `fromWorkerEnv` in `knobs/workers` — a browser bundle importing only `knobs` structurally cannot read a secret source, no lint rule required.

@@ -1,0 +1,270 @@
+---
+title: Live config on Kubernetes
+description: The one honest live-reload story — ConfigMap volume mounts, poll-on-read file knobs, per-request pins, epoch-keyed pool rebuilds, keep-last-good, and a liveness probe.
+---
+
+The house rule is: **if it can change while the process runs, it's state, not config.** The one declared exception is a re-readable source you opted into with `freshness: "live"` — and on Kubernetes there is exactly one re-readable source you get for free: a volume-mounted file. This page walks the whole path end to end: ConfigMap/Secret mount, live file knobs, per-request pinning, pool rebuilds keyed on `epoch()`, keep-last-good with alerting, and a health endpoint your liveness probe can hit.
+
+## Why env vars cannot do this
+
+The tempting route is the one that cannot work:
+
+```yaml
+# deployment.yaml — the env route
+env:
+  - name: LOG_LEVEL
+    valueFrom:
+      configMapKeyRef:
+        name: app-config
+        key: LOG_LEVEL
+```
+
+Edit the ConfigMap and nothing happens to a running pod. A process's OS environment is captured once, at `exec` — the kernel gives you no way to change it afterwards. Kubernetes knows this: changing a Deployment's `env` triggers a rollout, i.e. new pods. "Live env vars" on Node are not a missing feature; they are physically impossible.
+
+That's why declaring it is a mistake the library points out:
+
+```ts
+const logLevel = knob({
+  key: "LOG_LEVEL",
+  schema: z.enum(["debug", "info", "warn", "error"]),
+  exposure: "public",
+  freshness: "live",
+  sources: [{ env: "LOG_LEVEL" }],
+  // dev-mode warning: "live" on an env source is a no-op on Node —
+  // a running process's environment never changes. Use a file source.
+});
+```
+
+(The same warning fires on Cloudflare Workers, where `env` is fixed per deployment — `live` is a no-op there too.)
+
+## Mount config as files
+
+ConfigMap and Secret volume mounts *do* update in place: the kubelet writes the new generation into a `..data` directory and swaps a symlink, atomically, for the whole mount at once. Updates typically land within the kubelet sync period (about a minute by default).
+
+```yaml
+# deployment.yaml — directory mounts, updated in place by the kubelet
+volumes:
+  - name: app-config
+    configMap:
+      name: app-config
+  - name: db-creds
+    secret:
+      secretName: db-creds
+containers:
+  - name: api
+    volumeMounts:
+      - name: app-config
+        mountPath: /etc/app-config
+        readOnly: true
+      - name: db-creds
+        mountPath: /etc/db-creds
+        readOnly: true
+```
+
+One trap to know before anything else:
+
+```yaml
+# TRAP — a subPath mount is copied ONCE at container start and NEVER updated.
+# The ..data symlink swap happens in the volume; a subPath copy is outside it.
+volumeMounts:
+  - name: app-config
+    mountPath: /etc/app-config/LOG_LEVEL
+    subPath: LOG_LEVEL   # this file is frozen for the life of the container
+```
+
+Mount the directory, not individual keys via `subPath`.
+
+## Declare the live knobs
+
+```ts
+import { z } from "zod";
+import { knob, defineKnobs } from "knobs";
+
+export const logLevel = knob({
+  key: "LOG_LEVEL",
+  schema: z.enum(["debug", "info", "warn", "error"]),
+  doc: "Runtime log verbosity; tunable without a rollout",
+  exposure: "public",
+  sources: [{ file: "/etc/app-config/LOG_LEVEL" }],
+  freshness: "live",
+});
+
+export const dbHost = knob({
+  key: "DB_HOST",
+  schema: z.string().min(1),
+  doc: "Postgres host; the platform team rotates it together with DB_PASSWORD",
+  exposure: "public",
+  sources: [{ file: "/etc/db-creds/DB_HOST" }],
+  freshness: "live",
+});
+
+export const dbPassword = knob({
+  key: "DB_PASSWORD",
+  schema: z.string().min(16),
+  doc: "Postgres password; rotated together with DB_HOST",
+  // exposure defaults to "secret" — fail closed
+  sources: [{ file: "/etc/db-creds/DB_PASSWORD" }],
+  freshness: "live",
+});
+
+export const dbKnobs = defineKnobs([dbHost, dbPassword]);
+```
+
+Descriptors stay inert: declaring `freshness: "live"` performs zero I/O and starts no watcher. Nothing happens until you bind.
+
+## Bind once, poll on read
+
+```ts
+import { bind } from "knobs";
+import { fromFiles } from "knobs/node";
+
+export const live = bind(
+  [logLevel, dbHost, dbPassword],
+  [fromFiles({ maxStalenessMs: 2_000 })], // default is ~1s for files
+  {
+    onInvalid(k, _raw, issues) {
+      // keep-last-good has already happened by the time this fires;
+      // this hook exists so a bad rotation pages a human.
+      // For secret knobs, issues carry counts and paths only — never
+      // validator messages, never values.
+      alerting.page("config-invalid", { key: k.key, issueCount: issues.length });
+    },
+  },
+);
+// Because a bound knob is freshness:"live", bind returns a LiveBinding —
+// a distinct type, deliberately NOT assignable where a Snapshot is expected.
+```
+
+Binding is still eager over the bound subset: if the volume isn't mounted, boot dies right here with one aggregated `MissingConfigError` naming every missing knob — not three crashes spread over the first hour of traffic.
+
+After that, freshness is **poll-on-read**. `live.get(logLevel)` re-reads the raw file only if the last read is older than `maxStalenessMs`, and re-runs the validator only when the raw bytes actually changed (memoize-by-raw — zod runs once per rotation, not once per request). There are no background loops, timers, or `fs.watch` handles in core, ever: a knob nobody reads is never re-read, and an idle process does exactly nothing.
+
+## Pin a Snapshot per request
+
+Handlers should not watch config drift mid-request. Pin once at the edge:
+
+```ts
+app.use((req, _res, next) => {
+  req.cfg = live.snapshot(); // pinned, immutable Snapshot for this request
+  next();
+});
+
+app.get("/orders", (req, res) => {
+  const level = req.cfg.get(logLevel); // same answer for the whole request
+  // ...
+});
+```
+
+Everything downstream of the middleware sees one coherent world. And because cross-package APIs are typed against `Snapshot` and `Scope` — never `LiveBinding` — the compiler stops you from handing a factory something that can shift under it: pass `req.cfg` or `req.cfg.pick(dbKnobs)`, not `live`.
+
+## Rotating pairs without tearing
+
+The platform team rotates `DB_HOST` and `DB_PASSWORD` together, in one update to the `db-creds` Secret. Here's the failure mode with naive independent reads:
+
+```ts
+// TORN PAIR — two independent reads can land on opposite sides of a re-read:
+const host = live.get(dbHost);          // old host
+// ... an await, or just the staleness window elapsing ...
+const password = live.get(dbPassword);  // new password
+// Result: new password presented to the old host. Auth failures until the
+// next unlucky alignment resolves itself.
+```
+
+The fix is the pin you already have. `live.snapshot()` performs a **single coherent pass per source** — one read of the `db-creds` mount serves both knobs:
+
+```ts
+const pinned = live.snapshot();          // one pass over /etc/db-creds
+const host = pinned.get(dbHost);         // both values come from that pass:
+const password = pinned.get(dbPassword); // old+old or new+new, never mixed
+```
+
+Kubernetes cooperates: the `..data` symlink swap replaces the whole directory in one step, so a single pass through the mount observes exactly one generation of the pair.
+
+## Rebuild the pool on epoch()
+
+First, the trap. Live freshness cannot help a value that is consumed once:
+
+```ts
+// TRAP — the value is read at construction and captured forever.
+// freshness:"live" changes nothing about what this Pool dials tomorrow.
+const pool = new Pool({
+  host: live.get(dbHost),
+  password: live.get(dbPassword),
+});
+```
+
+Live values only help code that re-reads them. Long-lived objects need a rebuild trigger, and that trigger is `epoch()` — a monotonic per-knob counter that bumps only when an *accepted* (validated) value changes:
+
+```ts
+import { Pool } from "pg";
+
+let pool: Pool | undefined;
+let poolEpochs = "";
+
+export function getPool(): Pool {
+  const epochs = `${live.epoch(dbHost)}:${live.epoch(dbPassword)}`;
+  if (!pool || epochs !== poolEpochs) {
+    const pinned = live.snapshot(); // coherent host+password pair
+    void pool?.end();
+    pool = new Pool({
+      host: pinned.get(dbHost),
+      password: pinned.get(dbPassword),
+    });
+    poolEpochs = epochs;
+  }
+  return pool;
+}
+```
+
+A rewrite of identical bytes doesn't bump the epoch; a rotation that fails validation doesn't either — so the pool never churns on noise. Note what this is *not*: there is no `watch()`, no `subscribe()`, no change callback, by design. You check the epoch on a read path you already execute. If your process has no such path, it also has no live behavior — which is the honest outcome for a core that runs no timers.
+
+## Keep-last-good, and when to throw instead
+
+After boot, an invalid rotation does not take you down. If someone ships an empty `DB_HOST`, `live.get(dbHost)` keeps returning the last value that validated, `onInvalid` fires (your page above), and `health()` records the failure. Serving yesterday's config beats serving a 500.
+
+Keep-last-good needs a last good value to keep. A knob that has *never* validated has nothing to fall back on:
+
+```ts
+// A half-lazy binding presence-checks eagerly but defers validation to
+// first read. The file exists — but a botched rotation left garbage in it:
+const lazy = bind.lazy([dbHost, dbPassword], [fromFiles()]);
+
+lazy.get(dbPassword);
+// NoValidValueError: DB_PASSWORD has never produced a valid value
+```
+
+For values where a stale answer is *worse* than failing — a short-lived signing key, say — flip the default with the per-knob `onInvalid: "throw"` opt-in: reads surface the failure instead of serving the last-good value.
+
+## Wire health() to a liveness probe
+
+Keep-last-good keeps you serving; `health()` keeps the degradation visible. It reports per-knob staleness and the last validation error, with secret values never appearing in the report:
+
+```ts
+app.get("/healthz", (_req, res) => {
+  const report = live.health(); // per-knob staleness + last validation error
+  const failing = Object.values(report).filter((entry) => entry.lastError);
+  res.status(failing.length ? 503 : 200).json(report);
+});
+```
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 15
+```
+
+"Still up" and "healthy" are different claims, and the probe policy is where you arbitrate between them: a pod that has been serving hour-old config because every rotation since has failed validation is exactly the kind of quiet rot a `failureThreshold` should eventually recycle.
+
+## What live does not give you
+
+Stated plainly, because every guarantee has a boundary:
+
+- **No push, no subscriptions.** Freshness is poll-on-read only. There is no `watch()`, `onChange`, or event stream, and there never will be a background loop in core. For provider-backed values (SSM, Vault-style functions), `refresh(live)` is the explicit re-pull: it returns a *new* pinned `Snapshot`, all-or-nothing on partial source failure (opt-in `partial: "keep-old"`), single-flight coalesced.
+- **No construction-time magic.** Objects that consume a value once (pools, SDK clients) capture it forever; the `epoch()`-keyed rebuild above is the pattern, not an optional nicety.
+- **No live env vars.** OS process environments don't change; on Kubernetes that path is a pod restart. `live` plus an env source is a dev-mode warning, not a capability.
+- **No live on workerd.** The Workers `env` bag is fixed per deployment; `live` is a no-op there (dev warning).
+- **No help against `subPath`.** The library reads what the kubelet writes. A `subPath` mount is frozen at container start, and no amount of polling revives it.
+- **Not a feature-flag system.** No targeting, no percentage rollouts, no per-user evaluation — that's a flag service's job, and a declared non-goal here.

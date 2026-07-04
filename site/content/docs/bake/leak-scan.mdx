@@ -1,0 +1,150 @@
+---
+title: Leak scan
+description: The allowlist scan that audits every emitted client asset for secret material — and an honest account of exactly what it cannot see.
+---
+
+Every `knobs bake` run ends with a leak scan of the client target's emitted artifacts, and `knobs bake --check` fails CI on any unwaived finding. The scan is the **last** layer of bake's defense stack, not the first — it sits behind the required targets declaration, generated-module-only delivery, the no-secret-sources browser entry, the AST lint that bans raw `process.env` / `import.meta.env` reads in client-designated code, and the coverage report. Its job is to catch what slipped past all of those, and it is designed around one hard rule: **it never needs, and never prints, a secret value.**
+
+## Allowlist, not blocklist
+
+The classic secret scanner is a blocklist: give it your real secret values (or regexes derived from them) and grep the build output. That model has three structural problems:
+
+- **It puts plaintext secrets in CI.** To grep for a value you must have the value. Bake never resolves secret values — that is what preserves build-once-deploy-many and keeps production credentials out of your build system. A blocklist scanner would undo that guarantee just to check for it.
+- **It only finds secrets it already knows about.** A token someone pasted straight into a component — never declared as a knob, never registered anywhere — is invisible to a blocklist.
+- **A naive finding message prints the secret into CI logs.** "Found `sk_live_9f2c…` in `checkout.js`" turns the leak detector into the leak.
+
+The leak scan inverts the model. Bake already knows the complete set of values that are *allowed* in client artifacts: the resolved literals of the `exposure: "public"` knobs listed in the manifest's client target. That set is the allowlist. Any high-entropy string in the output that is **not** on it is a finding — no secret material required, and hand-rolled non-knob secrets are caught precisely *because* nobody registered them.
+
+```ts
+// knobs/api.ts
+import { knob } from "knobs";
+import { z } from "zod";
+
+export const apiBaseUrl = knob({
+  key: "API_BASE_URL",
+  schema: z.string().url(),
+  exposure: "public",              // registered → its baked literal is allowlisted
+  doc: "Public API origin, safe to embed in client bundles",
+});
+
+export const stripeSecretKey = knob({
+  key: "STRIPE_SECRET_KEY",
+  schema: z.string().startsWith("sk_"),
+  doc: "Stripe server-side key",
+  // exposure defaults to "secret" — bake resolves its key NAME, never its value
+});
+```
+
+```ts
+// config.manifest.ts — side-effect-free; bake runs it in a constrained context
+import { apiBaseUrl } from "./knobs/api";
+import { allServerKnobs } from "./knobs/server";
+
+export default {
+  targets: {
+    client: [apiBaseUrl],          // deny-by-default: only what is listed here is public
+    server: allServerKnobs,
+  },
+};
+```
+
+## What gets scanned
+
+All emitted assets of every client target, not just the JavaScript:
+
+- **JS/MJS chunks, HTML, JSON, CSS** — anything the bundler writes for the client.
+- **Sourcemaps, including `sourcesContent`.** Sourcemaps are routinely deployed to production or uploaded to error trackers, and `sourcesContent` carries the *original* source — a leak can be minified beyond recognition in the chunk yet sit verbatim in the map.
+- **Decompressed `.gz` / `.br` twins.** Precompressed assets are the bytes a CDN actually serves. The scan decompresses and audits them independently, so a stale precompressed twin of a since-fixed file still fails the build.
+
+## Detection layers
+
+### 1. Unknown high-entropy strings
+
+Every string in the scanned assets is entropy- and length-gated; survivors are checked against the registered public values. Unknown means finding. This is the layer that catches **define-inlining** — the failure mode where a bundler's `define` / DefinePlugin folds a *static* env member expression into a literal:
+
+```ts
+// client/analytics.ts — the AST lint should catch this first, but suppose it was suppressed:
+const token = process.env.ANALYTICS_WRITE_KEY;
+// esbuild define folds the static member expression into:
+//   const token = "wk_live_9f2cd41a…";   ← now a literal sitting in the chunk
+```
+
+The scan has no idea what `ANALYTICS_WRITE_KEY` resolves to. It doesn't need to: the folded literal is high-entropy and unregistered, so it's flagged. This is also why bake's own generated *server* wiring module only ever reads env by **computed** access — `process.env[keys[i]]` — never static `process.env.KEY`: static member expressions are exactly what define folds into literals.
+
+### 2. Secret key names adjacent to env access
+
+Bake never sees secret values, but the descriptors give it every secret key **name**. The scan matches those names as **whole tokens** appearing adjacent to env-access patterns (`process.env.X`, `env["X"]`, `import.meta.env.X`).
+
+```ts
+// client/pages/admin.tsx — flagged: secret key name next to an env read
+const key = import.meta.env.STRIPE_SECRET_KEY;
+```
+
+Both constraints matter:
+
+- **Whole tokens.** A secret named `PORT` must not match `viewport` or `transport`. Substring grep would drown this layer in noise; token boundaries keep it usable.
+- **Adjacency.** A key name in a docstring, a route path, or a CONFIG.md excerpt is not a finding. The name next to an env-access pattern is.
+
+### 3. Build-nonce canary for the server wiring module
+
+The optional server wiring module that bake generates embeds a random nonce, fresh per build. The scan then looks for that nonce in every client artifact. A hit means the *server* module — with its full roster of secret key names and its env-access machinery — survived into the client bundle, usually via a misconfigured entry graph or a shared-chunk boundary. No string heuristic would reliably catch that; the canary makes it deterministic.
+
+## Gating: entropy, length, and the unscannable secret
+
+Findings must be actionable, so candidates below the entropy/length thresholds are dropped rather than reported — the scan **never hard-fails on noise**. The honest cost of that choice: some secrets are *unscannable*. A secret whose value is `"8080"` is indistinguishable from a port number, an HTTP status, or a viewBox dimension; no threshold can separate it from ordinary code.
+
+Bake doesn't paper over this. When a secret knob's declared schema admits shapes the scan can never distinguish from code — numeric outputs like `z.coerce.number()`, very short strings — bake emits an explicit warning at build time instead of pretending coverage exists:
+
+```
+warn  INTERNAL_PROXY_PORT is declared secret, but its schema admits values too
+      short/low-entropy for the leak scan to detect. The scan cannot protect this
+      knob. Structural controls (no-secret-sources browser entry, generated-module
+      delivery, AST lint) remain your protection here.
+```
+
+## Reading a finding
+
+Findings carry the asset location, the nearest knob key, and **scrubbed** context. Values are masked by construction — there is no verbosity flag that prints them:
+
+```
+✗ leak-scan: 2 findings in target "client"
+
+  [high-entropy]  dist/assets/checkout-Bx31q.js:1:48211
+    unregistered high-entropy string (41 chars)
+    nearest knob by key-name context: STRIPE_SECRET_KEY
+    …headers:{authorization:"Bearer «REDACTED · 41 chars»"}…
+
+  [key-name]      dist/assets/admin-K2m0.js:1:1180
+    secret key name "STRIPE_SECRET_KEY" adjacent to env access (import.meta.env)
+    fix: read this behind a server binding, or restore the AST lint on this entry
+
+  3 candidates below entropy threshold (dropped)
+  1 waiver active (expires 2026-09-30)
+```
+
+In CI, the same scan runs under the drift gate:
+
+```bash
+knobs bake --check   # fails on generated-output drift OR any unwaived leak-scan finding
+```
+
+## Waivers
+
+False positives exist — a public checksum, a vendored SDK's embedded sample token. Suppressing them is an **explicit, audited** act, never a config default: a waiver pins one specific finding (asset plus candidate fingerprint), names an owner and a reason, and carries an expiry. Expired waivers fail the build exactly like the finding they covered. Active waivers are listed in the scan report and the emitted `manifest.json`, so they are visible in code review and can't accumulate silently.
+
+## Honest boundaries
+
+The scan is defense-in-depth behind the structural layers. It is **never the primary gate**, and these are the edges of what it can see:
+
+- **Request-time SSR payloads are invisible to any build-time scan.** A server handler that puts a secret into per-request props produces bytes that never exist at build time. That hole is closed at *runtime* by the serialization guard, not by the scan: secret values throw on `JSON.stringify` / `structuredClone`, and `cfg.toJSON()` redacts secrets by construction.
+
+  ```ts
+  // SSR handler — this payload never reaches the wire:
+  const props = { stripeKey: cfg.get(stripeSecretKey) };
+  JSON.stringify(props);
+  // throws ExposureError — the runtime serialization guard, not the leak scan
+  ```
+
+- **Dev-server output is never scanned.** `knobs bake --watch` keeps the generated modules fresh during development, but dev servers serve transformed modules from memory; there are no emitted artifacts to audit. Only production build output is covered — do not treat a clean dev session as a clean scan.
+
+- **Encodings and string-splitting evade it.** Base64 in two halves, char-code arrays, concatenation at runtime — any build-time string scan is trivially defeated by code that *intends* to exfiltrate. The scan targets mistakes, not adversaries. Malicious in-process code is outside its threat model (and outside `pick()`'s, too); the structural layers — deny-by-default client allowlist, no-secret-sources browser entry, generated-module-only delivery, the AST lint — are what make the honest-mistake path hard, and the scan is the net underneath them.

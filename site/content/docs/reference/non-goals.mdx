@@ -1,0 +1,215 @@
+---
+title: Non-goals
+description: The features this library deliberately refuses to ship, and the reasoning behind each refusal.
+---
+
+A configuration library earns trust as much by what it refuses to do as by what it does. Every exclusion below was adversarially litigated during design, and every one protects a gate the library refuses to trade away: browser-first, bundle-frugal, contract-not-dependency, no background machinery. The scope line is a feature. Each entry states what is out, why, and what to reach for instead.
+
+One sentence decides half of them:
+
+> If it can change while the process runs, it is state, not config.
+
+The single carve-out is explicitly declared `freshness: "live"` on re-readable sources — files and providers — and even that is poll-on-read with no background loops.
+
+## Feature flags, targeting, subscriptions
+
+Percentage rollouts, per-user targeting, kill switches keyed on session attributes — these change per request, per user, mid-process. By the litmus above, that is state, and state belongs to a flag service with its own delivery pipeline. A flag SDK runs perfectly well *next to* your config; it does not belong *inside* it.
+
+There is also a mechanical reason: core runs no background loops, timers, or watchers, ever. A subscription API implies a push channel, and a push channel implies machinery that keeps a process awake. So there is no `subscribe()`, no `onChange` callback — by design. What exists instead is a monotonic epoch and per-request pinning:
+
+```ts
+import { knob, bind } from "knobs";
+import { fromFiles } from "knobs/node";
+import { z } from "zod";
+
+// In scope: an operational dial that ops flips by updating a mounted file.
+const maintenanceMode = knob({
+  key: "MAINTENANCE_MODE",
+  schema: z.enum(["on", "off"]),
+  exposure: "public",
+  sources: [{ file: "/etc/app/maintenance" }],
+  freshness: "live",
+  doc: "Serve the maintenance page instead of the app",
+});
+
+const live = bind([maintenanceMode], [fromFiles()]);
+
+app.use((req, res, next) => {
+  const pinned = live.snapshot(); // per-request pin — the documented pattern
+  if (pinned.get(maintenanceMode) === "on") return res.status(503).end();
+  next();
+});
+```
+
+A slow-moving operational dial in a ConfigMap-mounted file is config. "Show the new checkout to 10% of EU users" is not.
+
+## .env parsing in core
+
+Core does not read `.env` files, and never grows a dotenv dependency. The runtimes already own this job — and one of them actively fights libraries that try to do it too. Bun loads `.env` natively, so a library that self-loads produces double-loading conflicts and precedence fights. Node has had this built in for a while:
+
+```bash
+# The runtime already owns .env loading:
+node --env-file=.env --env-file=.env.local server.js
+
+# Bun loads .env natively — a self-loading library just gets in its way:
+bun run server.ts
+```
+
+`bind` reads whatever the runtime placed in the environment; how it got there is not core's business:
+
+```ts
+import { bind } from "knobs";
+import { fromProcessEnv } from "knobs/node";
+
+// Works identically whether env came from --env-file, Bun, your PaaS,
+// or dotenv preloaded by your own bootstrap.
+const cfg = bind(appKnobs, [fromProcessEnv()]);
+```
+
+If you want dotenv semantics that a runtime does not provide, dotenv is a userland provider — a source is just a function, so wrapping it is a few lines you own. Note that the `.env` file format is still a first-class *output*: `knobs bake` generates `.env.example` from your descriptors' `key` and `doc` fields. Core writes the template; it never parses the file.
+
+## Secret-manager clients
+
+Core ships no AWS SSM, Secrets Manager, Vault, or GCP client. Those SDKs are heavy, churny, and platform-specific — any one of them would end the zero-dependency budget and the browser-safe universal entry in a single `import`. Providers are functions; adapters are community packages:
+
+```ts
+import { load } from "knobs";
+import { fromProcessEnv } from "knobs/node";
+import { fromSsm } from "@acme/knobs-ssm"; // community adapter — not part of core
+
+const cfg = await load(allKnobs, [fromProcessEnv(), fromSsm({ prefix: "/prod/app/" })]);
+
+cfg.get(dbUrl); // resolved once at load — every read after this is sync, forever
+```
+
+The async boundary is enforced, not advisory. An async source cannot sneak into the sync door:
+
+```ts
+bind(allKnobs, [fromSsm({ prefix: "/prod/app/" })]);
+// Compile error — bind() accepts sync sources only (kind discriminant).
+// If the types are defeated, runtime throws AsyncSourceInBindError.
+```
+
+## Sealed boxes, TTL, rotation, audit trails
+
+Excluded from v1, for three litigated reasons.
+
+**Scope creep.** TTLs, rotation schedules, and audit logs are the feature set of a secrets manager. Building a worse one inside a config library helps nobody; a real one already exists in your stack.
+
+**Boxes are ceremony.** Every downstream SDK takes strings — `new Pool({ connectionString })`, `new Stripe(apiKey)`. A hypothetical `Sealed` wrapper would be unwrapped at every single call site, which means the "protection" evaporates exactly where the value is used. What actually protects secrets here is structural: `exposure: "secret"` is the fail-closed default, the browser entry has no secret-capable sources by construction, bake never resolves secret values, and the serialization guard closes the SSR-payload leak that boxes only pretended to:
+
+```ts
+cfg.explain(apiKey);              // provenance with the value redacted
+cfg.toJSON();                     // secrets redacted by construction
+structuredClone(cfg.get(apiKey)); // throws — serialization guard, no box required
+```
+
+**Rotation cannot be sync-read-safe.** A token that expires mid-process would force `get()` to block, go async, or hand out a stale credential — each of which breaks the contract that all reads are sync after `load()`. A credential that rotates every 15 minutes fails the litmus: it is state. Fetch it with your vault's SDK. For config that legitimately re-resolves, rotation is spelled honestly as a deliberate act:
+
+```ts
+// Re-resolve at a moment you choose — not on a timer core hides from you:
+const next = await refresh(live); // new pinned Snapshot; all-or-nothing on partial failure
+```
+
+## Environment-cascade DSL
+
+There is no per-knob environment map, no `NODE_ENV` switch inside descriptors, no cascade file format. Environments are just different sources and different overrides — and ordered `sources` already states precedence in the open, where a cascade DSL would hide it:
+
+```ts
+const logLevel = knob({
+  key: "LOG_LEVEL",
+  schema: z.enum(["debug", "info", "warn", "error"]),
+  exposure: "public",
+  // The cascade, spelled once, in order:
+  sources: [{ env: "LOG_LEVEL" }, { file: "/etc/app/log-level" }, { literal: "info" }],
+});
+```
+
+Staging and production run the *same descriptor* against different environment contents. Nothing in the descriptor knows which environment it is in — which is precisely what keeps `identityOf(logLevel)` stable across every deploy target, and keeps descriptors JSON-round-trippable instead of mini-programs.
+
+## Runtime registry
+
+No global `provide()`, no ambient binding, no side-effectful registration at import time. Ever. Three reasons:
+
+- **Tree-shaking dies.** A registry entangles every knob with every other; importing one descriptor must cost nothing, because libraries ship their knobs as inert, zero-cost imports.
+- **Import order becomes load-bearing.** Registration-at-import is exactly the side-effect bug class the inert-descriptor rule exists to kill.
+- **DI honesty.** With no registry, a dependency structurally *cannot* redirect where your secrets come from at import time. Wiring happens once, at your composition root, in code you review.
+
+Reads resolve against an explicit binding — never an ambient lookup:
+
+```ts
+const cfg = bind([dbUrl], [fromProcessEnv()]);
+
+cfg.get(dbUrl);    // bound here — fine
+cfg.get(poolSize); // UnboundKnobError — not in this binding, and no registry to fall back to
+```
+
+"What config exists?" is still answerable — at build time. Enumeration is bake's job, and the manifest is the explicit, PR-reviewable registry:
+
+```ts
+// config.manifest.ts
+export default {
+  targets: {
+    server: [...allKnobs],
+    client: [...appPublicKnobs],
+  },
+};
+```
+
+## Derived-knob expression language
+
+No `derive()` knob, no expression strings in descriptors. Derivation is code, and a derivation DSL re-implements your language badly. It would also break the contract-not-dependency gate: descriptors round-trip as JSON, and closures do not serialize — while expression *strings* would be an eval surface. Compute derived values in the host language:
+
+```ts
+const cfg = bind([dbHost, dbPort], [fromProcessEnv()]);
+
+const connectionString = `pg://${cfg.get(dbHost)}:${cfg.get(dbPort)}/app`;
+```
+
+For live sources, the recompute-when question already has an answer — the epoch, plus user code:
+
+```ts
+let seen = -1;
+let pool: Pool | undefined;
+
+function getPool() {
+  const now = live.epoch(dbHost);
+  if (!pool || now !== seen) {
+    const pinned = live.snapshot(); // one coherent pass — host and port cannot tear
+    pool = new Pool({ host: pinned.get(dbHost), port: pinned.get(dbPort) });
+    seen = now;
+  }
+  return pool;
+}
+```
+
+## Reachability-analysis codegen
+
+Bake does not scan your bundle to discover which knobs the client uses. It requires an explicit manifest, because static reachability analysis is unsound in both directions — and for a mechanism guarding a trust boundary, both failure modes are disqualifying:
+
+- **False negatives.** Dynamic access and conditional imports hide real usage; a knob the analyzer missed is config that is simply absent in production.
+- **False positives.** Dead-but-imported code inflates the set, shipping public values the client never needed and silently widening the artifact.
+
+A human-written target list is the auditable artifact: your security review reads the manifest, not an analyzer's opinion. Analysis is demoted to what it is good at — an advisory signal:
+
+```bash
+knobs bake --check
+# CI drift gate. The coverage report compares the manifest against
+# client-reachable knobs and flags drift in either direction —
+# a lint on top of the explicit manifest, never a substitute for it.
+```
+
+## Instead-of, at a glance
+
+| You want | Out of scope because | Reach for |
+| --- | --- | --- |
+| Feature flags, targeting | State, not config; core runs no loops | A flag SDK alongside; `freshness: "live"` files for ops dials |
+| `.env` parsing | Runtimes load env natively; Bun fights self-loaders | `node --env-file`, Bun's loader, dotenv as a userland provider |
+| Vault/SSM clients in core | Zero-dep, browser-safe core | Community providers via `load()` |
+| Sealed boxes, TTL, rotation | SDKs take strings; sync reads; secrets-manager scope | Serialization guard, redaction, `refresh()`, a real secrets manager |
+| Environment cascades | Environments are sources plus overrides | Ordered `sources`; same descriptor, different deploys |
+| Runtime registry | Tree-shaking, import-order side effects | Explicit `bind` at the composition root; the bake manifest |
+| Derived-knob expressions | Derivation is code; JSON round-trip | Plain functions; `epoch()`-keyed rebuilds |
+| Bundle-scanning codegen | Unsound in both directions | Explicit manifest plus the `bake --check` coverage report |
+
+Every "no" on this page keeps a "yes" cheap: inert descriptors stay inert, the browser entry stays secret-free by construction, the bundle stays small, and the contract stays a contract instead of a dependency.

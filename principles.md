@@ -1,0 +1,324 @@
+# Principles
+
+> **Status: design phase.** No code exists yet. This document is the constitution for the
+> project: every hard constraint, every pitfall we have identified (many through adversarial
+> design review), and the full security model. Any future feature or PR must be checked
+> against this file first.
+>
+> **Naming is not final.** Throughout the design docs the primitive is provisionally called
+> `knob` and the package `knobs`. Parked candidates: knob/panel, notions, bobbin, loom,
+> confit, confetti, grain, mote, weft, dial, setpoint, filament, quark.
+> We deliberately avoid `atom` — it imports jotai/recoil expectations (reactivity,
+> subscriptions) that this library refuses by design.
+
+## 1. What this project is
+
+Configuration today ships as runtime-focused, monolithic blobs: one god-object that is
+loaded, parsed, and validated in full even if a given entrypoint reads one value. This
+project makes configuration **atomic**: each config value is an inert, importable,
+documented, validated descriptor, consumable in any runtime (Node, browsers, edge workers,
+Deno, Bun, tests), and groupable without the group becoming a monolith.
+
+The headline is **not** tree-shaking (client inlining already gives zero-byte config; the
+validator is the real bundle payload). The headline is:
+
+1. **One config contract, explicitly bound per runtime** — the same descriptor binds to
+   `process.env` on Node, the per-request `env` bag on Cloudflare Workers (which
+   import-time-validating incumbents structurally cannot see), baked literals in browsers,
+   and literal snapshots in tests.
+2. **Secrets as first-class citizens** — a fail-closed exposure model enforced structurally,
+   at build time, and at runtime.
+3. **A testing story with zero `process.env` mutation.**
+
+First consumer: StitchAPI, which will consume this as a **devDependency** — its own
+build-time constants get baked to literals, preserving its zero-runtime-dependency
+guarantee.
+
+## 2. Hard constraints (the gates)
+
+Every feature must pass all of these. "It would be convenient" never overrides a gate.
+
+- **P1 — The descriptor is inert data.** Constructing a config bit performs zero I/O, zero
+  validation, zero registration, zero side effects. It is frozen and detected by a
+  structural brand field (`$knob`), never `instanceof` (dual-package hazard).
+- **P2 — The descriptor round-trips as JSON.** Everything except the validator function
+  serializes. Non-JSON values in descriptor fields (`default`, `sources`) are a
+  construction-time `TypeError`.
+- **P3 — Values exist only inside explicit bindings.** No ambient global binding, no
+  process-global fallback, no module-scope cache, no cache on the descriptor object.
+  A read outside an active binding is a named error — never a silent fallback (on Workers a
+  fallback means serving tenant A's config to tenant B).
+- **P4 — BYO validation via Standard Schema only.** zod/valibot/arktype all work; the
+  library has no validator dependency and **never assumes introspection** — Standard Schema
+  exposes only `validate()` (StitchAPI ADR 0011 lesson). Schema identity uses the
+  ADR-0004-style ladder (vendor fingerprint → explicit `version` field) plus
+  revalidate-on-fallback as the always-on floor.
+- **P5 — Browser-first, runtime-universal core.** No Node APIs in the core entry. Node-only
+  capabilities (`process.env`, file sources) live in subpath entries. Sources are declared
+  on the descriptor as **data refs**; source **implementations** are injected at bind.
+- **P6 — Bundle-frugal.** Zero runtime dependencies. Measured per-feature size budgets
+  enforced in CI, published in the README. Subpath-split so the sync read path stays tiny.
+- **P7 — Fail-closed exposure.** `exposure` defaults to `"secret"`. `"public"` is the
+  explicit opt-in. The browser entry ships **no secret-capable sources at all** — this is a
+  structural guarantee, not a policy check.
+- **P8 — Eager validation over the explicitly bound subset is the default.**
+  `bind(knobs, sources)` validates exactly the listed set, now, with one aggregated error.
+  The lazy door is **half-lazy**: `bind.lazy()` still resolves raw *presence* eagerly
+  (missing vars die at bind) and defers only validator execution. The truly-zero door is
+  named `bind.unchecked()` so the name carries the warning.
+- **P9 — `Snapshot` is always pinned and immutable.** It is the only type cross-package APIs
+  accept. Liveness lives in a *different type* (`LiveBinding`) whose `.snapshot()` pins.
+  `pick()` always pins by default.
+- **P10 — No side effects by default.** No background loops, timers, pollers, or watchers —
+  ever, in core. Freshness is poll-on-read or an explicit `refresh()`. (Single-flight
+  deduplication of concurrent `refresh()` calls is allowed: it removes work, it doesn't
+  create it.)
+- **P11 — Content-addressed identity with a frozen field list.** Identity =
+  `{ key, exposure, sources (order-significant), default (presence + value), schemaId? }`,
+  canonicalized as `knobv1|` + RFC 8785 JSON, hashed with xxh128. The hash is an index, not
+  a security boundary; structural equality of the identity subset is authoritative.
+  `doc`, examples, deprecation metadata, and **all unknown fields** are cosmetic — excluded,
+  so a changelog edit can never make two package versions unbindable.
+- **P12 — `pick()` runtime-restricts.** Narrowing is enforced at runtime (a new scope table
+  containing only picked entries) and in the type system (a brand only `pick()` produces;
+  the root `Snapshot` is deliberately *not* assignable to `Scope`). This is least-privilege
+  and mistake-prevention — see §4 for what it is *not*.
+- **P13 — Bake is the only client delivery channel.** Client-targeted code receives config
+  exclusively via the bake-generated module. The manifest must declare targets explicitly;
+  a declared client target with no completed bake fails the build.
+- **P14 — Bake never resolves secret values.** It resolves public values and secret *key
+  names* only. Secrets are validated at runtime, where the value actually lives. This also
+  preserves build-once-deploy-many and keeps prod secrets out of CI.
+- **P15 — Emitted env access must be inline-proof.** Generated server wiring reads
+  `process.env[keys[i]]` (dynamic computed property), never `process.env.KEY` — static
+  member expressions get folded into literals by DefinePlugin/`define` and leak.
+- **P16 — "If it can change while the process runs, it's state, not config."** The only
+  exception is a knob explicitly declared `freshness: "live"` over a *re-readable* source
+  (files, providers). Feature-flag targeting, streaming updates, and subscriptions are out
+  of scope forever.
+- **P17 — Honest claims.** Every guarantee we advertise states its boundary in the same
+  breath: what the leak scan cannot see, what `pick()` does not defend against, what "live"
+  cannot do on which runtime. A security story that overclaims is itself a vulnerability.
+
+## 3. Pitfalls we must not (re)introduce
+
+Catalogued from adversarial review. Each entry: the failure, then the rule that prevents it.
+
+### Evaluation & validation
+
+- **The monolith through the import graph.** A grouping construct that holds references to
+  all members re-creates the god-object at the bundler level even if evaluation is lazy —
+  and the boot ritual (`check(everything)`) re-imports every schema exactly where size
+  matters. *Rule:* groups are plain arrays declared near call sites; docs never show a
+  central all-knobs module imported by runtime code; enumeration is bake's job (build-time),
+  never a runtime registry.
+- **Lazy validation's 3am 500.** Pure-lazy binding converts deploy-time failures into
+  request-time failures on rarely-hit paths (the refund endpoint's key, unset for weeks).
+  *Rule:* eager-over-bound-subset is the default; the lazy door is half-lazy (presence still
+  eager); `bind.unchecked` is the only fully deferred form and is named to deter.
+- **Boot-validated green, invalid at 3am.** A `live` knob re-validates when its raw value
+  changes; an operator typo would make `get()` throw deep in request handling where nothing
+  catches config errors. *Rule:* invalid-after-boot defaults to **keep-last-good + report**
+  (`onInvalid` hook, `health()` observability); per-knob `"throw"` opt-in for
+  stale-is-worse-than-down values; keep-last-good degrades to a named `NoValidValueError`
+  when no valid value has ever existed in this process.
+- **Async validators detonating in sync paths.** Standard Schema's `validate()` may legally
+  return a Promise, and async-ness can be input-dependent — one probe at bind proves
+  nothing. *Rule:* every validation site (eager bind, lazy first-read, live re-validation)
+  checks for a thenable and throws `AsyncValidatorInSyncBindingError` naming the knob and
+  the remediation (`load()`/`refresh()` or a sync validator).
+- **Shared mutable validated output.** Memoization hands every caller the same object; one
+  caller's `hosts.pop()` corrupts config for the whole process. *Rule:* validated outputs
+  are contractually immutable — deep-frozen in dev builds, documented as frozen in prod;
+  validators must be pure functions of the raw string.
+- **Defaults that bypass validation.** A `default` that never passes through the schema
+  explodes months later on the one path that uses it. *Rule:* defaults are validated at
+  bind exactly like sourced values; there is no privileged path.
+- **Cache keys that lie.** Memoize-by-raw must distinguish "raw absent → default used" from
+  "raw equals the stringified default", and must record *which* source resolved (fallback
+  chains change provenance without changing the string). *Rule:* cache key =
+  `(resolvedSourceIndex, rawString | ABSENT)`.
+
+### Runtimes & freshness
+
+- **"Live" env vars are physically impossible on Node.** The OS environment block of a
+  running process never changes — k8s env edits require a pod restart. A `live` `{env}`
+  knob works in unit tests (which mutate `process.env`) and silently does nothing in
+  production. *Rule:* the docs and the pitch say "live = poll-on-read of a **re-readable**
+  source (files, providers)"; the real-world channel is k8s volume-mounted
+  ConfigMaps/Secrets (updated in place via the `..data` symlink swap — note `subPath`
+  mounts never update); `live` on an env source draws a dev-mode warning.
+- **Torn config.** Two reads of a live pair (DB host + password rotated together) inside
+  one request can observe different generations — first fetch hits the old host, the audit
+  write hits the new one. *Rule:* per-request pinning (`binding.snapshot()` in middleware)
+  is THE documented consumption pattern; pinning reads each source in a single coherent
+  pass (one file read serves all knobs from that file).
+- **Liveness poisoning the DI contract.** A library typed against `Snapshot` must be able
+  to assume value stability. *Rule:* the type split is load-bearing — a binding containing
+  any live knob is a `LiveBinding`, not assignable where `Snapshot` is expected; `pick()`
+  pins.
+- **Workers global-state trap.** Module-scope binding is impossible on workerd (no env
+  exists yet); stashing the first request's env serves it to every later request. *Rule:*
+  the workers entry takes `env` as an explicit bind argument inside the handler; per-request
+  eager bind is made ~free by a per-process validation cache keyed on
+  `(knob identity hash, rawString)`.
+- **The syscall amplifier.** Live file sources re-read on every `get()` — 3 knobs × 2k req/s
+  = 6k synchronous reads/s on the event loop. *Rule:* poll-on-read is throttled per source
+  (`maxStalenessMs`, default ~1s for files); one read per window serves all knobs fed by
+  that source.
+- **`refresh()` under-specification.** In-place swap tears config under consumers holding
+  the snapshot; partial provider failure yields a snapshot mixing new and old values;
+  thundering herds fire 200 concurrent SSM refreshes. *Rule:* `refresh()` returns a **new**
+  snapshot (the old one is never touched); all-or-nothing on partial failure (opt-in
+  `{ partial: "keep-old" }` for genuinely independent flag-style providers); single-flight
+  coalescing in core.
+- **Live buys nothing for constructed values.** `new Pool(cfg.get(dbUrl))` at boot never
+  sees a refresh; most real config consumption is construction-time. *Rule:* say so in the
+  docs (with the Pool example); ship `binding.epoch(knob)` — a monotonic counter — so user
+  code rebuilds derived state cheaply; no watch/subscribe API in core.
+
+### Identity & cross-package DI
+
+- **Schema-swap interchangeability.** The validator cannot be hashed, so two same-key knobs
+  with different schemas would collide silently and validation would depend on which copy
+  was bound. *Rule:* schemaId via the fingerprint/version ladder when available, plus the
+  always-on floor: any hash-fallback resolution **re-validates with the caller's schema**
+  (memoized per descriptor-hash × caller instance).
+- **Cosmetics in the identity hash.** Hashing `doc` makes two semver-distinct installs
+  unbindable over a changelog edit, with no remedy inside `node_modules`. *Rule:* the
+  identity field list is closed and versioned (`knobv1|`); everything else — including
+  unknown future fields — is cosmetic.
+- **Collisions that never meet.** Two bindings created in different modules never pass
+  through one `bind()` call, so bind-time collision detection cannot fire; a later `get()`
+  with the "wrong" twin produces a bare not-bound error hours from the cause. *Rule:*
+  `get()` has a three-way contract — hit / `UnboundKnobError` /
+  `DescriptorMismatchError` — and the mismatch error carries both canonical descriptors, a
+  field-level diff, and a paste-able `unify` snippet. Key-based resolution never silently
+  substitutes. An opt-in dev-mode registry warns on the first second-distinct-hash
+  construction per key.
+- **Dual-package canonicalization drift.** The config library itself duplicated at two
+  versions could hash byte-identical descriptors differently. *Rule:* canonicalization is a
+  frozen wire format (RFC 8785 over the closed field list); structural equality is
+  authoritative and the hash is only an index; `$knob` brand, never `instanceof`.
+- **`pick()` as a type-only fiction.** If narrowing is types-only, any callee holding the
+  root snapshot can mint a structurally identical descriptor and read anything — including
+  provider-resolved values it could never get from `process.env`. *Rule:* `pick()` builds a
+  runtime-restricted scope; non-members throw `NotInScopeError`; the `Scope` brand is the
+  only type library signatures accept.
+- **Import-time source spoofing.** A mutable global `provide()` lets any dependency
+  redirect a knob's source at import time. *Rule:* there is no global provide; providers
+  are supplied at bind, at the composition root, full stop.
+
+### Bundling & bake
+
+- **DefinePlugin folds "wiring" into values.** Emitting static `process.env.KEY` in
+  generated modules lets a consumer's blanket `define` inline the secret into the artifact.
+  *Rule:* P15 — dynamic computed access only.
+- **Fail-closed-by-missing-module has holes.** It only fails builds for code that imports
+  the generated module; hand-written `process.env.SECRET` in a client component and un-baked
+  second entrypoints sail through. *Rule:* the mandatory stack is: required `targets`
+  declaration → generated-module-only delivery → no-secret-sources browser entry → AST lint
+  banning raw env reads in client-designated code → bake coverage report (manifest vs
+  client-reachable knobs) → allowlist leak scan. No single mechanism is claimed as
+  sufficient.
+- **Trusting the package author's `exposure` for the app's bundle.** A sloppy or hostile
+  dependency can declare `exposure: "public"` over `{ env: "STRIPE_SECRET_KEY" }`. *Rule:*
+  client-target membership requires **app-level attestation** in the manifest
+  (`targets.client` enumerates knob groups explicitly) plus deny-by-default env-source
+  allowlisting for the client target. `exposure: "public"` is necessary, never sufficient.
+- **Build-once-deploy-many vs inlining.** Baking an env-varying value freezes the build
+  env's value into promoted artifacts. *Rule:* baked = constant-per-build by contract;
+  env-varying browser values are an explicitly documented open problem (runtime-injected
+  JSON), not something we pretend inlining solves.
+- **Bake executes the manifest.** Evaluating a user module graph at build time is the
+  build-time-RCE class StitchAPI already got bitten by (openapi codegen, PR #438). *Rule:*
+  the manifest must be side-effect-free (checked: knob construction is inert, so a manifest
+  that does I/O is detectable); bake runs it in a constrained context and treats it as
+  sensitive build input.
+- **Stale bake artifacts.** A library upgraded after baking silently serves stale-shaped
+  values. *Rule:* baked modules embed per-knob identity hashes; the generated shim verifies
+  on `get()` and throws `StaleBakeError` on skew.
+- **Registry side effects.** Any runtime "all knobs" registry breaks tree-shaking and
+  reintroduces import-order magic. *Rule:* enumeration happens only at bake time, from the
+  explicit manifest. There is no runtime registry, period.
+
+## 4. Security model
+
+### Threat model — stated honestly
+
+We defend against **accidental disclosure and mistake classes**: secrets reaching client
+bundles, logs, serialized payloads, error messages, docs artifacts, and CI output; wrong
+values crossing tenant/request boundaries; validation downgrades across package copies.
+
+We do **not** defend against hostile code running in the same process with access to the
+same ambient sources: a malicious dependency can always read `process.env` itself. `pick()`
+is least-privilege for mistakes and auditability (over-broad access becomes grep-able), not
+a sandbox. The only values that gain *real* confidentiality from scoping are non-ambient
+ones (provider-resolved: SSM, Vault) — and only if the root snapshot is never passed around.
+
+### Leak vectors and their controls
+
+| Vector | Control |
+| --- | --- |
+| Secret in client bundle via import | No-secret-sources browser entry (structural); bake-only delivery; guard lint; coverage report |
+| Secret inlined by bundler `define` | P15 dynamic computed env access — nothing statically foldable exists |
+| Hand-rolled `process.env.X` in client code | AST lint rule (raw env reads banned in client-designated code); allowlist scan catches the value |
+| Sourcemaps (`sourcesContent`), `.gz`/`.br` twins, HTML, JSON assets | Leak scan covers **all** emitted assets, decompresses known formats |
+| Request-time SSR payloads (`__NEXT_DATA__`, hydration JSON) | **Out of scope for any build-time scan** — closed at runtime: secret values throw on `JSON.stringify`/structured-clone |
+| Secrets echoed by validator error messages | For secret knobs, BYO validator text is untrusted: reports carry issue counts and paths only, never messages or values |
+| Secrets in CI logs via the scanner itself | Scan findings report location + knob key with scrubbed context — never the value; bake never holds secret values at all (P14) |
+| Config topology recon (env names, provider paths) via served manifest | The manifest and bake report are build artifacts, never served; docs say so explicitly |
+| Cross-request/tenant bleed on Workers | P3: no ambient binding, no fallback; per-request bind |
+| Window-injected config spoofing (XSS ordering) | Injected browser config is an untrusted input boundary: revalidated on read, never used for secret-tier values |
+| Prototype pollution via `decode: "json"` / nested-key sources | Null-prototype objects throughout decode/merge; `__proto__`/`constructor`/`prototype` keys rejected before any validator runs |
+| Supply chain: dependency-declared knobs entering the client bake | App attestation + deny-by-default source allowlist (never trust package-declared `exposure` alone) |
+| Supply chain: import-time `provide()` spoofing | No global provide exists (P3) |
+| Build-time RCE via manifest execution | Side-effect-free manifest contract, constrained execution, sensitive-input handling |
+
+### Leak-scan design (what it is and is not)
+
+The scan is an **allowlist** model: flag any high-entropy string in a client-target
+artifact that is not a registered public value — this requires zero secret material in CI,
+catches hand-rolled secrets that never became knobs, and catches accidental `define`
+inlining. Key-name scanning matches whole tokens adjacent to env-access patterns (never
+bare substrings — `PORT` must not match `viewport`). Value-scanning, where used at all, is
+entropy/length-gated: a secret of `"8080"` is unscannable, and the scan says so
+(`relying on structural controls`) instead of hard-failing on noise. Waivers are explicit
+and audited. Dev-server output is never scanned — dev builds carry a "do not deploy"
+warning. The scan is defense-in-depth behind the structural controls, never the primary
+gate.
+
+## 5. Non-goals
+
+- **No feature-flag SDK** — no targeting, rollout, streaming updates, or subscriptions.
+- **No file-format loading in core** — no `.env`/`.yaml`/`.toml` parsing; runtimes load env
+  themselves (`node --env-file`, Bun) and a dotenv *provider* is a userland package.
+- **No secret-manager clients** — providers are functions; Vault/SSM adapters are community
+  packages against the JSON contract.
+- **No secret boxes (`Sealed<T>`), TTLs, rotation machinery, or audit trails in v1** — that
+  is a secrets manager growing inside a config library; redaction-by-construction plus the
+  exposure gates capture ~90% of real leak vectors at ~0 ceremony.
+- **No environment-cascade DSL** (dev/staging/prod profile merging) — environments are
+  different sources plus overrides, one layer.
+- **No runtime registry, no derived-knob expression language, no reachability-analysis
+  codegen** (the manifest is explicit).
+
+## 6. Open decisions
+
+- `default` in the identity hash: currently **yes** (a changed default is a different
+  config; loud acknowledgeable error beats silent wrong value).
+- Env-varying public values for build-once-promote-many SPAs: runtime-injected JSON
+  document (`/config.json`, SSR script tag) as a fourth delivery mode — shape TBD.
+- Whether v0.1 ships the node file source (leaning yes — it is what makes `live` real).
+- Server-target zero-runtime-dep vs runtime validation: they are mutually exclusive for
+  runtime-varying values (validators don't serialize). Two-tier story: baked constants =
+  zero-dep; runtime values = tiny runtime core. Say it plainly.
+- Final naming (see header).
+
+## 7. Relationship to StitchAPI
+
+Same author, same design gates (browser-first, bundle-frugal, contract-not-dependency),
+shared machinery where proven: the ADR-0004 validator-fingerprint ladder, xxh128 hashing,
+size-budget CI gates, codegen/export discipline. StitchAPI consumes this package as a
+devDependency via bake. This project stays standalone: it must be adoptable by teams that
+have never heard of StitchAPI.

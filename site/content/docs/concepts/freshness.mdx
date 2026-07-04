@@ -1,0 +1,234 @@
+---
+title: "Freshness: snapshot, live, refresh"
+description: "Why config values are pinned by default, what live actually means in each runtime, and how to re-read safely without torn reads or background watchers."
+---
+
+## Pinned by default
+
+Every knob defaults to `freshness: "snapshot"`. When you bind, the value is resolved and validated once; the resulting `Snapshot` returns the same value for the life of the binding, on every call, from every consumer.
+
+```ts
+import { knob, bind } from "knobs";
+import { fromProcessEnv } from "knobs/node";
+import { z } from "zod";
+
+const dbUrl = knob({
+  key: "DATABASE_URL",
+  schema: z.string().url(),
+  doc: "Primary Postgres connection string",
+});
+
+const cfg = bind([dbUrl], [fromProcessEnv()]); // : Snapshot — pinned
+cfg.get(dbUrl); // same value on every read, forever
+```
+
+This is a stance, not a limitation: **if it can change while the process runs, it's state, not config.** Feature flags, targeting rules, per-user toggles — those belong in a flag system with subscriptions and targeting, which this library deliberately does not have. The one exception is a value backed by a source that is genuinely re-readable, declared explicitly with `freshness: "live"`.
+
+## The physics: env vars can never be live
+
+> **A running process's OS environment never changes.** The env block is copied into the process at spawn; nothing on Node can mutate it from outside afterwards. On Kubernetes, editing a Deployment's env vars rolls new pods — your "updated" env var arrives as a *new process*, never inside the old one. Any library that offers "live env config" on Node is reading a cache of its own making, not the environment.
+
+So `freshness: "live"` on an env source emits a dev-mode warning and behaves as a snapshot. Live is only meaningful for sources that can actually be re-read:
+
+- **Files.** Kubernetes ConfigMaps mounted as volumes update in place — kubelet swaps a `..data` symlink atomically, so a re-read sees the new content. (Caveat: `subPath` mounts never update. If your mount uses `subPath`, live reads will faithfully re-read a file that never changes.)
+- **Providers** (SSM, Vault-shaped functions) — re-resolved on demand via `refresh()`.
+
+## Declaring a live knob
+
+```ts
+import { knob, bind } from "knobs";
+import { fromFiles } from "knobs/node";
+import { z } from "zod";
+
+const upstreamUrl = knob({
+  key: "UPSTREAM_URL",
+  schema: z.string().url(),
+  exposure: "public",
+  sources: [{ file: "/etc/app-config/UPSTREAM_URL" }],
+  freshness: "live",
+});
+
+const rateLimit = knob({
+  key: "RATE_LIMIT",
+  schema: z.coerce.number().int().positive(),
+  exposure: "public",
+  sources: [{ file: "/etc/app-config/RATE_LIMIT" }],
+  freshness: "live",
+});
+
+const live = bind([upstreamUrl, rateLimit], [fromFiles()]); // : LiveBinding
+```
+
+If any bound knob is live, `bind` returns a `LiveBinding` instead of a `Snapshot`. This is a hard type split, and it is the point.
+
+## LiveBinding is not a Snapshot — deliberately
+
+`Snapshot` is the only type cross-package APIs accept, and it is always pinned and immutable. `LiveBinding` is not assignable to `Snapshot` or `Scope`, so a library function typed against pinned config can never silently receive a drifting view:
+
+```ts
+// A library types its API against pinned, scoped config:
+export function createProxy(cfg: Scope<ConfigOf<typeof proxyKnobs>>) { /* ... */ }
+
+createProxy(live);                          // ✗ compile error: LiveBinding is not a Scope
+createProxy(live.snapshot().pick(proxyKnobs)); // ✓ pin first, then narrow
+```
+
+The consequence for DI: *the caller decides when time stops.* A dependency receives values from one coherent instant and cannot observe changes mid-call. Anything that wants fresh values must hold the `LiveBinding` itself — visible in its signature, auditable at the composition root.
+
+## How a live read works
+
+`live.get(knob)` uses **poll-on-read** — there are no watchers, no timers, no background loops in core, ever. The cost of freshness is paid at the read site, and three mechanisms keep it cheap and coherent:
+
+- **Throttle:** raw re-reads are throttled per source by `maxStalenessMs` (files default to about one second). Reads inside the staleness window return the current value without touching the filesystem.
+- **Memoize-by-raw:** the validator only runs when the raw content actually changed. A hot loop calling `live.get()` re-validates zero times while the file is stable.
+- **One coherent pass per source:** a single file read serves all knobs backed by that file, so two knobs from the same source never mix generations within one poll.
+
+```ts
+const live = bind([upstreamUrl, rateLimit], [fromFiles({ maxStalenessMs: 5_000 })]);
+```
+
+## Torn config and the per-request pin
+
+Coherence *within* a poll does not protect two reads separated by time. This handler is torn:
+
+```ts
+app.get("/proxy", async (req, res) => {
+  const target = live.get(upstreamUrl); // config generation N
+  await authenticate(req);              // ...ConfigMap swaps here...
+  const limit = live.get(rateLimit);    // generation N+1 — a mismatched pair
+});
+```
+
+The documented pattern is to **pin once per request** in middleware. `live.snapshot()` returns a real `Snapshot` — one coherent generation for the whole request, and the type every downstream function already accepts:
+
+```ts
+app.use((req, _res, next) => {
+  req.cfg = live.snapshot(); // pinned: this request sees exactly one generation
+  next();
+});
+
+app.get("/proxy", (req, res) => {
+  const target = req.cfg.get(upstreamUrl);
+  const limit = req.cfg.get(rateLimit); // guaranteed same generation as target
+});
+```
+
+Requests get per-request freshness; nothing inside a request ever tears.
+
+## When the new value is invalid: keep-last-good
+
+Someone fat-fingers the ConfigMap and `RATE_LIMIT` becomes `"unlimited"`. The default is **keep-last-good**: `live.get(rateLimit)` keeps returning the last valid value, and the `onInvalid` bind option fires (default: `console.error`) so the bad write is loud without taking you down:
+
+```ts
+const live = bind([upstreamUrl, rateLimit], [fromFiles()], {
+  onInvalid: (k, raw, issues) => {
+    metrics.increment("config_invalid", { key: k.key });
+  },
+});
+```
+
+For secret knobs, `issues` carries issue counts and paths only — never validator messages, which echo the received value.
+
+Some values are worse stale than absent — a revocation list, a kill switch. Those opt out per knob with `onInvalid: "throw"`, making reads fail instead of serving last-good:
+
+```ts
+const revocationList = knob({
+  key: "REVOKED_TOKEN_IDS",
+  schema: z.array(z.string()),
+  sources: [{ file: "/etc/app-config/REVOKED_TOKEN_IDS" }],
+  freshness: "live",
+  onInvalid: "throw", // stale-is-worse-than-down
+});
+```
+
+Keep-last-good needs a last good. With the default eager `bind`, an invalid-at-boot value dies at bind inside the aggregated `MissingConfigError`. Through the lazy doors, a knob that has *never* validated has nothing to fall back to:
+
+```ts
+const lazy = bind.unchecked([rateLimit], [fromFiles()]);
+lazy.get(rateLimit);
+// ✗ NoValidValueError: RATE_LIMIT has never produced a valid value —
+//   keep-last-good has nothing to serve
+```
+
+For liveness probes, `live.health()` reports per-knob staleness and the last validation error, so a value quietly riding last-good for an hour shows up on a dashboard instead of in an incident review:
+
+```ts
+live.health();
+// per-knob: how stale the raw read is, and the last validation failure (if any)
+```
+
+## epoch(): rebuilding what you constructed
+
+Honesty first: **live buys you nothing for construction-time consumption.** If a value is read once to build a long-lived object, the object holds a copy — the binding staying fresh doesn't reach inside it:
+
+```ts
+const client = makeUpstreamClient(live.get(upstreamUrl));
+// live.get() returned the freshest value *at that instant* — but the client
+// captured it. Later file swaps change what live.get() returns, not the client.
+```
+
+There is deliberately no `watch()` or `subscribe()` — that's a background loop by another name. Instead, `live.epoch(knob)` is a monotonic counter that bumps whenever the *accepted* value changes (an invalid write held off by keep-last-good does not bump it). Check it where you already have a natural touchpoint:
+
+```ts
+let epoch = live.epoch(upstreamUrl);
+let client = makeUpstreamClient(live.get(upstreamUrl));
+
+function getClient() {
+  const now = live.epoch(upstreamUrl);
+  if (now !== epoch) {
+    client.close();
+    client = makeUpstreamClient(live.get(upstreamUrl));
+    epoch = now;
+  }
+  return client;
+}
+```
+
+Rebuild-on-epoch is the whole pattern: pools, agents, and SDK clients get recreated exactly when their input actually changed, under your control, on your thread.
+
+## refresh(): a new pinned snapshot on demand
+
+Files re-read themselves on poll; providers don't. `refresh(live)` re-resolves the binding's sources and returns a **new pinned Snapshot**:
+
+```ts
+import { refresh } from "knobs";
+
+const next = await refresh(live); // : Snapshot — a fresh, coherent generation
+```
+
+Three guarantees:
+
+- **All-or-nothing.** If any source fails mid-refresh, no partial generation escapes — the refresh fails and the binding keeps serving the previous values intact. Opt in to `partial: "keep-old"` to accept updates from the sources that succeeded while keeping old values for the ones that failed: `refresh(live, { partial: "keep-old" })`.
+- **Single-flight.** Concurrent `refresh()` calls coalesce into one in-flight resolution in core — a thundering herd of requests triggers one provider round-trip, not hundreds.
+- **Pinned result.** The returned `Snapshot` is immutable like any other; hand it to anything typed `Snapshot` or `Scope` without ceremony.
+
+Since core never schedules anything, *you* decide the cadence: refresh on a deploy hook, an admin endpoint, or a cron — all outside the library.
+
+## Workers: env is fixed per deployment
+
+On Cloudflare Workers, the env bag is part of the deployment. It never changes for a running deployment — updating a binding or secret rolls a new deployment, and isolates see the new env from birth. `freshness: "live"` on a Workers env source is therefore a no-op with a dev-mode warning:
+
+```ts
+import { bind } from "knobs";
+import { fromWorkerEnv } from "knobs/workers";
+
+export default {
+  async fetch(request: Request, env: Env) {
+    const cfg = bind([upstreamUrl, rateLimit], [fromWorkerEnv(env)]);
+    // Any freshness:"live" knob here degrades to snapshot semantics
+    // (dev-mode warning): workerd env is immutable per deployment.
+    return handle(request, cfg);
+  },
+};
+```
+
+## Freshness by source, at a glance
+
+| Source | Can be live? | Why / how |
+| --- | --- | --- |
+| `env` on Node | No — physics | OS env of a running process never changes; k8s env edits restart the pod. Dev warning, snapshot semantics. |
+| `env` on Workers | No — platform | Env bag is fixed per deployment. Dev warning, snapshot semantics. |
+| `file` | Yes — poll-on-read | k8s ConfigMap volume mounts update via `..data` symlink swap; `subPath` mounts never update. |
+| `provider` | Yes — on demand | Re-resolved by `refresh(live)`; core adds single-flight and all-or-nothing. |
+
+If nothing on this page applied to your value, that's the healthy case: leave `freshness` at its default, bind once, and let the `Snapshot` be boring.

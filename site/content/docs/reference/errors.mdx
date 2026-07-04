@@ -1,0 +1,235 @@
+---
+title: Error taxonomy
+description: Every named error — when it fires, what its message carries, and the next step it points to.
+---
+
+Configuration failures are boring, frequent, and usually fixed by someone who didn't write the code that threw. The error taxonomy is designed for that person. Every error in this library answers three questions in its first line:
+
+1. **Which knob** — the canonical `key`, always.
+2. **Which layer** — bind, read, scope, live, serialization, or bake.
+3. **What next** — a concrete remediation, in the message itself.
+
+There are nine named errors. Nothing else escapes the library.
+
+| Error | Layer | Fires when |
+| --- | --- | --- |
+| `MissingConfigError` | bind | eager validation found missing or invalid knobs — aggregated |
+| `AsyncSourceInBindError` | bind | an async source was passed to sync `bind()` |
+| `AsyncValidatorInSyncBindingError` | any validation site | a validator returned a thenable in a sync binding |
+| `UnboundKnobError` | snapshot read | the knob was never in the bound set |
+| `DescriptorMismatchError` | snapshot read | same key, different descriptor identity |
+| `NotInScopeError` | scope read | the knob is not in the group passed to `pick()` |
+| `ExposureError` | exposure boundary | a secret value was about to cross into a public context |
+| `NoValidValueError` | live read | keep-last-good, but there is no last good |
+| `StaleBakeError` | baked client read | the baked identity hash no longer matches the imported descriptor |
+
+Reads also have a non-throwing door: `cfg.tryGet(knob)` returns `{ ok: false, issues }` instead of throwing, `live.health()` reports per-knob staleness and last validation error, and `cfg.explain(knob)` shows provenance. Use those for probes and diagnostics; the errors below are for code paths that must not proceed.
+
+## Secret knobs: counts and paths, never text
+
+One rule applies across every error surface. Validator libraries echo received values into their messages — a failed `z.string().startsWith("sk_")` happily prints the secret it rejected. For knobs with `exposure: "secret"` (the default), that text is untrusted. Every report — the aggregated bind failure, `tryGet` issues, `live.health()`, `onInvalid` callbacks — carries **issue counts and issue paths only** for secret knobs. Never validator messages, never received values. Public knobs get the full validator output.
+
+## MissingConfigError
+
+**Layer: bind.** The eager default of `bind()` (and `load()`) validates the entire listed set immediately, and collects *everything* wrong into one aggregated error — so a broken deploy reports every problem in a single boot failure, not one problem per restart. `bind.lazy()` throws it too, but only for raw *presence*: missing variables still die at bind; validation is deferred to first read.
+
+```ts
+import { knob, bind } from "knobs";
+import { fromProcessEnv } from "knobs/node";
+import { z } from "zod";
+
+const dbUrl = knob({
+  key: "DATABASE_URL",
+  schema: z.string().url(),
+  doc: "Primary Postgres connection string",
+});
+
+const poolSize = knob({
+  key: "DB_POOL_SIZE",
+  schema: z.coerce.number().int().min(1),
+  exposure: "public",
+  default: 10,
+});
+
+const stripeKey = knob({
+  key: "STRIPE_SECRET_KEY",
+  schema: z.string().startsWith("sk_"),
+});
+
+const cfg = bind([dbUrl, poolSize, stripeKey], [fromProcessEnv()]);
+```
+
+A realistic boot report, with two of three knobs failing:
+
+```text
+MissingConfigError: 2 of 3 knobs failed at bind (sources: fromProcessEnv)
+
+  ✕ DATABASE_URL       missing — no source produced a value
+                       tried: env DATABASE_URL
+                       fix: set DATABASE_URL, or give the knob a default or another source
+  ✕ STRIPE_SECRET_KEY  invalid — 1 issue at (root)  [secret: validator text withheld]
+                       resolved from: env STRIPE_SECRET_KEY
+                       fix: correct the value at its source
+  ✓ DB_POOL_SIZE       ok (default: 10)
+```
+
+Note the secret rule in action: `DATABASE_URL` is *missing*, so there is nothing to withhold; `STRIPE_SECRET_KEY` is *invalid*, so the report shows a count and a path, not the validator's message.
+
+## AsyncSourceInBindError
+
+**Layer: bind.** `bind()` accepts synchronous sources only, and enforces it twice. At the type level, a kind discriminant on sources makes the call a compile error. At runtime — for untyped call sites — the same mistake raises `AsyncSourceInBindError`, naming the offending source and pointing at the fix:
+
+```ts
+bind([dbUrl], [mySsmProvider]);
+// AsyncSourceInBindError: source "ssm" is async — bind() is synchronous.
+// Resolve async sources once with:  await load(knobs, sources)
+
+const cfg = await load([dbUrl], [fromProcessEnv(), mySsmProvider]);
+// resolve ONCE at the composition root; every read is sync forever after
+```
+
+## AsyncValidatorInSyncBindingError
+
+**Layer: any validation site.** Fires the moment a validator returns a thenable inside a sync binding (`bind`, `bind.lazy`, `bind.unchecked`).
+
+Why *every* validation site checks, instead of probing once at bind: **async-ness can be input-dependent.** A schema with a conditional async refinement is synchronous for one input and returns a promise for another. No bind-time probe can prove a validator sync, so eager bind, the deferred first read of `bind.lazy`, live re-validation, and cross-package hash-fallback re-validation each check the result — which means this error can legitimately surface long after boot, on the exact input that took the async path.
+
+```ts
+const apiKey = knob({
+  key: "PARTNER_API_KEY",
+  schema: z.string().refine(async (v) => looksLikePartnerKey(v)),
+});
+
+const cfg = bind([apiKey], [fromProcessEnv()]);
+// AsyncValidatorInSyncBindingError: PARTNER_API_KEY's validator returned
+// a thenable during bind — sync bindings require sync validators.
+```
+
+The fix is almost always to make the validator sync: validators must be pure, so anything that genuinely needs I/O (a network check, a lookup) doesn't belong in a validator at all — it belongs in an async *source* resolved through `load()`.
+
+## UnboundKnobError
+
+**Layer: snapshot read.** There is no ambient configuration: values exist only inside explicit bindings, and a read outside one is a named error — never a silent fallback to `process.env`. `get()` has exactly three outcomes: a hit, `UnboundKnobError`, or `DescriptorMismatchError`.
+
+```ts
+const cfg = bind([dbUrl], [fromProcessEnv()]);
+
+cfg.get(poolSize);
+// UnboundKnobError: DB_POOL_SIZE is not in this binding's bound set (1 knob: DATABASE_URL).
+// Add it to the bind() list at your composition root, or check that you are
+// holding the snapshot you think you are.
+```
+
+The message names the key, states the bound set it searched, and points at the composition root — because that is where the fix lives, not at the read site.
+
+## DescriptorMismatchError
+
+**Layer: snapshot read.** The key is bound — but under a *different* descriptor. Identity is content-addressed over the identity subset only (`key`, `exposure`, `sources` in order, `default` presence and value, schema id or `version`); cosmetic fields like `doc` can never trigger this. The classic cause is the dual-package hazard: two hoisted copies of a library each construct their own instance of "the same" knob, and the copies have drifted.
+
+The error carries both canonical descriptors, a field-level diff of the identity subset, and a paste-able resolution:
+
+```text
+DescriptorMismatchError: SMTP_URL is bound, but under a different descriptor.
+
+  bound      knobv1:xxh128:9f31c2e8…
+             { key: "SMTP_URL", exposure: "secret",
+               sources: [{ env: "SMTP_URL" }], version: "1" }
+  requested  knobv1:xxh128:57ab90d1…
+             { key: "SMTP_URL", exposure: "secret",
+               sources: [{ env: "SMTP_URL" }, { env: "MAILER_SMTP_URL" }], version: "2" }
+
+  identity diff:
+    sources   [{ env: "SMTP_URL" }]
+              → [{ env: "SMTP_URL" }, { env: "MAILER_SMTP_URL" }]
+    version   "1" → "2"
+
+  If these are the same logical knob, accept the newer descriptor and alias the old hash:
+
+    bind(knobs, sources, {
+      unify: [{ accept: smtpUrl, aliases: ["knobv1:xxh128:9f31c2e8…"] }],
+    })
+```
+
+Two properties keep `unify` safe. The hash is an index, not a security boundary — structural equality of the identity subset is what's authoritative. And hash-fallback resolutions **always re-validate with the caller's schema** (memoized), so accepting an alias can never silently downgrade validation across package copies. Use `identityOf(knob)` when you need to see a hash yourself.
+
+## NotInScopeError
+
+**Layer: scope read.** `cfg.pick(group)` produces a `Scope` that is restricted at *runtime*, not just in types: reading any knob outside the picked group throws, and the message names the pick site that created the scope.
+
+```ts
+const root = bind([...appKnobs, ...mailerKnobs], [fromProcessEnv()]);
+const mailer = createMailer(root.pick(mailerKnobs));
+
+// inside the mailer, someone reaches for an app-level knob:
+scope.get(dbUrl);
+// NotInScopeError: DATABASE_URL is not in this scope.
+// Scope created by pick(mailerKnobs) at src/composition-root.ts:18 (3 knobs).
+// Add the knob to the picked group — or ask whether this code should own it.
+```
+
+The remediation is deliberately a design question: either widen the group at the pick site, or move the knob into the library's declared set. Honest boundary: `pick()` is least-privilege against *mistakes* and for auditability — it is not a sandbox. Hostile in-process code can read `process.env` directly; only provider-resolved, non-ambient values gain real confinement.
+
+## ExposureError
+
+**Layer: exposure boundary.** Fires when a secret value is about to cross into a public context. The most important instance is the serialization guard: secret values throw on `JSON.stringify` and `structuredClone`. This closes the SSR payload leak — a request-time serialization the build-time leak scan structurally cannot see, and explicitly out of its scope.
+
+```ts
+export async function getServerSideProps() {
+  const cfg = bind([stripeKey, theme], [fromProcessEnv()]);
+  return { props: { theme: cfg.get(theme), key: cfg.get(stripeKey) } };
+}
+// the framework serializes props for hydration:
+// ExposureError: STRIPE_SECRET_KEY reached JSON.stringify — secret values
+// do not serialize. Pass derived, non-secret data to the client, or change
+// exposure to "public" if this value truly is public (identity-changing).
+```
+
+`cfg.toJSON()` never throws — it redacts secrets by construction; the guard exists for the raw values themselves. Note that changing `exposure` is an identity field: flipping a knob to `"public"` changes its hash and shows up in review and in bake's manifest, which is the point.
+
+## NoValidValueError
+
+**Layer: live read.** Live bindings default to **keep-last-good**: when a re-readable source turns invalid after boot, reads keep serving the last accepted value and the `onInvalid` bind option fires (default: `console.error`). `NoValidValueError` is what happens when there is no last good to keep — the knob has *never* validated successfully in this process.
+
+That combination requires a lazy door, because an eager `bind()` validates at bind and refuses to hand you a binding at all:
+
+```ts
+const tiers = knob({
+  key: "FEATURE_TIERS",
+  schema: tierSchema,
+  exposure: "public",
+  sources: [{ file: "/etc/app/tiers.json" }],
+  freshness: "live",
+});
+
+const live = bind.lazy([tiers], [fromFiles()]);
+// file exists (presence check passed) but has been malformed since boot:
+
+live.get(tiers);
+// NoValidValueError: FEATURE_TIERS has never produced a valid value.
+// Last attempt: /etc/app/tiers.json, 3 issues (paths: tiers[0].limit, …).
+// Fix the source, or bind eagerly to fail at boot instead of at read.
+```
+
+`live.health()` reports the same never-valid state for liveness probes, with the last validation error — counts and paths only if the knob is secret.
+
+**The restart story.** Keep-last-good is process memory; it is not persisted. If a process restarts while the source is still broken, there is no last good to inherit — and with the eager default, boot fails with an aggregated `MissingConfigError` instead. That asymmetry is deliberate: a *running* process rides out a bad config push, but a *new* process never boots on config that has never been valid. For knobs where stale is worse than down, opt in per knob with `{ onInvalid: "throw" }`.
+
+## StaleBakeError
+
+**Layer: baked client read.** The client bake target emits a generated module with an inlined snapshot shim that imports nothing at runtime. The shim carries a per-knob identity hash, and its `get()` verifies the hash of the descriptor you pass against the hash recorded at bake time. If a library was upgraded after baking — its knob's schema `version` bumped, a source added — the identities diverge:
+
+```ts
+import { widgetTheme } from "@acme/widgets/knobs"; // upgraded to v3: descriptor changed
+import { config } from "./config.baked";    // baked against v2
+
+config.get(widgetTheme);
+// StaleBakeError: WIDGET_THEME was baked as knobv1:xxh128:aa04f2…, but the
+// imported descriptor hashes to knobv1:xxh128:d17b9c… — the bake is stale.
+// Re-run `knobs bake`. In CI, `knobs bake --check` fails the build before this ships.
+```
+
+The remediation chain is mechanical: `knobs bake` regenerates, `knobs bake --check` is the CI drift gate that makes shipping this state impossible, and `knobs bake --watch` keeps dev and HMR in sync so you never meet it locally.
+
+## Summary
+
+Bind-time errors (`MissingConfigError`, `AsyncSourceInBindError`) fail the boot, loudly and completely. Read-time errors (`UnboundKnobError`, `DescriptorMismatchError`, `NotInScopeError`, `AsyncValidatorInSyncBindingError`) refuse to guess — no fallback, no ambient lookup, ever. Boundary errors (`ExposureError`, `StaleBakeError`) are the runtime halves of guarantees that bake starts at build time. And `NoValidValueError` is the one honest answer left when keep-last-good has nothing to keep. In every case: the key, the layer, the next step — in the first line.

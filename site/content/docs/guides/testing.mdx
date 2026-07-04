@@ -1,0 +1,339 @@
+---
+title: Testing
+description: Test configuration with literal snapshots — zero process.env mutation, no module mocks, and parallel-safe tests by construction.
+---
+
+## The headline: zero `process.env` mutation
+
+Most config testing pain comes from one root cause: the library reads the ambient environment at import time and caches the result at module scope. Testing then means mutating a global (`process.env`), resetting module registries, and praying your tests never run concurrently.
+
+This library has no ambient anything. Values exist only inside explicit bindings — there is no global binding, no module-scope cache, no cache on the knob object. So a test never mutates the environment. It constructs its own snapshot, hands it to the code under test, and throws it away. The composition-root discipline that makes production wiring explicit is exactly what makes tests trivial: config arrives through a parameter, and a parameter is the easiest thing in the world to fake — except here you don't even fake it, you build a real one.
+
+## Literal snapshots with `snapshotOf`
+
+`snapshotOf` builds a pinned, immutable `Snapshot` from literal pairs. It comes from the `knobs/testing` entry and never touches `process.env`, the filesystem, or anything else ambient.
+
+Your app's descriptors are inert — zero I/O, zero validation at construction — so tests import the *real* knobs and exercise the *real* schemas. No test-only duplicates to drift out of sync.
+
+```ts
+// app/config/db.ts — the app's real descriptors; tests import these as-is
+import { knob, defineKnobs } from "knobs";
+import { z } from "zod";
+
+export const dbUrl = knob({
+  key: "DATABASE_URL",
+  schema: z.string().url(),
+  doc: "Primary Postgres connection string",
+  // exposure defaults to "secret" — fail closed
+});
+
+export const poolSize = knob({
+  key: "DB_POOL_SIZE",
+  schema: z.coerce.number().int().min(1).max(64),
+  exposure: "public",
+  default: 10,
+});
+
+export const dbKnobs = defineKnobs([dbUrl, poolSize]);
+```
+
+```ts
+import { it, expect } from "vitest";
+import { snapshotOf } from "knobs/testing";
+import { dbUrl, poolSize } from "../app/config/db";
+
+it("reads typed values from a literal snapshot", () => {
+  const cfg = snapshotOf([
+    [dbUrl, "postgres://127.0.0.1:5432/app_test"],
+    [poolSize, 2],
+  ]);
+
+  expect(cfg.get(dbUrl)).toBe("postgres://127.0.0.1:5432/app_test");
+  expect(cfg.get(poolSize)).toBe(2); // typed number, inferred from the schema
+});
+```
+
+The result is an ordinary `Snapshot` — the same `get`, `tryGet`, `pick`, and `explain` your production code sees. And it is still validated: a bad test value fails loudly at construction, with the same aggregated error eager `bind` produces. A test snapshot can never hold a value the production path would refuse.
+
+```ts
+import { MissingConfigError } from "knobs";
+
+it("a bad test value fails loudly", () => {
+  expect(() => snapshotOf([[dbUrl, "not-a-url"]])).toThrow(MissingConfigError);
+});
+```
+
+## Inject at the composition root
+
+Factories take config as a parameter and never reach for the environment themselves. Production binds once at the root; tests build a snapshot per test. Same seam, two suppliers.
+
+```ts
+// app/db.ts — config arrives as a parameter, always
+import type { Scope, ConfigOf } from "knobs";
+import { dbKnobs, dbUrl, poolSize } from "./config/db";
+
+export function createPool(cfg: Scope<ConfigOf<typeof dbKnobs>>) {
+  return new Pool({ connectionString: cfg.get(dbUrl), max: cfg.get(poolSize) });
+}
+```
+
+```ts
+// app/main.ts — the only place that touches the real environment
+import { bind } from "knobs";
+import { fromProcessEnv } from "knobs/node";
+import { dbKnobs } from "./config/db";
+import { createPool } from "./db";
+
+const root = bind(dbKnobs, [fromProcessEnv()]);
+const pool = createPool(root.pick(dbKnobs));
+```
+
+```ts
+// db.test.ts — the same seam, fed by a literal snapshot
+it("caps the pool at the configured size", () => {
+  const cfg = snapshotOf([
+    [dbUrl, "postgres://127.0.0.1:5432/app_test"],
+    [poolSize, 2],
+  ]);
+
+  const pool = createPool(cfg.pick(dbKnobs));
+  expect(pool.options.max).toBe(2);
+});
+```
+
+## Parallel tests need no isolation dance
+
+Because there is no global state at all, two tests holding contradictory config run concurrently without stubbing, sandboxing, or serial execution. Each snapshot is its own world.
+
+```ts
+it.concurrent("small pool behaviour", () => {
+  const cfg = snapshotOf([[dbUrl, "postgres://127.0.0.1:5432/a"], [poolSize, 1]]);
+  expect(createPool(cfg.pick(dbKnobs)).options.max).toBe(1);
+});
+
+it.concurrent("large pool behaviour", () => {
+  const cfg = snapshotOf([[dbUrl, "postgres://127.0.0.1:5432/b"], [poolSize, 64]]);
+  expect(createPool(cfg.pick(dbKnobs)).options.max).toBe(64);
+});
+```
+
+## Testing failure paths
+
+### Missing config at bind: `MissingConfigError`
+
+Eager `bind` validates the whole bound set up front and throws one aggregated error naming every missing or invalid knob. Testing the boot-failure path needs no setup at all — absence is the natural state of a test process's environment.
+
+```ts
+import { bind, MissingConfigError } from "knobs";
+import { fromProcessEnv } from "knobs/node";
+
+it("boot refuses with every problem listed at once", () => {
+  try {
+    bind(dbKnobs, [fromProcessEnv()]); // test env has no DATABASE_URL
+    expect.unreachable("bind must throw");
+  } catch (err) {
+    expect(err).toBeInstanceOf(MissingConfigError);
+    expect(String(err)).toContain("DATABASE_URL");
+    // DB_POOL_SIZE is absent too, but its default (10) resolves — defaults
+    // are validated like any sourced value, not a privileged path.
+  }
+});
+```
+
+### Present-but-invalid values: `tryGet`
+
+`tryGet` returns `{ ok: true, value }` or `{ ok: false, issues }` instead of throwing. To produce a present-but-invalid raw value without touching `process.env`, point a file-sourced knob at a temp file and take the half-lazy door — `bind.lazy` checks presence eagerly but defers validator execution to the first read.
+
+```ts
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { knob, bind } from "knobs";
+import { fromFiles } from "knobs/node";
+import { z } from "zod";
+
+it("surfaces validation issues without throwing", async () => {
+  const file = join(await mkdtemp(join(tmpdir(), "knobs-")), "timeout");
+  await writeFile(file, "soon"); // present, not a number
+
+  const timeoutMs = knob({
+    key: "API_TIMEOUT_MS",
+    schema: z.coerce.number().int().positive(),
+    exposure: "public",
+    sources: [{ file }],
+  });
+
+  const cfg = bind.lazy([timeoutMs], [fromFiles()]); // presence passes
+  const result = cfg.tryGet(timeoutMs);
+
+  expect(result.ok).toBe(false);
+  if (!result.ok) expect(result.issues.length).toBeGreaterThan(0);
+});
+```
+
+One property worth knowing when you snapshot-test error reports: for secret knobs, issue reports carry counts and paths only — never validator messages or values, because BYO validators echo what they received and their text is untrusted. A failed secret validation can't leak the secret into your test snapshots or CI logs.
+
+### Secrets refuse to serialize: `ExposureError`
+
+Secrets are fail-closed all the way down to serialization. `Snapshot.toJSON` redacts secret values by construction, and a secret value itself throws if code tries to force it through `JSON.stringify` or `structuredClone` — the guard that closes SSR payload leaks. Both behaviors are directly testable.
+
+```ts
+import { ExposureError } from "knobs";
+
+it("secrets cannot ride a serialized payload", () => {
+  const cfg = snapshotOf([[dbUrl, "postgres://127.0.0.1:5432/app_test"]]);
+
+  // the snapshot redacts secrets by construction
+  expect(JSON.stringify(cfg)).not.toContain("app_test");
+
+  // the secret value itself is guarded
+  const url = cfg.get(dbUrl);
+  expect(() => JSON.stringify({ pageProps: { url } })).toThrow(ExposureError);
+});
+```
+
+## Testing live config
+
+`freshness: "live"` only means anything for re-readable sources — files and providers. That makes live behavior easy to test: point a file source at a temp file you control. Don't sleep past the poll throttle (`maxStalenessMs`, roughly one second for files) — that's how flaky tests are born. `refresh(live)` forces one coherent re-read pass and returns a new pinned `Snapshot`, so the test is deterministic.
+
+```ts
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { knob, bind, refresh } from "knobs";
+import { fromFiles } from "knobs/node";
+import { z } from "zod";
+
+async function tempUpstream() {
+  const file = join(await mkdtemp(join(tmpdir(), "knobs-")), "upstream-url");
+  await writeFile(file, "https://api.internal.test");
+  const upstreamUrl = knob({
+    key: "UPSTREAM_URL",
+    schema: z.string().url(),
+    exposure: "public",
+    sources: [{ file }],
+    freshness: "live",
+  });
+  return { file, upstreamUrl };
+}
+
+it("bumps the epoch when an accepted value changes", async () => {
+  const { file, upstreamUrl } = await tempUpstream();
+  const live = bind([upstreamUrl], [fromFiles()]); // LiveBinding
+  const before = live.epoch(upstreamUrl);
+
+  await writeFile(file, "https://api-blue.internal.test");
+  const next = await refresh(live);
+
+  expect(live.epoch(upstreamUrl)).toBe(before + 1);
+  expect(next.get(upstreamUrl)).toBe("https://api-blue.internal.test");
+});
+```
+
+There is deliberately no watch or subscribe API — code that must react to change rebuilds clients keyed on the epoch, so the epoch is also what tests assert.
+
+Invalid content after boot follows keep-last-good, and the epoch bumps only on *accepted* change:
+
+```ts
+it("keeps the last good value when the file goes bad", async () => {
+  const { file, upstreamUrl } = await tempUpstream();
+  const rejected: unknown[] = [];
+  const live = bind([upstreamUrl], [fromFiles()], {
+    onInvalid: (k, raw, issues) => rejected.push(issues),
+  });
+  const bootEpoch = live.epoch(upstreamUrl);
+
+  await writeFile(file, "not a url");
+  await refresh(live);
+
+  expect(live.get(upstreamUrl)).toBe("https://api.internal.test"); // last good
+  expect(live.epoch(upstreamUrl)).toBe(bootEpoch); // nothing accepted, no bump
+  expect(rejected).toHaveLength(1);
+});
+```
+
+A live knob that has *never* held a valid value is a different, named failure. Eager `bind` refuses at boot with `MissingConfigError`; if you took the half-lazy door, the first read is where truth arrives:
+
+```ts
+import { NoValidValueError } from "knobs";
+
+it("a never-yet-valid live knob throws NoValidValueError", async () => {
+  const { file, upstreamUrl } = await tempUpstream();
+  await writeFile(file, "not a url"); // invalid from the start
+
+  const live = bind.lazy([upstreamUrl], [fromFiles()]);
+  expect(() => live.get(upstreamUrl)).toThrow(NoValidValueError);
+});
+```
+
+## Testing library code that takes a `Scope`
+
+A library ships its knobs as inert descriptors and types its factory against `Scope<ConfigOf<typeof itsKnobs>>`. Testing it is the same move the app makes at its composition root: build a snapshot, `pick`, pass it in. `snapshotOf` returns a real `Snapshot`, so `pick` works on it directly.
+
+```ts
+import { snapshotOf } from "knobs/testing";
+import { defineKnobs, NotInScopeError } from "knobs";
+import { createMailer, mailerKnobs, smtpUrl, smtpFrom } from "@acme/mailer";
+
+it("wires the mailer from a picked scope", () => {
+  const cfg = snapshotOf([
+    [smtpUrl, "smtp://127.0.0.1:1025"],
+    [smtpFrom, "noreply@test.local"],
+  ]);
+
+  const mailer = createMailer(cfg.pick(mailerKnobs));
+  // createMailer(cfg) does not compile: the root Snapshot is deliberately
+  // not assignable to Scope — the pick() call is the audit point.
+});
+
+it("a scope is runtime-restricted, not just typed", () => {
+  const cfg = snapshotOf([
+    [smtpUrl, "smtp://127.0.0.1:1025"],
+    [smtpFrom, "noreply@test.local"],
+  ]);
+
+  const scope = cfg.pick(defineKnobs([smtpUrl]));
+  expect(() => scope.get(smtpFrom)).toThrow(NotInScopeError);
+});
+```
+
+Honest boundary, in tests as in production: `pick` is least-privilege for mistakes and auditability, not a sandbox — hostile in-process code can read `process.env` itself.
+
+## Anti-pattern gallery
+
+Every pattern below exists to work around ambient config state. None of them is needed here, and each one quietly costs you something.
+
+```ts
+// Anti-pattern: vi.stubEnv
+vi.stubEnv("DATABASE_URL", "postgres://127.0.0.1:5432/app_test");
+```
+
+`stubEnv` mutates a process-wide global: it races under `it.concurrent`, leaks into the next test if cleanup is forgotten, and carries untyped, unvalidated strings. Here it is also pointless — nothing reads the environment unless a binding you constructed says `fromProcessEnv()`.
+
+```ts
+// Anti-pattern: mutating process.env by hand
+process.env.DB_POOL_SIZE = "64";
+delete process.env.DATABASE_URL;
+```
+
+Same problems without even the automatic cleanup. If a test needs this, the code under test is reaching for ambient state instead of accepting a `Scope` — fix the factory, not the environment.
+
+```ts
+// Anti-pattern: module-mocking a "config module"
+vi.mock("../config", () => ({
+  config: { dbUrl: "postgres://127.0.0.1:5432/app_test", poolSize: "64" },
+}));
+```
+
+This mocks a shape, not a contract: validation is skipped entirely (`"64"` where a number belongs, and nobody notices), the mock drifts silently when the real module refactors, and hoisting rules make failures cryptic. In this design there is also nothing to intercept — there is no central all-knobs module (groups are declared near their call sites) and no ambient binding hiding behind an import.
+
+```ts
+// Instead: a real, validated snapshot per test
+const cfg = snapshotOf([
+  [dbUrl, "postgres://127.0.0.1:5432/app_test"],
+  [poolSize, 2],
+]);
+const pool = createPool(cfg.pick(dbKnobs));
+```
+
+If a test is hard to write, that's the design telling you something: somewhere, code is reading configuration instead of receiving it. Move the read to the composition root and the test writes itself.

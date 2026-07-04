@@ -1,0 +1,208 @@
+---
+title: API reference
+description: The complete provisional API surface — entries, the descriptor, bindings, snapshots, live bindings, identity, testing, and the bake CLI.
+---
+
+> All names are provisional (see [naming](/docs/reference/decisions)). This page is the
+> canonical contract: every example elsewhere on this site uses only what is defined here.
+
+## Entry points
+
+```ts
+import { knob, defineKnobs, bind, load, refresh, identityOf } from "knobs";
+import type { Knob, Snapshot, LiveBinding, Scope, ConfigOf } from "knobs";
+
+import { fromProcessEnv, fromFiles } from "knobs/node";   // Node-only sources
+import { fromWorkerEnv } from "knobs/workers";            // Cloudflare Workers env bag
+import { snapshotOf } from "knobs/testing";               // test seam
+```
+
+The core entry (`"knobs"`) is universal — it runs in browsers, Workers, Node, Deno, and
+Bun, and it contains **no secret-capable sources**. That absence is a structural security
+guarantee, not a lint rule: there is no code path in a browser bundle that can resolve a
+secret. Node-specific capabilities live behind subpath entries.
+
+## `knob(config)` — the descriptor
+
+```ts
+type Json = string | number | boolean | null | Json[] | { [k: string]: Json };
+
+type SourceRef =
+  | { env: string }                     // environment variable
+  | { file: string }                    // file contents (re-readable — may be live)
+  | { provider: string; key?: string }  // named provider supplied at bind/load
+  | { literal: Json };                  // inline value
+
+interface KnobConfig {
+  key: string;                          // canonical name            (identity)
+  schema?: StandardSchemaV1;            // BYO validator — zod/valibot/arktype
+  doc?: string;                         // human documentation       (cosmetic)
+  exposure?: "secret" | "public";       // DEFAULT "secret"          (identity)
+  sources?: SourceRef[];                // ordered precedence        (identity)
+                                        //   default: [{ env: key }]
+  default?: Json;                       // JSON only                 (identity)
+  freshness?: "snapshot" | "live";      // DEFAULT "snapshot"
+  version?: string;                     // schema-identity discriminator
+}
+
+function knob(config: KnobConfig): Knob<T>;
+// T inferred from the schema's OUTPUT: z.coerce.number() -> Knob<number>.
+// No schema -> Knob<string>.
+```
+
+Construction is **inert**: zero I/O, zero validation, zero registration, zero caching. The
+result is frozen, carries a structural `$knob` brand (never checked via `instanceof`), and
+round-trips as JSON minus the schema function. A non-JSON value in any field is a
+`TypeError` at construction.
+
+```ts
+function defineKnobs<T extends readonly Knob[]>(knobs: T): T;
+// const-tuple inference for groups; groups are plain arrays declared near call sites
+```
+
+## Binding — where values live
+
+```ts
+// EAGER (the default door): validates the listed set NOW.
+// All failures aggregate into ONE MissingConfigError.
+function bind(knobs: readonly Knob[], sources: SyncSource[], opts?: BindOptions): Snapshot | LiveBinding;
+
+// HALF-LAZY door: raw PRESENCE is still checked eagerly (missing vars die at bind);
+// validator execution is deferred to first read.
+bind.lazy(knobs, sources, opts?): Snapshot | LiveBinding;
+
+// Fully deferred. The name carries the warning. Niche: multi-subcommand CLIs.
+bind.unchecked(knobs, sources, opts?): Snapshot | LiveBinding;
+
+// Async sources (SSM, Vault, remote config): resolve ONCE here; reads are sync forever.
+async function load(knobs: readonly Knob[], sources: (SyncSource | AsyncSource)[], opts?): Promise<Snapshot>;
+
+interface BindOptions {
+  onInvalid?: (knob: Knob, raw: string, issues: Issue[]) => void; // live re-validation failures; default console.error
+  unify?: { accept: Knob; aliases: string[] }[];                  // identity alias table (see Identity)
+}
+```
+
+Sources carry a `kind: "sync" | "async"` discriminant. Passing an async source to `bind()`
+is a **compile error**, and `AsyncSourceInBindError` at runtime. That is the entire
+sync/async coloring answer: reads are never async; only binding creation is.
+
+If any bound knob declares `freshness: "live"`, the return type is `LiveBinding` — which
+is deliberately **not** assignable where `Snapshot` is expected.
+
+## `Snapshot` — pinned, immutable
+
+```ts
+interface Snapshot {
+  get<T>(k: Knob<T>): T;             // sync, typed. Three outcomes: value |
+                                     // UnboundKnobError | DescriptorMismatchError
+  tryGet<T>(k: Knob<T>): { ok: true; value: T } | { ok: false; issues: Issue[] };
+  pick<T extends readonly Knob[]>(knobs: T): Scope<ConfigOf<T>>;
+  explain(k: Knob): Provenance;      // which source, which key resolved; secrets redacted
+  toJSON(): Json;                    // secrets redacted by construction
+}
+```
+
+- `Snapshot` is the only type cross-package APIs should accept. It never changes under you.
+- `pick()` **runtime-restricts**: the returned `Scope` contains only the picked entries;
+  reading anything else throws `NotInScopeError`. The `Scope` type is brand-gated — only
+  `pick()` produces it, and the root `Snapshot` is deliberately not assignable to it, so
+  library signatures force the narrowing.
+- Secret **values** throw on `JSON.stringify`/`structuredClone` (the serialization guard,
+  surfaced as `ExposureError`) — this closes the request-time SSR payload class that no
+  build-time scan can see.
+
+## `LiveBinding` — poll-on-read freshness
+
+```ts
+interface LiveBinding {
+  get<T>(k: Knob<T>): T;        // re-reads raw (throttled per-source maxStalenessMs);
+                                // re-validates ONLY when the raw value changed
+  snapshot(): Snapshot;         // THE per-request pin; single coherent pass per source
+  epoch(k: Knob): number;       // monotonic; bumps when an accepted value changes
+  health(): HealthReport;       // per-knob staleness / last validation error
+  pick(knobs): Scope;           // pick() pins — a Scope is always a consistent cut
+}
+
+async function refresh(b: LiveBinding | Snapshot): Promise<Snapshot>;
+// Returns a NEW pinned snapshot; never mutates in place.
+// All-or-nothing on partial source failure ({ partial: "keep-old" } is the opt-in).
+// Concurrent refresh() calls on one binding are single-flight coalesced.
+```
+
+Live is only meaningful for **re-readable** sources — files and providers. A running
+process's OS environment never changes, so `freshness: "live"` over an `{ env }` source
+draws a dev-mode warning (and on workerd, where env is fixed per deployment, live is a
+no-op). Invalid-after-boot defaults to **keep-last-good + `onInvalid`**; a knob that has
+never had a valid value throws `NoValidValueError`. Per-knob `onInvalid: "throw"` opts
+stale-is-worse-than-down values into failing instead.
+
+## Identity
+
+```ts
+function identityOf(k: Knob): string;   // "knobv1:xxh128:…"
+```
+
+Identity is content-addressed over a **closed field list**:
+`key`, `exposure`, `sources` (order-significant), `default` (presence + value), and
+`schemaId` when available (vendor fingerprint, else the explicit `version` field).
+`doc`, examples, and all unknown fields are cosmetic. The preimage is `knobv1|` +
+RFC 8785 canonical JSON, hashed with xxh128 — the hash is an index, not a security
+boundary; structural equality of the identity subset is authoritative.
+
+Consequences:
+
+- Duplicated installs of the *same* descriptor (dual-package hazard, diamond deps) resolve
+  interchangeably — and hash-fallback resolutions always **re-validate with the caller's
+  schema**, so validation can never silently downgrade across package copies.
+- The same key under a *different* descriptor is `DescriptorMismatchError`, carrying both
+  canonical descriptors, a field-level diff, and a paste-able `unify` snippet.
+
+## Testing
+
+```ts
+function snapshotOf(entries: [Knob<T>, T][]): Snapshot;
+// literal values, still validated, zero process.env mutation
+```
+
+## Bake — the CLI
+
+```ts
+// config.manifest.ts — side-effect-free by contract; bake executes it in a
+// constrained context (knob construction is inert, so I/O here is detectable)
+export default {
+  targets: {
+    client: [...appPublicKnobs, ...widgetKnobs], // app attestation: deny-by-default
+    server: [...allKnobs],
+  },
+};
+```
+
+```bash
+knobs bake           # generate per-target modules + .env.example + CONFIG.md + manifest.json + leak scan
+knobs bake --check   # CI drift gate
+knobs bake --watch   # dev / HMR (dev output is unscanned — banner says so)
+```
+
+Per target:
+
+- **client** → `config.baked.ts`: public literal values plus an inlined ~30-line snapshot
+  shim that imports nothing at runtime (zero runtime dependency), carries the `Scope`
+  brand and per-knob identity hashes, and throws `StaleBakeError` on bake/runtime skew.
+  A secret knob in `targets.client` fails the bake.
+- **server** (optional wiring) → dynamic computed env access (`process.env[keys[i]]`),
+  never static `process.env.KEY` (bundler `define` folds static member expressions into
+  literal secrets), and never values.
+
+Bake **never resolves secret values** — public values and secret key *names* only.
+Secrets validate at runtime, where the value actually lives. See
+[Bake](/docs/bake/overview) and the [leak scan](/docs/bake/leak-scan).
+
+## Error taxonomy
+
+`MissingConfigError` · `UnboundKnobError` · `DescriptorMismatchError` · `NotInScopeError` ·
+`ExposureError` · `AsyncSourceInBindError` · `AsyncValidatorInSyncBindingError` ·
+`NoValidValueError` · `StaleBakeError` — every error names the knob key, the layer, and a
+next step. For secret knobs, BYO validator text is untrusted (validators echo received
+values): reports carry issue counts and paths only. Full details:
+[Error taxonomy](/docs/reference/errors).

@@ -1,0 +1,168 @@
+---
+title: Bake
+description: The build-time CLI that turns declared knobs into client artifacts, server wiring, and generated docs — the only channel by which config reaches the browser.
+---
+
+## What bake is
+
+`knobs bake` is a bundler-agnostic CLI build step. It runs before (or alongside) Vite, webpack, esbuild, Next — anything. It is not a plugin, and it does not need to be one: bake reads your manifest, emits plain modules and files, and your bundler consumes them like any other source.
+
+More importantly, bake is the **only client delivery channel**. Browser code never reads an env bag, never parses anything at runtime, and never imports the `knobs` package at all in production. Config reaches the client exclusively as a generated module. That inversion is what makes the rest of the defense stack enforceable: there is exactly one road into the bundle, so every control watches one road.
+
+This also answers "how do I enumerate my config?" There is no runtime registry in core, ever — enumeration is bake's job, done at build time from the manifest.
+
+## The manifest
+
+Bake is driven by one file, `config.manifest.ts`:
+
+```ts
+// config.manifest.ts
+import { appPublicKnobs } from "./src/config/public";
+import { widgetKnobs } from "@acme/widget/knobs";
+import { allKnobs } from "./src/config/all";
+
+export default {
+  targets: {
+    client: [...appPublicKnobs, ...widgetKnobs],
+    server: [...allKnobs],
+  },
+};
+```
+
+### Targets are an app attestation
+
+The `client` list is **deny-by-default**. A package declaring `exposure: "public"` on a knob is *necessary* — bake refuses to put any secret-exposure knob in a client target — but it is **not sufficient**:
+
+```ts
+// Inside @acme/widget — the package's opinion:
+export const widgetTheme = knob({
+  key: "WIDGET_THEME",
+  schema: z.enum(["light", "dark"]),
+  exposure: "public",
+  doc: "Default widget theme",
+});
+// This value reaches YOUR browser bundle only if YOUR manifest
+// lists it in targets.client. A dependency cannot ship itself.
+```
+
+Two parties must agree before a value is shipped to an untrusted client: the package that declared the knob public, and the application that listed it in `targets.client`. Env-sourced values crossing into the client artifact go through this allowlist; nothing rides along implicitly.
+
+### The manifest is side-effect-free — by contract, and detectably
+
+Bake executes `config.manifest.ts` in a constrained context. This is where knob inertness pays off structurally: constructing a knob performs zero I/O, zero validation, zero side effects — so a manifest module has *no legitimate reason* to touch the network, the filesystem, or child processes. Any I/O observed during manifest evaluation is a contract violation, and bake fails the build and reports the offending module.
+
+This closes the build-time RCE class that haunts eval-your-config-at-build tools: "run this config file" cannot quietly become "run this arbitrary program in CI with CI's credentials," because the legitimate behavior of the file is so narrow that everything else stands out.
+
+## What bake emits
+
+One `knobs bake` run produces, per the manifest:
+
+| Artifact | Contents |
+| --- | --- |
+| Client module (per `client` target) | Public literal values + an inlined snapshot shim (~30 lines) |
+| Server wiring module (optional, per `server` target) | Key *names* + dynamic env access — never values |
+| `.env.example` | Every key, its `doc` text, defaults for public knobs, blanks for secrets |
+| `CONFIG.md` | Human-readable inventory generated from `doc` fields |
+| `manifest.json` | Machine-readable inventory: keys, exposure, identity hashes, source refs — never values |
+| Leak-scan report | Findings from the allowlist scan over all emitted assets |
+
+### The client module: literals plus a zero-import shim
+
+The client artifact contains public literal values and an inlined shim of roughly thirty lines. It imports **nothing** at runtime — not even `knobs` — so the baked path is genuinely zero-runtime-dependency. The shim carries the `Scope` brand, so it satisfies the same type that `pick()` produces, and library code typed as `Scope<ConfigOf<typeof widgetKnobs>>` accepts it unchanged:
+
+```ts
+// Client code. Path and export shape shown are illustrative of the generated output.
+import { config } from "./config.baked";
+import { apiBaseUrl } from "./src/config/public";
+
+const url = config.get(apiBaseUrl); // sync, typed, hash-verified
+```
+
+Every entry in the shim carries the knob's identity hash, and `get()` verifies it on read. Upgrade `@acme/widget` to a version that changed a knob's schema, forget to re-bake, and the read fails loudly instead of returning a value validated against yesterday's contract:
+
+```ts
+config.get(widgetTheme);
+// StaleBakeError: WIDGET_THEME was baked from knobv1:xxh128:9f2e…
+// but the imported descriptor is knobv1:xxh128:c41a….
+// Re-run `knobs bake` (or `knobs bake --check` in CI would have caught this).
+```
+
+### The server wiring module: names, never values — and never static access
+
+For server targets, bake can emit an optional wiring module that enumerates which env keys the runtime bind expects. The emitted code always uses **dynamic computed access**:
+
+```ts
+// config.baked.server.ts (excerpt) — key NAMES only, never values
+const keys = ["DATABASE_URL", "DB_POOL_SIZE", "SMTP_PASSWORD"];
+for (let i = 0; i < keys.length; i++) {
+  raw[keys[i]] = process.env[keys[i]]; // computed — never process.env.DATABASE_URL
+}
+```
+
+Why is static `process.env.KEY` forbidden? Because webpack's DefinePlugin, esbuild's `define`, and their equivalents fold **static member expressions** into literals at build time. If server code containing `process.env.SMTP_PASSWORD` ever passes through a bundler with such a define configured, the build has just inlined a secret into an artifact. Computed access — `process.env[keys[i]]` — has no static member expression to fold, so there is nothing for a define pass to inline. The same rule is enforced on your own code by the client-side AST lint (see the defense stack below).
+
+### Generated docs
+
+`.env.example` and `CONFIG.md` are rendered from each knob's `doc` field — cosmetic metadata finally earning its keep:
+
+```bash
+# .env.example — generated by `knobs bake`; do not edit by hand.
+
+# Primary Postgres connection string  (secret — no value emitted)
+DATABASE_URL=
+
+# Connection pool size  (public, default: 4)
+DB_POOL_SIZE=4
+```
+
+## Bake never resolves secret values
+
+Bake reads **public values** and **secret key names**. It never resolves a secret value — not into the client artifact (obviously), not into the server wiring module, not into `manifest.json`, not into its own logs. Three things follow:
+
+1. **Secrets stay out of CI.** Your build machine needs no production credentials to produce a complete, correct build. There is nothing for a compromised CI runner or a leaked build log to exfiltrate via bake.
+2. **Build once, deploy many.** The artifact is environment-agnostic with respect to secrets; the same build promotes from staging to production because secret values were never captured at build time.
+3. **Secrets validate at runtime, where the value lives.** The server calls `bind()` or `load()` at boot; a missing or malformed secret surfaces there as an aggregated `MissingConfigError` — with the usual rule that for secret knobs the report carries issue counts and paths only, never validator messages or values.
+
+## CI drift gate and dev loop
+
+`bake --check` re-derives everything and diffs against the committed artifacts — the CI gate that makes "someone changed a knob and forgot to re-bake" a red build instead of a production `StaleBakeError`:
+
+```bash
+$ knobs bake --check
+✖ drift: config.baked is stale
+    WIDGET_THEME   baked knobv1:xxh128:9f2e…   manifest knobv1:xxh128:c41a…
+✖ drift: .env.example missing key SMTP_PASSWORD
+  run `knobs bake` and commit the result
+$ echo $?
+1
+```
+
+`bake --watch` rebuilds generated modules on change for dev servers and HMR. Watch-mode rebuilds skip the full leak scan for speed, and every watch artifact is stamped with an **unscanned-dev warning**: these outputs are for the dev loop only and must never be deployed. The full scan runs on every plain `knobs bake` and `bake --check`.
+
+## Mandatory-ness attaches to the trust boundary
+
+Baking is not mandatory because builds are virtuous; it is mandatory exactly where the artifact crosses to an **untrusted runtime**:
+
+- **Declared client targets must bake.** Skipping bake with a `client` target declared fails the build: the generated module is the only way client code can read config, so its absence is an unresolvable import — and the required targets declaration turns that into a diagnosable "you declared an untrusted target and didn't bake it" instead of a mystery.
+- **Trusted servers may runtime-bind.** A server is free to skip baked wiring entirely and call `bind(allKnobs, [fromProcessEnv()])` at boot. The trust boundary is different: the process already holds the secrets.
+
+## The defense stack
+
+No single mechanism below is claimed sufficient. Each layer is listed with what it alone cannot catch — that honesty is the design, not a disclaimer:
+
+| Layer | What it does | What it alone cannot catch |
+| --- | --- | --- |
+| Required targets declaration | Makes client exposure an explicit app-level attestation; absence fails the build | Says nothing about what code does — only that the attestation exists |
+| Generated-module-only delivery | One road into the bundle; no runtime env reads on the client path | A developer hand-writing `process.env.X` in client code anyway (next layer's job) |
+| No-secret-sources browser entry | The universal `knobs` entry contains no secret-capable sources, by construction | Values inlined by other means, e.g. a misconfigured define pass |
+| AST lint | Bans raw `process.env` / `import.meta.env` reads in client-designated code | Only what it parses — computed or obfuscated access, and generated code it never sees |
+| Coverage report | Diffs manifest vs client-reachable knobs; flags knobs read by client code but absent from the target | Config that never became a knob at all |
+| Allowlist leak scan | Flags any high-entropy string in emitted assets — including sourcemaps and decompressed `.gz`/`.br` — that is not a registered public value; catches hand-rolled non-knob secrets and accidental define-inlining; needs zero secret material in CI; findings never print values | Low-entropy values ("8080" is unscannable — bake warns explicitly and structural controls carry it); SSR request-time payloads, which are out of build-time scope and are closed instead by the runtime serialization guard on `Snapshot` |
+
+Waivers for scan findings exist, but they are explicit and audited — a suppression is a reviewed artifact, not a comment.
+
+## What bake is not
+
+- It is not a bundler, and it does not wrap yours.
+- It does not fetch secrets, talk to secret managers, or hold credentials — providers are runtime concerns.
+- It is not a runtime registry: after bake, the client artifact is inert data plus a thirty-line shim, and the server is ordinary `bind()`/`load()` calls.

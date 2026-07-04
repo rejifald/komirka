@@ -1,0 +1,174 @@
+---
+title: Identity and collisions
+description: How knobs are content-addressed, what happens when two copies of a descriptor meet, and which edits break identity across package versions.
+---
+
+## Why identity exists
+
+There is no runtime registry — not as a limitation, but as a rule of the design. A knob is a frozen object that a package exports; nothing anywhere keeps a global list of them. That means the same *logical* config value routinely exists as more than one *physical* object in a real dependency tree:
+
+- **Dual-package hazard.** A package published as both CJS and ESM can be loaded twice in one process. Each copy constructs its own descriptor object from the same source code.
+- **Diamond installs.** Your app depends on `@acme/mailer@2`, and a transitive dependency still bundles `@acme/mailer@1`. Two versions of `smtpUrl` now coexist in `node_modules`.
+- **Cross-package DI.** A library ships its knobs as inert descriptors and the app binds them at its composition root. The object the library reads with and the object the app bound are frequently not reference-equal.
+
+So `cfg.get(knob)` cannot key on object reference, and it cannot key on `key` alone — two packages may legitimately use the same key with different contracts. It keys on **content-addressed identity**: the descriptor *is* the identity.
+
+## What counts as identity
+
+Every field of a descriptor is in exactly one of two buckets.
+
+| Field | Bucket | Why |
+| --- | --- | --- |
+| `key` | identity | The canonical name of the value. |
+| `exposure` | identity | A secret/public flip must never unify silently. |
+| `sources` | identity | Precedence is order-significant; reordering changes meaning. |
+| `default` | identity | Presence **and** value both count — adding a default changes behavior. |
+| `schemaId` | identity, when available | A vendor fingerprint of the schema, or your explicit `version` discriminator. |
+| `doc` | cosmetic | See below. |
+| `examples`, `deprecation` | cosmetic | Documentation, not contract. |
+| any unknown field | cosmetic | Forward-compatible: future metadata never breaks old identities. |
+| `freshness` | excluded | Describes how a binding reads the value, not what the value is. |
+
+`doc` is excluded deliberately. A docs-only patch release — a typo fix, a changelog-driven wording change — must produce a descriptor that still binds against the previous version's. If prose were identity, every documentation edit would make two package versions unbindable against each other, which is exactly the failure mode identity exists to prevent.
+
+Identity is computed over the *effective* descriptor: omitted fields normalize first (`exposure` defaults to `"secret"`, `sources` defaults to the single env source named by `key`), so spelling a default out explicitly does not change the hash.
+
+The `schema` object itself is not JSON and does not round-trip; `schemaId` stands in for it. When the validator vendor provides a fingerprint, that is used. Otherwise your explicit `version` string is the discriminator — which is why the compatibility contract at the bottom of this page tells you to bump it on every schema change.
+
+## The hash: knobv1, RFC 8785, xxh128
+
+The identity subset is serialized as RFC 8785 (JCS) canonical JSON, prefixed with the literal string `knobv1|`, and hashed with xxh128:
+
+```ts
+import { knob, identityOf } from "knobs";
+import { z } from "zod";
+
+export const smtpUrl = knob({
+  key: "SMTP_URL",
+  schema: z.string().url(),
+  doc: "SMTP relay endpoint",
+  version: "2",
+});
+
+identityOf(smtpUrl);
+// "knobv1:xxh128:9f2c77aa…"
+```
+
+**The hash is an index, not a security boundary.** Bindings use it for fast lookup, but whenever a read resolves through anything other than the exact bound object, structural equality of the identity subset is what decides — an accidental (or crafted) xxh128 collision cannot forge a match, because the canonical descriptors are compared field by field. Structural equality is authoritative; the hash is a shortcut to it.
+
+The same philosophy applies to detecting knobs at all: a descriptor is recognized by its structural `$knob` brand, never by `instanceof`. `instanceof` fails in precisely the situations identity exists to solve — two module copies mean two class realms, and a JSON-round-tripped descriptor was never constructed by any class in the first place.
+
+## The three-way get() contract
+
+Every read resolves to exactly one of three outcomes:
+
+1. **Hit** — the descriptor (by reference, or by identity) is bound; you get the validated value.
+2. **`UnboundKnobError`** — no knob with this key is bound at all. There is no ambient fallback; a read outside a binding is a named error, never a guess.
+3. **`DescriptorMismatchError`** — the key *is* bound, but under a **different** descriptor.
+
+The third case is the diamond install making contact:
+
+```ts
+import { bind } from "knobs";
+import { fromProcessEnv } from "knobs/node";
+import { smtpUrl } from "@acme/mailer/knobs"; // v2: schema tightened, version: "2"
+
+const cfg = bind([smtpUrl], [fromProcessEnv()]);
+
+// Meanwhile, a transitive dependency still bundles @acme/mailer@1,
+// whose copy of the descriptor carries version: "1". When that copy reads:
+cfg.get(smtpUrlV1);
+// throws DescriptorMismatchError
+```
+
+The error carries both canonical descriptors, a field-level diff, and a paste-able resolution:
+
+```txt
+DescriptorMismatchError: key "SMTP_URL" is bound, but under a different descriptor.
+
+  requested   knobv1:xxh128:41c09be2…
+    { "key": "SMTP_URL", "exposure": "secret",
+      "sources": [{ "env": "SMTP_URL" }], "schemaId": "1" }
+
+  bound       knobv1:xxh128:9f2c77aa…
+    { "key": "SMTP_URL", "exposure": "secret",
+      "sources": [{ "env": "SMTP_URL" }], "schemaId": "2" }
+
+  diff
+    schemaId   "1" -> "2"
+
+  If these contracts are compatible, accept one descriptor and alias the
+  other identity at your composition root:
+
+    bind(knobs, sources, {
+      unify: [{ accept: smtpUrl, aliases: ["knobv1:xxh128:41c09be2…"] }],
+    })
+```
+
+Descriptors contain no resolved values, so this error is safe to log even for secret knobs — it prints contracts, never configuration.
+
+## Resolving deliberately: unify at bind
+
+When you have inspected the diff and decided the two contracts are compatible, you resolve the collision where all binding decisions live — the composition root:
+
+```ts
+const cfg = bind([smtpUrl], [fromProcessEnv()], {
+  unify: [
+    // Reads made through the old v1 identity resolve to the v2 binding.
+    { accept: smtpUrl, aliases: ["knobv1:xxh128:41c09be2…"] },
+  ],
+});
+```
+
+`accept` names the descriptor you consider authoritative; `aliases` lists identity hashes that should resolve to it. This is an explicit, app-owned decision — because there is no global registry and no `provide()`, a dependency cannot redirect this from import time. Only the code that calls `bind` can.
+
+## Validation never silently downgrades
+
+Hash-fallback resolutions — the dual-package case, where two *identical-identity* descriptor instances exist — always **re-validate with the caller's schema** before returning:
+
+```ts
+// copyA and copyB are different objects from two module instances,
+// but identityOf(copyA) === identityOf(copyB).
+const cfg = bind([smtpUrlCopyA], [fromProcessEnv()]);
+
+cfg.get(smtpUrlCopyB);
+// hash-fallback hit: the raw value is re-validated with copyB's own schema
+// before it is returned (memoized per schema — it runs once, not per read).
+```
+
+The same rule holds for reads through a `unify` alias: the aliased caller's value is validated by the aliased caller's schema. The point is invariant either way — a package that typed its API against its schema's output gets exactly that guarantee, no matter which physical copy of the descriptor happened to be bound first. Validation can never silently downgrade across package copies.
+
+## Collisions that never happen — and the ones that warn
+
+Two packages using the same key are not automatically in conflict. `@acme/http` and `@acme/queue` can both ship a knob named `TIMEOUT_MS`; bound in separate bindings, they never interact, because there is nothing global for them to collide in:
+
+```ts
+const httpCfg = bind(httpKnobs, [fromProcessEnv()]);
+const queueCfg = bind(queueKnobs, [fromProcessEnv()]);
+// No conflict. No registry, no ambient state, no meeting point.
+```
+
+If both land in **one** binding, each stays independently readable — `get()` is identity-addressed, so each descriptor resolves its own contract — but dev mode warns, because two contracts over one raw key is usually version drift you have not noticed yet:
+
+```ts
+const cfg = bind([...httpKnobs, ...queueKnobs], [fromProcessEnv()]);
+// [knobs] dev warning: duplicate key "TIMEOUT_MS" bound under two identities
+//   knobv1:xxh128:0d11… and knobv1:xxh128:77aa…
+```
+
+## The compatibility contract for library authors
+
+If you ship knobs, your descriptor's identity fields are API surface. This table is the changelog rule of thumb:
+
+| Edit to a published knob | Identity | Consequence |
+| --- | --- | --- |
+| Improve `doc`, `examples`, deprecation notes | preserved | Patch-safe; old and new versions still unify. |
+| Add custom metadata fields | preserved | Unknown fields are cosmetic by rule. |
+| Rename `key` | **broken** | It is a different knob now; document the migration. |
+| Change `exposure` | **broken** | Deliberate — a secret/public flip must force a decision downstream. |
+| Add, remove, or reorder `sources` | **broken** | Precedence order is meaning. |
+| Add or remove `default`, or change its value | **broken** | Presence and value both count. |
+| Bump `version` | **broken** | That is its job: bump it on every schema change. |
+| Change the schema *without* bumping `version` (no vendor fingerprint) | preserved | Silent-drift hazard — identity cannot see the schema itself. This is why `version` exists, and why caller-schema re-validation is the runtime backstop. |
+
+An identity break is not a bug; it is `DescriptorMismatchError` doing its job — surfacing, at the composition root, that two package versions disagree about a contract. The app either upgrades the lagging dependency or unifies explicitly, with the diff in front of it. What identity refuses to do is let that disagreement resolve itself quietly.

@@ -1,0 +1,272 @@
+---
+title: Node server
+description: End-to-end Express walkthrough — knobs declared per module, one eager bind at the composition root, and factories that receive exactly the scope they need.
+---
+
+## The shape of the app
+
+Three rules do all the work on a Node server:
+
+1. **Declare knobs next to the code that reads them.** The database module owns the database knobs, the billing module owns Stripe's. There is no central config module.
+2. **Bind once, at the composition root.** `main.ts` is the only file that touches sources. `bind` is eager, so a broken environment kills the process before it can accept a single request.
+3. **Hand each factory a picked scope.** A factory's signature declares exactly which knobs it reads; everything else is invisible to it — at compile time and at runtime.
+
+## Declare knobs where they're used
+
+Knob construction is inert — zero I/O, zero validation, zero side effects — so these modules are free to import from anywhere, including tests and build tooling.
+
+```ts
+// src/db/knobs.ts
+import { knob, defineKnobs } from "knobs";
+import { z } from "zod";
+
+export const dbUrl = knob({
+  key: "DATABASE_URL",
+  schema: z.string().url(),
+  doc: "Primary Postgres connection string",
+  // exposure defaults to "secret" — fail closed. Safe requires no annotation.
+});
+
+export const poolSize = knob({
+  key: "DB_POOL_SIZE",
+  schema: z.coerce.number().int().min(1).max(64), // Knob<number> — T is the schema OUTPUT
+  doc: "Max connections in the pg pool",
+  exposure: "public",
+  default: 10, // validated at bind like any sourced value — defaults get no privileged path
+});
+
+export const dbKnobs = defineKnobs([dbUrl, poolSize]);
+```
+
+```ts
+// src/billing/knobs.ts
+import { knob, defineKnobs } from "knobs";
+import { z } from "zod";
+
+export const stripeKey = knob({
+  key: "STRIPE_SECRET_KEY",
+  schema: z.string().startsWith("sk_"),
+  doc: "Stripe API secret key",
+});
+
+export const webhookSecret = knob({
+  key: "STRIPE_WEBHOOK_SECRET",
+  schema: z.string().startsWith("whsec_"),
+  doc: "Signing secret for verifying Stripe webhook payloads",
+});
+
+export const billingKnobs = defineKnobs([stripeKey, webhookSecret]);
+```
+
+## Factories take a scope, not the world
+
+The signature is the contract: `createRepo` can read the database knobs and nothing else. The root snapshot is deliberately **not** assignable to `Scope` — only `pick()` produces one — so you cannot accidentally pass the whole config through a narrow door.
+
+```ts
+// src/db/repo.ts
+import { Pool } from "pg";
+import type { Scope, ConfigOf } from "knobs";
+import { dbKnobs, dbUrl, poolSize } from "./knobs";
+
+export function createRepo(cfg: Scope<ConfigOf<typeof dbKnobs>>) {
+  const pool = new Pool({
+    connectionString: cfg.get(dbUrl),
+    max: cfg.get(poolSize),
+  });
+
+  return {
+    async findUser(id: string) {
+      const { rows } = await pool.query("select * from users where id = $1", [id]);
+      return rows[0] ?? null;
+    },
+    close: () => pool.end(),
+  };
+}
+```
+
+```ts
+// src/billing/client.ts
+import type { Scope, ConfigOf } from "knobs";
+import { billingKnobs } from "./knobs";
+
+export function createBilling(cfg: Scope<ConfigOf<typeof billingKnobs>>) {
+  /* Stripe client + webhook verification, reading cfg.get(stripeKey) etc. */
+}
+```
+
+Calling `createRepo` without a bound, picked scope is a compile error — a dependency cannot conjure config out of thin air, and neither can your own modules.
+
+## The composition root
+
+```ts
+// src/main.ts
+import express from "express";
+import { bind, knob } from "knobs";
+import { fromProcessEnv } from "knobs/node";
+import { z } from "zod";
+import { dbKnobs } from "./db/knobs";
+import { billingKnobs } from "./billing/knobs";
+import { createRepo } from "./db/repo";
+import { createBilling } from "./billing/client";
+
+// main.ts is the call site for the port, so its knob lives here — near its use.
+const port = knob({
+  key: "PORT",
+  schema: z.coerce.number().int().min(1).max(65535),
+  exposure: "public",
+  default: 3000,
+});
+
+const root = bind([...dbKnobs, ...billingKnobs, port], [fromProcessEnv()]);
+
+const repo = createRepo(root.pick(dbKnobs));
+const billing = createBilling(root.pick(billingKnobs));
+
+const app = express();
+
+app.get("/users/:id", async (req, res) => {
+  const user = await repo.findUser(req.params.id);
+  if (!user) return res.status(404).end();
+  res.json(user);
+});
+
+app.post("/webhooks/stripe", express.raw({ type: "application/json" }), (req, res) => {
+  const ok = billing.verifyWebhook(req.body, req.header("stripe-signature") ?? "");
+  res.status(ok ? 204 : 400).end();
+});
+
+app.listen(root.get(port));
+```
+
+`bind` is eager over the bound subset: every listed knob is resolved and validated on that one line. A broken environment fails once, with the complete picture — one aggregated `MissingConfigError`, not one crash per variable per redeploy:
+
+```text
+MissingConfigError: 3 of 5 knobs failed to bind
+
+  DATABASE_URL        missing   no source produced a value  (tried: env DATABASE_URL)
+  STRIPE_SECRET_KEY   missing   no source produced a value  (tried: env STRIPE_SECRET_KEY)
+  DB_POOL_SIZE        invalid   1 issue at value            (from: env DB_POOL_SIZE)
+```
+
+For secret knobs the report carries issue counts and paths only — never validator messages, because BYO validators echo the values they receive. When a value binds but you're not sure where it came from, `root.explain(dbUrl)` names the winning source and resolved key, with secret values redacted.
+
+## Async secrets at boot: load()
+
+Production often keeps secrets in a manager, not in env. A knob's `sources` array is ordered precedence, so one descriptor covers prod and local dev:
+
+```ts
+// src/billing/knobs.ts
+export const stripeKey = knob({
+  key: "STRIPE_SECRET_KEY",
+  schema: z.string().startsWith("sk_"),
+  doc: "Stripe API secret key",
+  sources: [
+    { provider: "ssm", key: "/prod/billing/stripe-key" }, // preferred in prod
+    { env: "STRIPE_SECRET_KEY" },                         // local-dev fallback
+  ],
+});
+```
+
+Fetching from SSM is async, and `bind` is strictly synchronous. `load` is the async door — and it is async exactly **once**:
+
+```ts
+// src/main.ts
+import { load } from "knobs";
+import { fromProcessEnv } from "knobs/node";
+// Providers are plain functions you own — knobs ships no cloud SDK clients.
+// ./config/ssm is a thin wrapper over @aws-sdk/client-ssm; see the sources guide.
+import { ssmProvider } from "./config/ssm";
+
+const root = await load([...dbKnobs, ...billingKnobs, port], [fromProcessEnv(), ssmProvider]);
+// One await, at boot. The returned Snapshot is pinned:
+// every read after this line is synchronous, including deep inside request handlers.
+```
+
+Handing an async source to `bind` is not a footgun that fires later — it doesn't compile (sources carry a kind discriminant), and forcing it past the types throws `AsyncSourceInBindError` at runtime. Likewise a schema that turns out to be async — async-ness can be input-dependent, so every validation site checks — throws `AsyncValidatorInSyncBindingError` rather than silently returning a pending promise.
+
+## .env files
+
+Core never parses files — there is no `.env` reader in `knobs`. The recommended route is to let Node populate the process environment itself:
+
+```bash
+node --env-file=.env dist/main.js
+```
+
+`fromProcessEnv()` then sees those values like any other environment variable. If you need more than `--env-file` offers, dotenv is a userland provider you pass alongside the others — a source implementation, not a core concern. And because every knob carries a `doc` field, `knobs bake` keeps a `.env.example` generated for you, so the file new teammates copy is never stale.
+
+## Boot errors vs runtime errors
+
+Boot errors mean the **environment** is wrong: loud, aggregated, thrown before `listen`. Runtime errors mean the **wiring** is wrong: named, precise, and never a silent fallback.
+
+| Error | Thrown when | Phase |
+| --- | --- | --- |
+| `MissingConfigError` | a bound knob is missing or invalid — aggregated across the whole set | boot (`bind` / `load`) |
+| `AsyncSourceInBindError` | an async source is handed to synchronous `bind` | boot |
+| `AsyncValidatorInSyncBindingError` | a schema returns a thenable at any validation site | boot, or first read under `bind.lazy` |
+| `UnboundKnobError` | `get` is called with a knob the binding never listed | runtime |
+| `NotInScopeError` | `get` goes through a `Scope` that did not pick that knob | runtime |
+| `DescriptorMismatchError` | the same key resolves through two different descriptors (dual-package installs); carries a field-level diff and a paste-able `unify` snippet | runtime |
+
+There is no fallback path: a read that cannot be answered throws one of these names, never `undefined`. For a genuinely optional read, say so in code:
+
+```ts
+const size = root.tryGet(poolSize);
+if (size.ok) tunePool(size.value);
+```
+
+## Anti-patterns
+
+### One god-module of every knob
+
+```ts
+// ✗ src/config/index.ts — "the config file", imported by everything
+export const allKnobs = defineKnobs([
+  dbUrl, poolSize, stripeKey, webhookSecret, port, /* …and forty more */
+]);
+```
+
+Groups are declared near call sites, never as one central module imported at runtime. A god-module makes every importer depend on every config domain, erases the least-privilege story `pick()` gives you (one scope containing everything is no scope at all), and turns every knob change into an app-wide rebuild. The composition root spreading `[...dbKnobs, ...billingKnobs]` into a single `bind` call is different in kind: `main.ts` is the *only* module that sees everything, and it sees them as separate groups it immediately picks apart.
+
+### Reading outside the composition root
+
+```ts
+// ✗ src/db/repo.ts — module-scope binding inside a leaf module
+import { bind } from "knobs";
+import { fromProcessEnv } from "knobs/node";
+import { dbUrl } from "./knobs";
+
+const cfg = bind([dbUrl], [fromProcessEnv()]); // hidden import-time work, and a
+export const pool = makePool(cfg.get(dbUrl));  // second binding to drift from main.ts
+```
+
+Values exist only inside explicit bindings — there is no ambient global to fall back on, so the temptation is to mint a private binding per module. Don't: it re-reads sources at import time, dodges the aggregated boot check, and can disagree with the root about precedence. Leaf modules export knobs and factories; only the root binds.
+
+The same discipline holds inside handlers. A scope will not let code wander past what it was given:
+
+```ts
+const dbScope = root.pick(dbKnobs);
+
+// ✗ a handler reaching past its scope
+app.get("/debug/billing", (_req, res) => {
+  res.json({ key: dbScope.get(stripeKey) });
+  // NotInScopeError: STRIPE_SECRET_KEY is not in this scope
+});
+```
+
+To be honest about the boundary: `pick()` is least-privilege for mistakes and for auditability, not a sandbox — hostile in-process code can always read `process.env` directly. What it guarantees is that *your* dependency graph states, in types and at runtime, who reads what.
+
+## Testing the factories
+
+Because factories accept a scope rather than reading the environment, tests never touch `process.env`:
+
+```ts
+// test/repo.spec.ts
+import { snapshotOf } from "knobs/testing";
+import { dbKnobs, dbUrl, poolSize } from "../src/db/knobs";
+import { createRepo } from "../src/db/repo";
+
+const cfg = snapshotOf([[dbUrl, "postgres://localhost/test"], [poolSize, 2]]);
+const repo = createRepo(cfg.pick(dbKnobs)); // still validated — a bad literal fails here, not in CI at 2am
+```
+
+Construct a fresh snapshot per test and pass it in. No mutation, no restore-after-each, no test-order coupling.

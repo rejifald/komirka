@@ -1,0 +1,122 @@
+---
+title: What is this?
+description: Atomic configuration — each config value is an inert, documented, validated descriptor, bound explicitly per runtime.
+---
+
+> **Design phase.** No code exists yet. This site presents the design *as documentation* —
+> pages read like real library docs because that is the fastest way to evaluate a design.
+> The primitive is provisionally called `knob` and the package `knobs`; final naming is an
+> [open decision](/docs/reference/decisions).
+
+## The problem
+
+Configuration libraries ship as runtime-focused monoliths. One `createEnv()` / `cleanEnv()`
+call loads, parses, and validates every declared value at import time — even if this
+entrypoint reads one of them. The consequences are familiar:
+
+- **Boot-crash coupling** — your queue worker dies at startup because `ANALYTICS_KEY`,
+  which it never reads, is unset in its environment.
+- **Runtime lock-in** — import-time validation structurally cannot see Cloudflare Workers'
+  per-request `env`, browsers have no `process.env` at all, and tests resort to mutating
+  the global environment.
+- **Undocumented strings** — `process.env.STRIPE_KEY!` has no type, no docs, no
+  discoverability, and no opinion about whether it may reach a client bundle.
+
+## The idea
+
+Make configuration **atomic**. Each config value is one `knob`: an inert, frozen,
+JSON-serializable descriptor carrying its name, its validator, its documentation, its
+trust level, and where its value may come from. Descriptors do nothing at import. Values
+exist only inside **bindings** you create explicitly, per runtime:
+
+```ts
+// config/db.ts — inert descriptors; importing this file costs bytes, not behavior
+import { knob } from "knobs";
+import { z } from "zod";
+
+export const dbUrl = knob({
+  key: "DATABASE_URL",
+  schema: z.string().url(),
+  doc: "Primary Postgres connection string",
+  // exposure defaults to "secret" — fail closed
+});
+
+export const poolSize = knob({
+  key: "DB_POOL_SIZE",
+  schema: z.coerce.number().int().min(1).max(100),
+  default: 10,
+  exposure: "public",
+  doc: "Max pooled connections",
+});
+```
+
+```ts
+// Node — eager validation of exactly what this entrypoint uses, at boot
+import { bind } from "knobs";
+import { fromProcessEnv } from "knobs/node";
+import { dbUrl, poolSize } from "./config/db";
+
+const cfg = bind([dbUrl, poolSize], [fromProcessEnv()]);
+const pool = new Pool({ connectionString: cfg.get(dbUrl), max: cfg.get(poolSize) });
+```
+
+```ts
+// Cloudflare Worker — the same descriptors, bound to the per-request env bag
+import { bind } from "knobs";
+import { fromWorkerEnv } from "knobs/workers";
+
+export default {
+  fetch(req: Request, env: Env) {
+    const cfg = bind([dbUrl], [fromWorkerEnv(env)]);
+    return handle(req, cfg);
+  },
+};
+```
+
+```ts
+// Tests — literal snapshots, zero process.env mutation
+import { snapshotOf } from "knobs/testing";
+
+const cfg = snapshotOf([[dbUrl, "postgres://localhost:5432/test"], [poolSize, 2]]);
+```
+
+```ts
+// Browser — no binding at all: config arrives as baked literals, secrets structurally excluded
+import { config } from "./config.baked";
+```
+
+## What the design claims
+
+1. **One config contract, explicitly bound per runtime.** The same descriptor works on
+   Node, Workers (per-request env — the case import-time validators cannot serve),
+   browsers (via [bake](/docs/bake/overview)), and tests. Validation is eager over exactly
+   the set each entrypoint binds — fail-fast at boot without the monolith.
+2. **Secrets are first-class and fail-closed.** `exposure` defaults to `secret`; the
+   browser entry ships no secret-capable sources (a structural guarantee, not a policy
+   check); [bake](/docs/bake/overview) is the only client delivery channel and its
+   [leak scan](/docs/bake/leak-scan) checks everything the build emits. Every guarantee
+   states its boundary — see the [secrets model](/docs/concepts/secrets).
+3. **Testing without global state.** No ambient binding exists, so parallel tests cannot
+   interfere and nothing ever mutates `process.env`.
+
+Validation is **BYO via Standard Schema** — zod, valibot, arktype all work; the library
+has zero runtime dependencies of its own.
+
+## Where to start
+
+- [The knob](/docs/concepts/knob) — the descriptor, field by field.
+- [Binding and snapshots](/docs/concepts/binding) — where values live.
+- [Principles](/docs/principles) — every constraint, pitfall, and security concern, in one
+  place. This is the project's constitution.
+- [Node server](/docs/guides/node-server) / [Workers](/docs/guides/cloudflare-workers) /
+  [Browser](/docs/guides/browser) / [Testing](/docs/guides/testing) — end-to-end
+  walkthroughs.
+- [Open decisions](/docs/reference/decisions) — what is deliberately not settled yet,
+  including naming.
+
+## Relationship to StitchAPI
+
+Same author, same design gates (browser-first, bundle-frugal, contract-not-dependency).
+StitchAPI is the first planned consumer — as a **devDependency**: its build-time constants
+get baked to literals, preserving its zero-runtime-dependency guarantee. This project is
+standalone and must stand on its own.
