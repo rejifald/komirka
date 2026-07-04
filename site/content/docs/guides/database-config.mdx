@@ -19,7 +19,8 @@ interface AsyncProvider {
   name: string;
   read(key: string): Promise<{ raw: string | Json; version?: string } | undefined>;
   readMany?(keys: readonly string[]): Promise<Map<string, { raw: string | Json; version?: string } | undefined>>;
-  write?(key: string, raw: string | Json, opts?: { ifVersion?: string }): Promise<{ version?: string }>;
+  write?(key: string, raw: string | Json, opts?: { ifVersion?: string }): Promise<{ version?: string; storedRaw?: string | Json }>;
+  capabilities?: { versionTokens?: "unique" | "coarse" | "none"; strongRead?: boolean; echoWrite?: boolean; normalizes?: boolean };
   writeMany?(entries: ReadonlyArray<{ key: string; raw: string | Json; ifVersion?: string }>): Promise<void>;
 }
 ```
@@ -154,6 +155,82 @@ await cfg.set(logLevel, "debug");
 // NotWritableError: "log.level" is currently supplied by file "./config.local.json",
 // which shadows provider "pg". Remove the local override or write to the file.
 ```
+
+## Verifying writes: did the store keep what you gave it?
+
+`set()` validates what you *intend* to write — nothing yet proves what the store *kept*.
+Column truncation, charset mangling, JSON number precision loss, a `BEFORE UPDATE`
+trigger: all of these can silently store something other than your bytes, and the mangled
+row then reaches every replica at its next staleness expiry. Worst of all is the
+mangled-but-*valid* case — an endpoint URL truncated at column width to
+`https://api.example.com/v` is still a URL, so the poisoned-slot machinery never fires
+and the fleet silently adopts corrupted config. Write verification is the only thing that
+catches that class.
+
+```ts
+const result = await cfg.set(endpointUrl, url, { ifVersion: version, verify: "revert" });
+// SetResult: { version, outcome: "verified" | "inconclusive" | "superseded", reason? }
+```
+
+**How verification works, in order of preference:**
+
+- **Write-echo** (`capabilities.echoWrite`): the provider's `write()` returns
+  `{ version, storedRaw }` — Postgres `UPDATE … RETURNING`, DynamoDB
+  `ReturnValues: ALL_NEW`. Verification compares in the *same round trip*: zero extra
+  requests, no replica-lag ambiguity. This is the primary mechanism.
+- **Strong read-back** (`capabilities.strongRead`): one re-read from the
+  primary/consistent path, matched by version token.
+- Plain read-back works but is chronically **inconclusive** behind lagging replicas — the
+  read may predate your own write.
+
+**Equality is judged at the schema level**, not byte level: verified means the read-back
+byte-equals what you wrote *or* re-validates to a structurally equal parsed value. A
+JSONB store reordering keys passes; truncation, mangling, and precision loss fail —
+they change the parsed output. A per-knob `equals()` hook is the escape hatch for stores
+whose rewrites are semantic-preserving but schema-visible.
+
+**Outcomes are honest about certainty:**
+
+- `verified` — version-matched, content equal. Done.
+- `inconclusive` — the write *committed* but could not be confirmed (stale read-back,
+  missing row on a fresh create, provider omitted the version). This is a non-throwing
+  return, and the parsed value is still installed locally — the write succeeded; the
+  residual uncertainty is exactly what unverified writes carry anyway.
+- `superseded` — a concurrent writer landed after you; their write wins, no revert.
+- Confirmed mangling — version-matched, content different — throws **`WriteMangledError`**
+  with expected/actual digests and `nowLive: "prev" | "unknown"`. In `"report"` mode the
+  writer's local cache entry is immediately expired so it converges with the fleet
+  instead of split-braining until its own staleness window.
+
+**Auto-revert (`verify: "revert"`) restores the previous value on confirmed mangling — and
+it is deliberately hard to hold wrong.** Revert requires version-confirmed corruption
+(same version token, different content — *never* on inconclusive), which in turn requires
+the full precondition bundle, checked at the `set()` call with a typed
+`VerifyCapabilityError`:
+
+- the provider declares **unique** version tokens (a per-write row counter or etcd
+  revision — timestamps are not versions: two writes in one second would let a revert
+  clobber a concurrent writer's good value);
+- `echoWrite` or `strongRead` is available, and the provider does not declare
+  `normalizes: true`;
+- revert implies CAS on the original write, so `rawPrev` is provably the immediate
+  predecessor;
+- `rawPrev` exists (a *create* has nothing to revert to — downgraded to report) and
+  re-validates before being written back;
+- **secret knobs refuse revert unless opted in per knob** — auto-revert of a credential
+  rotation silently puts the *leaked* key back in service; the error's `nowLive` field
+  and previous-value digest exist so a rotation-undo is unmissable.
+
+The result reports `revertWritten` (the revert write was accepted) and `revertVerified`
+(one further read-back confirmed it) separately — against a store that rewrites every
+value, the revert is rewritten too, and pretending otherwise would be the same lie the
+feature exists to catch.
+
+Verification is a **writer-side early warning**, not the fleet's safety net: the fleet is
+protected by the poisoned-slot machinery and alerting on `InvalidLiveValueError` — except
+for mangled-but-valid values, which only verification sees. `setMany()` supports
+`verify: "report"` (requires `readMany`); atomic revert-of-many is deferred — a partially
+superseded batch would strand a mixed post-state that no one validated.
 
 ## Concurrent writers
 

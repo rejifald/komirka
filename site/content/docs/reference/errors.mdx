@@ -321,6 +321,9 @@ Conditional config and writable sources add their own named errors. They obey th
 - `WriteConflictError` — a compare-and-set write with `ifVersion` found the stored version had moved; re-read and retry.
 - `NotWritableError` — the write would be shadowed by a higher-precedence source, so its effect would never be observable; refused up front.
 - `WriteFailedError` — the provider failed during a write; the cause is scrubbed, the cache is untouched, and no epoch bump occurs.
+- `WriteMangledError` — write verification confirmed (version-matched, content different) that the store did not keep what was written; carries expected/actual digests, `revertWritten`/`revertVerified`, and `nowLive: "prev" | "unknown"` — a reverted secret rotation is unmissable.
+- `VerifyCapabilityError` — `verify: "revert"` requested from a provider missing its preconditions (unique version tokens, `echoWrite`/`strongRead`, non-normalizing); refused at the call site, in development, not as misbehavior in production.
+- `ProviderContractError` — a provider that declares versions returned a write without one; surfaced on first occurrence rather than silently degrading every verification to inconclusive.
 
 ## Summary
 

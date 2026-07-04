@@ -125,7 +125,13 @@ Every feature must pass all of these. "It would be convenient" never overrides a
   **context-free reads** (a `get()` that takes per-request/per-user context is a flag SDK
   — refuse), **uniform** (one value per process per knob), **operator-plane writes**
   (`set()` is for admin panels, CLIs, migrations; request-path `set()` is using config as
-  state).
+  state). Writes may be **verified** (opt-in `verify: "report" | "revert"`): the store's
+  kept value is confirmed via write-echo (`storedRaw` in the write's own round trip — the
+  preferred mechanism) or a strong read-back, with equality judged at the *schema* level
+  (byte-equal or structurally-equal parsed value: benign normalization passes,
+  truncation/mangling fails). Verification is a writer-side early warning — the fleet's
+  protection remains the poisoned-slot machinery — except for **mangled-but-valid**
+  values (a truncated URL that is still a URL), which only verification catches.
 
 ## 3. Pitfalls we must not (re)introduce
 
@@ -325,6 +331,25 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
   errors to admin UIs. *Rule:* structural redaction for secret knobs — hooks receive
   `{ rawDigest, length }`; core scrubs the raw from every surfaced message (best-effort,
   documented); `WriteFailedError` carries a scrubbed cause.
+- **Auto-revert without version-confirmed corruption is data-losing.** A read-back through
+  a lagging replica returns the *old* value after a successful write; a naive revert then
+  overwrites the operator's own save — or, with coarse version tokens (timestamps), a
+  concurrent writer's good value. *Rule:* revert fires only on version-confirmed
+  corruption (same **unique** token, different content — never on inconclusive, and an
+  undefined read-back is *always* inconclusive); the precondition bundle (unique tokens,
+  `echoWrite`/`strongRead`, CAS implied, prev exists and re-validates) is checked at the
+  call with `VerifyCapabilityError`. Inconclusive is a non-throwing *return* that still
+  installs the committed write — anything else recreates the "my save failed" false alarm.
+- **Byte-equality verification dies on normalizing stores.** JSONB reorders keys; triggers
+  trim; the revert is normalized too, so `verify: "revert"` would brick every write with
+  no fixpoint. *Rule:* equality at the schema level (byte-equal OR parsed-equal), per-knob
+  `equals()` escape hatch, and `normalizes: true` providers refuse revert. Revert results
+  are reported as `revertWritten` + `revertVerified`, never a single overclaiming flag.
+- **Auto-revert of a secret un-rotates a leaked credential.** The store mangles the *new*
+  key; revert silently puts the *compromised* one back in service while the error talks
+  about truncation. *Rule:* secret knobs refuse `verify: "revert"` unless opted in
+  per-knob; `WriteMangledError` always states `nowLive: "prev" | "unknown"` with the
+  previous value's digest so a rotation-undo is unmissable.
 
 ### Bundling & bake
 

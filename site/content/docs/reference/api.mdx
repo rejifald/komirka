@@ -183,16 +183,28 @@ interface AsyncProvider {
   name: string;
   read(key: string): Promise<{ raw: string | Json; version?: string } | undefined>;
   readMany?(keys: readonly string[]): Promise<Map<string, { raw; version? } | undefined>>;
-  write?(key: string, raw: string | Json, opts?: { ifVersion?: string }): Promise<{ version?: string }>;
+  write?(key: string, raw: string | Json, opts?: { ifVersion?: string }): Promise<{ version?: string; storedRaw?: string | Json }>;
   writeMany?(entries: ReadonlyArray<{ key; raw; ifVersion? }>): Promise<void>;
+  capabilities?: {
+    versionTokens?: "unique" | "coarse" | "none";  // timestamps are NOT versions
+    strongRead?: boolean; echoWrite?: boolean; normalizes?: boolean;
+  };
 }
 
 const cfg = bind.async(knobs, [pgProvider], { maxStalenessMs: 5_000 });
 await cfg.ready();        // THE startup line — one readMany, validates all listed knobs
 await cfg.get(k);         // colored read (scripts/jobs); request paths pin instead:
 await cfg.snapshot();     // fresh cache + one readMany for expired keys only
-await cfg.set(k, raw, { ifVersion });  // input-typed: validate raw → write raw verbatim
-                                       // → install PARSED in cache (read-your-writes) → epoch++
+await cfg.set(k, raw, { ifVersion, verify });  // input-typed: validate raw → write raw
+                                       // verbatim → install PARSED in cache (read-your-writes) → epoch++
+// verify: "off" (default) | "report" | "revert" → SetResult
+//   { version, outcome: "installed" | "verified" | "inconclusive" | "superseded" }
+// verified via write-echo (storedRaw, same round trip) or strong read-back; equality is
+// schema-level (byte-equal OR structurally-equal parsed). Confirmed mangling (version-
+// matched, content different) throws WriteMangledError { revertWritten, revertVerified?,
+// nowLive }. "revert" is capability-gated (unique version tokens + echoWrite/strongRead,
+// CAS implied, prev must exist and re-validate, secrets refuse unless opted in) —
+// VerifyCapabilityError at call time otherwise. Never reverts on inconclusive.
 await cfg.setMany(entries);            // post-state validated as a whole; atomic via writeMany
 await cfg.refresh();      // re-reads discriminants + full active branch as one coherent batch
 ```
@@ -276,7 +288,8 @@ Live: `InvalidLiveValueError` · `SourceUnavailableError` · `CoastBudgetExceede
 Variants: `InactiveVariantError` (subclass of `UnboundKnobError`) ·
 `MissingDiscriminantError` · `LiveDiscriminantError` · `AmbiguousKnobMembershipError` ·
 `VariantsNestingError` · `RuleViolationError` · `VariantsInClientTargetError`.
-Writes: `WriteConflictError` · `NotWritableError` · `WriteFailedError`.
+Writes: `WriteConflictError` · `NotWritableError` · `WriteFailedError` ·
+`WriteMangledError` · `VerifyCapabilityError` · `ProviderContractError`.
 Every error names the knob key, the layer, and a next step. For secret knobs, BYO
 validator text is untrusted (validators echo received values): reports carry issue counts
 and paths only. Full details: [Error taxonomy](/docs/reference/errors).
