@@ -128,6 +128,17 @@ Every feature must pass all of these. "It would be convenient" never overrides a
   protection remains the poisoned-slot machinery — except for **mangled-but-valid**
   values (a truncated URL that is still a URL), which only verification catches.
 
+- **P20 — Remaps are deployment wiring, never contract.** A knob's declared refs are the
+  library's contract (identity); *where that lives on this platform* is the deployment's
+  wiring (`prefix`/`rename` source transforms, `rebind`) — identity-preserving by
+  definition. Transforms are **data only** (no mapping functions), so bake can compute
+  every effective name; effective names propagate to *every* surface — `.env.example`,
+  the lockfile (`declared → effective`, normative), the leak scan's name union, and every
+  error message (effective name first, declared in parens). A non-secret knob may never
+  be remapped onto a name in the secret-name set (`RebindExposureError` — the laundering
+  ban); remap-created convergence errors (`RebindCollisionError`); remap soundness checks
+  run in the eager phase of every door.
+
 ## 3. Pitfalls we must not (re)introduce
 
 Catalogued from adversarial review. Each entry: the failure, then the rule that prevents it.
@@ -193,7 +204,34 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
 - **Cache keys that lie.** Memoize-by-raw must distinguish "raw absent → default used" from
   "raw equals the stringified default", and must record *which* source resolved (fallback
   chains change provenance without changing the string). *Rule:* cache key =
-  `(resolvedSourceIndex, rawString | ABSENT)`.
+  `(resolvedSourceIndex, rawString | ABSENT)`. With remapping, any value-stability
+  comparison keys on `(identity, effectiveRefsHash)` — two bindings may legally rebind
+  the same knob differently.
+- **Iterable snapshots are a typed lie.** TypeScript destructures iterables by *element
+  type*, never positionally — `const [url, size]` from an iterable types both slots as
+  the union; faking it with a tuple intersection makes `.map`/`.length` typecheck and
+  crash. *Rule:* snapshots are not iterable; the array form's `.values` is a genuine
+  frozen tuple, where positional inference is real (verified; requires TS ≥ 5.0 `const`
+  type parameters).
+- **`.values` is an aggregate leak surface.** One `logger.info({ cfg: cfg.values })`
+  would dump every secret in the binding — a class `get()` never enabled. *Rule:* the
+  values bag is null-prototype with a redacting `toJSON` and Node inspect hook; spread is
+  documented as "`get()` on every knob"; record keys `toJSON`/`then`/`constructor` are
+  rejected; the client/library lint bans `cfg.values` as a function argument or spread.
+  `Scope` carries the same `.values` view so the branded handoff is never worse
+  ergonomics than naked strings.
+- **Type widening must fail safe, not freeze silently.** A `Knob<string>` annotation
+  erases the freshness literal; if the sugar views survived widening, destructuring a
+  live binding would silently freeze liveness. *Rule:* freshness is a type parameter
+  defaulting to `'unknown'`, which gets *no* sugar (safe degradation) — plus the runtime
+  `LivenessViolationError` backstop.
+- **Remapped names escape name-keyed guards.** The leak scan, `.env.example`, the baked
+  name table, and error messages all keyed on *declared* names go blind (or start lying)
+  the moment a deployment remaps — a `MYAPP_STRIPE_KEY` in a client bundle matches
+  nothing, and "set SMTP_URL" directs the 3am fix at a variable nothing reads. *Rule:*
+  P20 — effective names propagate everywhere; runtime-only remaps on bake-covered client
+  targets are an error; the baked shim carries a remap digest (`RemapSkewError` on
+  drift).
 
 ### Runtimes & freshness
 

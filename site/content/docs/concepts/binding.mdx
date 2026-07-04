@@ -29,7 +29,7 @@ export const poolSize = knob({
 export const dbKnobs = defineKnobs([dbUrl, poolSize]);
 
 // the composition root — the only place sources are actually read
-const cfg = bind(dbKnobs, [fromProcessEnv()]);
+const cfg = bind(dbKnobs, fromProcessEnv()); // a single source needs no array
 
 cfg.get(dbUrl);    // string — sync, typed from the schema's output
 cfg.get(poolSize); // number
@@ -47,6 +47,57 @@ cfg.get(poolSize);
 ```
 
 `get()` has a three-way contract: a hit, `UnboundKnobError`, or `DescriptorMismatchError` when the same key was bound under a *different* descriptor. The mismatch error carries both canonical descriptors, a field-level diff, and a paste-able `unify` snippet — see the identity page for that story.
+
+## Call shapes: the snapshot mirrors what you bind
+
+`bind()` accepts a single entry, an array, or a record — and the snapshot grows a value
+view matching the shape you handed it. This is the answer to "what *is* `cfg`?": it is a
+`Snapshot` (pinned, immutable, carrying the full `get`/`pick`/`explain` API), and its
+`.value`/`.values` view mirrors your input.
+
+```ts
+// SINGLE — no brackets anywhere
+const cfg = bind(dbUrl, fromProcessEnv());
+cfg.value;                       // : string — the one value
+
+// ARRAY — .values is a real frozen tuple, positionally typed
+const cfg = bind([dbUrl, poolSize], fromProcessEnv());
+const [url, size] = cfg.values;  // : [string, number]
+
+// RECORD — .values is a typed record under YOUR names (recommended at composition roots)
+const cfg = bind({ db: dbUrl, pool: poolSize, email: emailVariants }, fromProcessEnv());
+cfg.values.db;                   // : string
+cfg.values.email;                // : the variants discriminated union — same as cfg.match(emailVariants)
+const { db, pool } = cfg.values;
+```
+
+Rules that keep the sugar honest:
+
+- **Every form returns a full `Snapshot`** — `.value`/`.values` are additive views, not a
+  different kind of object. The handle API (`get`, `tryGet`, `pick`, `explain`, `match`)
+  is always there.
+- **The snapshot is deliberately *not* iterable.** TypeScript cannot type positional
+  destructuring from an iterable (every slot would be the union of all value types), and
+  faking it with a tuple intersection would make `cfg.map(...)` typecheck and crash. The
+  tuple lives at `cfg.values`, where the types are exact.
+- **Lazy door:** touching a `.values` property *is* the first read — and JS destructuring
+  only reads the properties you list, so `const { db } = cfg.values` validates only `db`.
+  Prefer the record form when any slot may be poisoned: array destructuring cannot skip a
+  throwing position.
+- **Live and async bindings have no `.value`/`.values`** — destructuring would silently
+  freeze liveness. Pin first: `live.snapshot().values`. This is enforced in the type
+  (freshness is a type parameter; a type-widened `Knob<string>` fails *safe*, losing the
+  sugar rather than gaining a frozen value) and backstopped at runtime
+  (`LivenessViolationError`).
+- **The values bag is guarded.** It is a null-prototype object whose `toJSON` applies the
+  same secret redaction as `Snapshot.toJSON`, with a redacting Node inspect hook — so
+  `JSON.stringify(cfg.values)` and `console.log(cfg.values)` never dump secrets. Spreading
+  it (`{ ...cfg.values }`) copies raw values into an unguarded plain object: treat spread
+  as calling `get()` on every knob. Record keys `toJSON`, `then`, and `constructor` are
+  rejected at bind (`ReservedKeyError`).
+- `.values` is a **read view at the composition root** — the handoff type for libraries
+  remains a `pick()`ed `Scope` (which carries the same `.values` view, so passing the
+  branded scope is never worse ergonomics than passing naked strings).
 
 ## Eager by default: one aggregated failure
 
@@ -229,10 +280,68 @@ The *how* is supplied at the binding, per runtime, and the descriptor never chan
 const cfg = await load([sendgridKey], [ssmProvider, fromProcessEnv()]);
 
 // Cloudflare Worker: the env ref resolves against the request's env bag
-const cfg = bind([sendgridKey], [fromWorkerEnv(env)]);
+const cfg = bind(sendgridKey, fromWorkerEnv(env));
 
 // tests: no sources at all — a literal, validated snapshot
 const cfg = snapshotOf([[sendgridKey, "SG.test-key"]]);
 ```
 
 This split is also the browser-safety story: the universal `knobs` entry ships no secret-capable source implementations at all. `fromProcessEnv` and `fromFiles` live in `knobs/node`, `fromWorkerEnv` in `knobs/workers` — a browser bundle importing only `knobs` structurally cannot read a secret source, no lint rule required.
+
+## Remapping: deployment wiring, not contract
+
+A knob declares *what* it needs (`{ env: "SMTP_URL" }`); a deployment decides *where that
+lives on this platform*. Two identity-preserving mechanisms cover the gap — neither forks
+the knob's identity, because remapping is wiring, not a contract change:
+
+```ts
+// SOURCE-LEVEL: transform every lookup against one source implementation
+const env = fromProcessEnv({
+  prefix: "MYAPP_",                        // DATABASE_URL → MYAPP_DATABASE_URL
+  rename: { DATABASE_URL: "PG_URL" },      // rename output is FINAL — it escapes the prefix
+});
+// the law: effective(name) = rename[name] ?? prefix + name
+// (a generic withNameTransform(source, { prefix, rename }) wraps any source the same way)
+
+// BIND-LEVEL: re-point one knob, e.g. a library's knob onto your platform's name
+import { smtpUrl } from "@acme/mailer/knobs";
+const cfg = bind({ smtp: smtpUrl }, env, {
+  rebind: [rebind.env(smtpUrl, "MAILER_SMTP_URL")], // rewrites env refs in place,
+});                                                 // PRESERVING declared fallbacks
+// rebind(knob, refs) is the full-replacement form — it drops declared fallbacks,
+// and errors for that knob then list what was replaced and where.
+```
+
+The transforms are **data only** — `prefix` and `rename` tables, never a mapping
+function. That is what lets bake compute every *effective* name: `.env.example` and
+`CONFIG.md` render the names your deployment actually reads (declared name in a comment),
+the committed lockfile records `declared → effective` per knob, and the leak scan matches
+the **union** of declared and effective names — a remapped `MYAPP_STRIPE_KEY` in a client
+bundle is still caught. On bake-covered client targets, a runtime-only remap that the
+manifest does not declare is an error, and the baked shim carries a remap digest so a
+composition root that drifts from the attested wiring fails closed (`RemapSkewError`).
+
+Remap soundness is checked in the eager phase of **every** door (it is wiring shape, not
+value validation):
+
+- `UnknownRebindError` — the rebind target is not in the binding nor any bound variants
+  branch (a typo'd or removed knob must not silently no-op). Targets in *inactive*
+  branches are legal latent wiring, recorded and rendered as such.
+- `RebindCollisionError` — the remap *created* a convergence two knobs did not declare
+  (rename sending two knobs to one env var). Declaring shared refs stays legal — declared
+  sharing is identity-attested.
+- `RebindExposureError` — a non-secret knob may never be remapped onto any name in the
+  secret-name set (declared or effective): routing a credential through a public-exposure
+  knob would launder it past redaction and into bake's public-value inlining. Secret-knob
+  rebinds are allowed (vault renames are real) and land in a flagged lockfile section.
+
+And every error speaks the *effective* name first —
+`Missing MAILER_SMTP_URL (declared SMTP_URL; rebound at src/config/root.ts:12)` — because
+an error that tells a 3am operator to set a variable nothing reads is worse than no error.
+`explain()` renders the full chain: declared refs → source transform → rebind → winning
+source.
+
+One doctrine note: remapping is for *deployments*. A **library** renaming its own env var
+across a major does it in the contract — a declared fallback chain
+`sources: [{ env: "MAILER_URL" }, { env: "SMTP_URL", deprecated: true }]` — one
+intentional identity change, visible in every consumer's lockfile diff.

@@ -63,9 +63,23 @@ function defineKnobs<T extends readonly Knob[]>(knobs: T): T;
 ## Binding — where values live
 
 ```ts
+// One generic signature per door (TS >= 5.0 `const` type parameters — the floor).
+// Entries: a single knob/variants group, an array, or a record. Sources: one or many.
+// The snapshot mirrors the input shape:
+//   bind(dbUrl, src).value                 : string
+//   bind([dbUrl, poolSize], src).values    : readonly [string, number]  (real frozen tuple)
+//   bind({ db: dbUrl }, src).values.db     : string  (record under YOUR names;
+//                                            variants entries yield the match() union)
+// Snapshots are deliberately NOT iterable (positional iterable types are a lie in TS).
+// .value/.values are ABSENT on LiveBinding/AsyncBinding (freshness is a type parameter;
+// widened Knob<string> fails safe to no-sugar) + runtime LivenessViolationError backstop.
+// The values bag: null-prototype, redacting toJSON + inspect (secrets never dump via
+// JSON.stringify/console.log); spread = get() on every knob; ReservedKeyError for
+// record keys "toJSON" | "then" | "constructor".
+
 // EAGER (the default door): validates the listed set NOW.
 // All failures aggregate into ONE MissingConfigError.
-function bind(knobs: readonly Knob[], sources: SyncSource[], opts?: BindOptions): Snapshot | LiveBinding;
+function bind<const K extends BindInput>(knobs: K, sources: Source | readonly Source[], opts?: BindOptions): BindResult<K>;
 
 // HALF-LAZY door: raw PRESENCE is still checked eagerly (missing vars die at bind);
 // validator execution is deferred to first read.
@@ -82,7 +96,19 @@ interface BindOptions {
   onSourceError?: (knob: Knob, cause: unknown) => void;           // source unreachable — never routed through onInvalid
   invalid?: KeepLastGood[];      // per-knob opt-in: keepLastGood(knob, { maxCoastMs }) — maxCoastMs required
   unify?: { accept: Knob; aliases: string[] }[];                  // identity alias table (see Identity)
+  rebind?: Rebind[];             // identity-preserving deployment wiring (see below)
 }
+
+// REMAPPING (identity-preserving; validated in the eager phase of EVERY door)
+fromProcessEnv({ prefix: "MYAPP_", rename: { DATABASE_URL: "PG_URL" } });
+// law: effective(name) = rename[name] ?? prefix + name — rename output is FINAL.
+// No mapping functions: transforms are data so bake can compute effective names.
+withNameTransform(source, { prefix?, rename? });   // the generic wrapper over any source
+rebind(knob, refs);            // full replacement of the knob's declared refs (drops fallbacks — errors say so)
+rebind.env(knob, "NEW_NAME");  // rewrites env refs in place, preserving the fallback chain
+// UnknownRebindError | RebindCollisionError (remap-CREATED convergence only)
+// | RebindExposureError (non-secret knob remapped onto a secret's name — laundering ban)
+// Every error prints the EFFECTIVE name first, declared name + rebind site in parens.
 ```
 
 Sources carry a `kind: "sync" | "async"` discriminant. Passing an async source to `bind()`
@@ -290,6 +316,8 @@ Variants: `InactiveVariantError` (subclass of `UnboundKnobError`) ·
 `VariantsNestingError` · `RuleViolationError` · `VariantsInClientTargetError`.
 Writes: `WriteConflictError` · `NotWritableError` · `WriteFailedError` ·
 `WriteMangledError` · `VerifyCapabilityError` · `ProviderContractError`.
+Shapes & remapping: `LivenessViolationError` · `ReservedKeyError` · `UnknownRebindError` ·
+`RebindCollisionError` · `RebindExposureError` · `RemapSkewError`.
 Every error names the knob key, the layer, and a next step. For secret knobs, BYO
 validator text is untrusted (validators echo received values): reports carry issue counts
 and paths only. Full details: [Error taxonomy](/docs/reference/errors).

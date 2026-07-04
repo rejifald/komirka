@@ -73,7 +73,7 @@ The scan has no idea what `ANALYTICS_WRITE_KEY` resolves to. It doesn't need to:
 
 ### 2. Secret key names adjacent to env access
 
-Bake never sees secret values, but the descriptors give it every secret key **name**. The scan matches those names as **whole tokens** appearing adjacent to env-access patterns (`process.env.X`, `env["X"]`, `import.meta.env.X`).
+Bake never sees secret values, but the descriptors give it every secret key **name** — and, because remaps are declarable only as data (`prefix`/`rename` tables, never functions), every **effective** name too. The scan matches the **union of declared and effective names**: a `MYAPP_`-prefixed deployment leaks under `MYAPP_STRIPE_SECRET_KEY`, and that token is in the scan set because the lockfile records `declared → effective` per knob. Names match as **whole tokens** appearing adjacent to env-access patterns (`process.env.X`, `env["X"]`, `import.meta.env.X`).
 
 ```ts
 // client/pages/admin.tsx — flagged: secret key name next to an env read

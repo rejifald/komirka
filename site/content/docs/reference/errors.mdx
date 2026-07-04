@@ -325,6 +325,15 @@ Conditional config and writable sources add their own named errors. They obey th
 - `VerifyCapabilityError` — `verify: "revert"` requested from a provider missing its preconditions (unique version tokens, `echoWrite`/`strongRead`, non-normalizing); refused at the call site, in development, not as misbehavior in production.
 - `ProviderContractError` — a provider that declares versions returned a write without one; surfaced on first occurrence rather than silently degrading every verification to inconclusive.
 
+And the call-shape / remapping family (details on the [Binding](/docs/concepts/binding) page):
+
+- `LivenessViolationError` — `.value`/`.values` touched on a binding containing live or async knobs (the type split normally prevents this; the runtime backstop catches type-widened knobs). Pin first.
+- `ReservedKeyError` — a record-form bind used the key `toJSON`, `then`, or `constructor`, which would shadow the values bag's guards.
+- `UnknownRebindError` — a rebind targets a knob that is in neither the binding nor any bound variants branch; a typo'd remap must never silently no-op.
+- `RebindCollisionError` — a remap *created* a convergence (two knobs onto one effective name) that the declared refs did not have.
+- `RebindExposureError` — a non-secret knob was remapped onto a name in the secret-name set; routing credentials through public-exposure knobs would launder them past redaction and into bake's public inlining.
+- `RemapSkewError` — a baked artifact's remap digest disagrees with the composition root's actual wiring; fail-closed on bake-covered production targets.
+
 ## Summary
 
 Bind-time errors (`MissingConfigError`, `AsyncSourceInBindError`) fail the boot, loudly and completely. Read-time errors (`UnboundKnobError`, `DescriptorMismatchError`, `NotInScopeError`, `AsyncValidatorInSyncBindingError`) refuse to guess — no fallback, no ambient lookup, ever. Boundary errors (`ExposureError`, `StaleBakeError`) are the runtime halves of guarantees that bake starts at build time. Live errors (`InvalidLiveValueError`, `SourceUnavailableError`, `CoastBudgetExceededError`, `NoValidValueError`) keep current truth honest: invalid throws exactly where the knob is used, unavailable coasts only inside a declared staleness budget, coasting itself has a signed budget, and never-valid is named for what it is. The variants and write errors extend the same contract to conditional config and writable sources. In every case: the key, the layer, the next step — in the first line.
