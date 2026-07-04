@@ -310,7 +310,7 @@ Conditional config and writable sources add their own named errors. They obey th
 - `WriteFailedError` — the provider failed during a write; the cause is scrubbed, the cache is untouched, and no epoch bump occurs.
 - `WriteMangledError` — write verification confirmed (version-matched, content different) that the store did not keep what was written; carries expected/actual digests, `revertWritten`/`revertVerified`, and `nowLive: "prev" | "unknown"` — a reverted secret rotation is unmissable.
 - `VerifyCapabilityError` — `verify: "revert"` requested from a provider missing its preconditions (unique version tokens, `echoWrite`/`strongRead`, non-normalizing); refused at the call site, in development, not as misbehavior in production.
-- `ProviderContractError` — a provider that declares versions returned a write without one; surfaced on first occurrence rather than silently degrading every verification to inconclusive.
+- `ProviderContractError` — a provider broke its mechanical obligations: a versioned provider returned a write without a version, or a batch result was not input-aligned (every position in `read(keys)` must be answered — `{ absent: true }` for definitively-missing, `{ error }` for a per-key store failure; a buggy provider must never read as missing config). Surfaced on first occurrence.
 
 And the call-shape / wiring family (details on the [Binding](/docs/concepts/binding) page):
 

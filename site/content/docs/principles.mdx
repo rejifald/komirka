@@ -384,10 +384,13 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
 - **Multi-knob writes tear durable state.** A crash between the discriminant write and its
   branch values leaves the *database itself* saying smtp-with-no-host — every replica
   poisons on next read. *Rule:* `setMany()` validates the post-state as a whole and is
-  atomic via provider `writeMany` (SQL transaction); without it, refuse by default —
-  `{ allowNonAtomic: true }` writes in dependency order (branch values first, discriminant
-  last) so a crash tears in the benign direction. Read-side branch gating never applies to
-  writes (staging inactive-branch values is the *safe* order).
+  atomic only on providers declaring `atomicWrites` (one transaction, all-or-nothing
+  including a mid-batch CAS miss); without it, refuse by default —
+  `{ allowNonAtomic: true }` makes *core* sequence single-entry writes in dependency order
+  (branch values first, discriminant last), stopping at first failure. Core never hands a
+  multi-entry batch to a non-atomic provider: dependency ordering is core's knowledge,
+  never an unstated provider loop-order obligation. Read-side branch gating never applies
+  to writes (staging inactive-branch values is the *safe* order).
 - **Write-time validation is writer-local.** A v1 replica's `set()` can write a value v2
   replicas reject at read time (rolling-deploy schema skew) — and operators can bypass
   `set()` entirely with raw SQL. *Rule:* documented plainly; containment = error slots +
@@ -396,6 +399,21 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
   expiry = 500 provider reads. *Rule:* per-key single-flight; expired reads block on the
   one in-flight read so `maxStalenessMs` stays an honest hard bound (stale-while-revalidate
   only ever as a loudly-named opt-in).
+- **Batch contracts carry the safety signals shape used to carry.** Provider contracts are
+  batch-only (`read(keys[])` / `write(entries[])` — "assume plural"), which deletes the
+  single/plural drift class but also deletes two shape-inferred signals; they return as
+  *declared capabilities* with teeth. Rules: results are **input-aligned arrays** (length
+  mismatch = `ProviderContractError`; `{ absent: true }` vs `{ error }` slots — one
+  poisoned row must not DoS the whole batch, and a buggy provider must never read as
+  missing config); **chunking is exclusively core's job** (provider-internal chunking
+  silently voids `consistentReads` — declare `limits` instead); `consistentReads` is
+  demoted from honor-claim to round-trip optimization (falsy or chunked coherent reads run
+  a bounded discriminant re-check loop); `atomicWrites` is the one claim core cannot
+  retrofit — a published `verifyProvider()` conformance kit (probing atomic abort,
+  input alignment, absent-vs-error, batch-path echo) is the documented bar for declaring
+  it. Core guarantees providers unique keys, never-empty batches, and no duplicate write
+  keys. The sync source contract mirrors the same shape, making single-coherent-pass-
+  per-source structural.
 - **The write path re-opens secret leaks.** `onInvalid(knob, raw, …)` pipes raw secrets to
   log hooks; validator and DB-driver messages echo values; `set()` rethrows provider
   errors to admin UIs. *Rule:* structural redaction for secret knobs — hooks receive

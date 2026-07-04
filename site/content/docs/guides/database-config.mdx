@@ -12,24 +12,55 @@ The tool is the **async binding**: live semantics with async transport plus oper
 ## The provider contract
 
 ```ts
-import type { Json } from "knobs";
+import type { JsonValue } from "knobs";
+
+type ReadSlot =
+  | { raw: JsonValue; version?: string }   // present
+  | { absent: true }                       // definitively absent
+  | { error: unknown };                    // per-key store failure (final — provider retries transients internally)
 
 interface AsyncProvider {
-  id: string;
+  id: string;                // stable identity — recorded in the lockfile
   color: "async";
-  read(key: string): Promise<{ raw: string | Json; version?: string } | undefined>;
-  readMany?(keys: readonly string[]): Promise<Map<string, { raw: string | Json; version?: string } | undefined>>;
-  write?(key: string, raw: string | Json, opts?: { ifVersion?: string }): Promise<{ version?: string; storedRaw?: string | Json }>;
-  capabilities?: { versionTokens?: "unique" | "coarse" | "none"; strongRead?: boolean; echoWrite?: boolean; normalizes?: boolean };
-  writeMany?(entries: ReadonlyArray<{ key: string; raw: string | Json; ifVersion?: string }>): Promise<void>;
+  limits?: { maxReadBatch?: number; maxWriteBatch?: number };
+  read(keys: readonly string[]): Promise<readonly ReadSlot[]>;
+  // INPUT-ALIGNED: result[i] answers keys[i]; a length mismatch is ProviderContractError.
+  write?(entries: ReadonlyArray<{ key: string; raw: JsonValue; ifVersion?: string }>):
+    Promise<ReadonlyArray<{ version?: string; storedRaw?: JsonValue }>>;
+  capabilities?: {
+    versionTokens?: "unique" | "coarse" | "none";   // timestamps are NOT versions
+    strongRead?: boolean; echoWrite?: boolean; normalizes?: boolean;
+    atomicWrites?: boolean;      // batch write = one transaction, all-or-nothing incl. CAS abort
+    consistentReads?: boolean;   // one read() call within maxReadBatch = one consistent cut
+  };
 }
 ```
 
+The contract is batch-shaped all the way down — there is deliberately no single-key method. `get()` and `set()` ride the same path as single-element batches that core unwraps, so the binding surface never changes and a provider has exactly one read path and one write path to get right: the batch path is the tested path. Results are **input-aligned** — `result[i]` answers `keys[i]` — and a length mismatch is a `ProviderContractError`, surfaced loudly instead of values silently attributed to the wrong knob.
+
 The `id` is not decoration: it is what the lockfile records for bake-covered targets, so an anonymous impl is a bind-time error there. And `color` is load-bearing type information — leaving it untyped is a compile error, because coloring is how `bind` computes its result type.
 
-The envelope is versioned from day one: `read` may return a `version` (a SQL row version, a DynamoDB condition attribute, an etcd revision), and `write` may accept `ifVersion` for compare-and-set. Providers without versions still work — they degrade to **documented** last-write-wins. That is an acceptable default and an unacceptable ceiling, so the seam exists even if your first provider ignores it.
+The envelope is versioned from day one: a present slot may carry a `version` (a SQL row version, a DynamoDB condition attribute, an etcd revision), and each `write` entry may carry `ifVersion` for compare-and-set. Providers without versions still work — they degrade to **documented** last-write-wins. That is an acceptable default and an unacceptable ceiling, so the seam exists even if your first provider ignores it.
 
-A Postgres provider is about a dozen lines:
+The heart of the contract is a two-sided treaty. Each side's list is short, and neither side may assume the other's job.
+
+**Core guarantees, on every call it makes:**
+
+- Keys in a read batch are unique, and batches are never empty.
+- A batch never exceeds the declared `limits` — chunking is exclusively core's job. A provider must **never** split a batch internally: internal chunking silently voids `consistentReads` and resurrects the torn-pair bug (a discriminant in one chunk, its branch values in another).
+- Duplicate keys in a write batch are rejected before any I/O happens.
+- Multi-entry writes are issued **only** to providers declaring `atomicWrites: true`. For everyone else, core sequences single-entry writes itself, in dependency order — branch values first, discriminant last — stopping at the first failure. Dependency ordering stays core's knowledge; it is never an unstated obligation on a provider's loop order.
+
+**A provider guarantees, in every answer it gives:**
+
+- Every position gets a slot: `{ absent: true }` for definitively missing (a set-difference on a SQL `IN()` result or a prefix scan), `{ error }` for a per-key store failure (say, DynamoDB `UnprocessedKeys` still unprocessed after the provider's own retries). An `{ error }` slot is final — transient retries live inside the provider, not in core.
+- A whole-call throw means connection-level unavailability for **all** requested keys — never "some keys failed".
+- `atomicWrites` means nothing persists on a mid-batch CAS miss, and the resulting `WriteConflictError` names every conflicting key.
+- `echoWrite` must hold on the batch path. A transactional path that cannot echo declares `echoWrite: false` and relies on `strongRead`.
+
+Claims this load-bearing do not rest on the honor system: a published `verifyProvider(impl)` conformance kit runs against your real store and mechanically probes each one — input alignment, absent-vs-error slots, empty-batch and duplicate-key rejection, the CAS conflict shape, atomic abort (a poisoned second entry must leave the first unwritten), echo on the batch path. Passing it is the documented bar for declaring `atomicWrites` or `consistentReads`.
+
+A Postgres provider is one query per method:
 
 ```ts
 import type { AsyncProvider } from "knobs/async";
@@ -39,27 +70,49 @@ import { sql } from "./db";
 export const pgProvider: AsyncProvider = {
   id: "pg-config",
   color: "async",
-  async read(key) {
-    const [row] = await sql`SELECT raw, version FROM config WHERE key = ${key}`;
-    return row ? { raw: row.raw, version: String(row.version) } : undefined;
+  limits: { maxReadBatch: 1000 },
+  capabilities: {
+    versionTokens: "unique",
+    echoWrite: true,
+    atomicWrites: true,
+    consistentReads: true,
   },
-  async readMany(keys) {
+  async read(keys) {
     const rows = await sql`SELECT key, raw, version FROM config WHERE key = ANY(${keys})`;
     const found = new Map(rows.map((r) => [r.key, { raw: r.raw, version: String(r.version) }]));
-    return new Map(keys.map((k) => [k, found.get(k)]));
+    return keys.map((k) => found.get(k) ?? { absent: true }); // set-difference: input-aligned, absent is definitive
   },
-  async write(key, raw, opts) {
-    const [row] = opts?.ifVersion
-      ? await sql`UPDATE config SET raw = ${raw}, version = version + 1
-                  WHERE key = ${key} AND version = ${opts.ifVersion} RETURNING version`
-      : await sql`INSERT INTO config (key, raw, version) VALUES (${key}, ${raw}, 1)
-                  ON CONFLICT (key) DO UPDATE SET raw = ${raw}, version = config.version + 1
-                  RETURNING version`;
-    if (!row) throw new WriteConflictError(key);
-    return { version: String(row.version) };
+  async write(entries) {
+    return sql.begin(async (tx) => {
+      const out = [];
+      for (const { key, raw, ifVersion } of entries) {
+        const [row] = ifVersion
+          ? await tx`UPDATE config SET raw = ${raw}, version = version + 1
+                     WHERE key = ${key} AND version = ${ifVersion} RETURNING raw, version`
+          : await tx`INSERT INTO config (key, raw, version) VALUES (${key}, ${raw}, 1)
+                     ON CONFLICT (key) DO UPDATE SET raw = ${raw}, version = config.version + 1
+                     RETURNING raw, version`;
+        if (!row) throw new WriteConflictError([key]); // aborts the transaction — nothing persists
+        out.push({ version: String(row.version), storedRaw: row.raw });
+      }
+      return out; // input-aligned; storedRaw is the echo
+    });
   },
 };
 ```
+
+Wrapping a single-key store — a Redis client, a REST endpoint — is a three-line **recipe**, not a second contract form and not an exported helper:
+
+```ts
+async read(keys) {
+  return Promise.all(keys.map(async (k) => {
+    const hit = await store.get(k);
+    return hit === undefined ? { absent: true } : { raw: hit.value, version: hit.version };
+  }));
+}
+```
+
+A wrapper like this must not declare `consistentReads` — each key is its own round trip, so a batch is never one cut.
 
 ## Wiring it up
 
@@ -96,7 +149,7 @@ const cfg = bind(
 await cfg.ready();
 ```
 
-`bind` is inert — it never performs I/O. Each `provider()` entry is async-colored, so the result types as an `AsyncBinding` automatically; there is no separate async constructor. `await cfg.ready()` is the eager startup line: one `readMany`, then resolve and validate every bound knob, failing fast with a single aggregated `MissingConfigError` that names everything wrong at once, not just the first thing.
+`bind` is inert — it never performs I/O. Each `provider()` entry is async-colored, so the result types as an `AsyncBinding` automatically; there is no separate async constructor. `await cfg.ready()` is the eager startup line: one batched `read` (chunked against `limits.maxReadBatch` when needed), then resolve and validate every bound knob, failing fast with a single aggregated `MissingConfigError` that names everything wrong at once, not just the first thing.
 
 Wiring is per entry, so one binding mixes transports freely. A knob that should read Parameter Store but fall back to an env var spells the whole chain out — `chain` is the only full-replacement wiring, and if the knob declared fallback refs of its own, errors will list exactly what the chain dropped:
 
@@ -114,7 +167,7 @@ Links carry color: the SSM link is async, so this binding is an `AsyncBinding` n
 
 ## Reading
 
-Request paths pin. `snapshot()` returns a coherent, immutable view: if the cache is fresh it costs zero I/O; if some keys have exceeded `maxStalenessMs`, it issues one `readMany` for exactly those keys.
+Request paths pin. `snapshot()` returns a coherent, immutable view: if the cache is fresh it costs zero I/O; if some keys have exceeded `maxStalenessMs`, it issues one batched `read` for exactly those keys.
 
 ```ts
 app.use(async (req, _res, next) => {
@@ -131,6 +184,8 @@ app.get("/orders", (req, res) => {
 For scripts and jobs there is the colored read: `await cfg.get(rateLimit)`.
 
 `maxStalenessMs` is an honest hard bound, not a hint. An expired key **blocks** on a re-read — there is no silent stale-while-revalidate serving old values while claiming freshness. Expiry under load coalesces: a hot knob expiring during a traffic spike triggers **one** provider read via per-key single-flight, not one per request.
+
+"Coherent" is a claim about the store, and core does not take it on faith. `consistentReads` is a declared capability demoted from honor-claim to round-trip optimization: when a provider declares it and a coherence-requiring read fits in one `maxReadBatch` batch, that single `read()` call is one consistent cut and core is done in one round trip. When the capability is falsy — or core had to chunk the read across batches — core buys coherence itself with a bounded re-check loop: read the batch, re-read the discriminant, and retry (up to 3×) if it moved. **DynamoDB pitfall:** `BatchGetItem` is per-item consistency, not one cut — a provider built on it must declare `consistentReads: false` and let the re-check loop do its job, or switch to `TransactGetItems` and declare `maxReadBatch: 100`.
 
 ## Writing: `set()` is write-through
 
@@ -150,7 +205,7 @@ await cfg.set(corsOrigins, "https://app.example.com, https://admin.example.com")
 //                          ↑ raw input, exactly what a source would supply
 ```
 
-The pipeline: validate the raw against the knob's schema (an invalid write is rejected before the provider ever sees it) → `provider.write(key, raw)` verbatim → install the **parsed** value into the local cache → bump the epoch.
+The pipeline: validate the raw against the knob's schema (an invalid write is rejected before the provider ever sees it) → `provider.write([{ key, raw }])` — a single-element batch — verbatim → install the **parsed** value into the local cache → bump the epoch.
 
 **Write-through, never invalidate-and-refetch.** Installing the parsed value locally is what guarantees read-your-writes on the writing replica, even when the provider's read path lags its write path (read replicas, eventually-consistent reads). Refetching after a write could hand back the pre-write value from a lagging reader.
 
@@ -203,7 +258,7 @@ const result = await cfg.set(endpointUrl, url, { ifVersion: version, verify: "re
 **How verification works, in order of preference:**
 
 - **Write-echo** (`capabilities.echoWrite`): the provider's `write()` returns
-  `{ version, storedRaw }` — Postgres `UPDATE … RETURNING`, DynamoDB
+  `{ version, storedRaw }` for each entry — Postgres `UPDATE … RETURNING`, DynamoDB
   `ReturnValues: ALL_NEW`. Verification compares in the *same round trip*: zero extra
   requests, no replica-lag ambiguity. This is the primary mechanism.
 - **Strong read-back** (`capabilities.strongRead`): one re-read from the
@@ -211,11 +266,13 @@ const result = await cfg.set(endpointUrl, url, { ifVersion: version, verify: "re
 - Plain read-back works but is chronically **inconclusive** behind lagging replicas — the
   read may predate your own write.
 
-**Equality is judged at the schema level**, not byte level: verified means the read-back
-byte-equals what you wrote *or* re-validates to a structurally equal parsed value. A
-JSONB store reordering keys passes; truncation, mangling, and precision loss fail —
-they change the parsed output. A per-knob `equals()` hook is the escape hatch for stores
-whose rewrites are semantic-preserving but schema-visible.
+**Equality is judged on the raw, canonically:** byte equality for string raws, RFC 8785
+canonical-JSON equality for JSON raws. A JSONB store reordering keys therefore passes
+canonical comparison in report mode — but such a store should still declare
+`normalizes: true`, which keeps revert gated off. Truncation, charset mangling, and
+number-precision loss all fail — they change the canonical form. A per-knob `equals()`
+hook is the escape hatch for stores whose rewrites are semantic-preserving but
+comparison-visible.
 
 **Outcomes are honest about certainty:**
 
@@ -257,8 +314,9 @@ feature exists to catch.
 Verification is a **writer-side early warning**, not the fleet's safety net: the fleet is
 protected by the poisoned-slot machinery and alerting on `InvalidLiveValueError` — except
 for mangled-but-valid values, which only verification sees. `setMany()` supports
-`verify: "report"` (requires `readMany`); atomic revert-of-many is deferred — a partially
-superseded batch would strand a mixed post-state that no one validated.
+`verify: "report"`; batch revert remains deferred — when it lands, it additionally gates
+on `atomicWrites` and restores the *entire* previous post-state, never a partial revert
+that strands a never-validated combination.
 
 ## Concurrent writers
 
@@ -292,13 +350,13 @@ await cfg.setMany([
 ]);
 ```
 
-Atomicity follows the provider. If it implements `writeMany`, the batch is atomic (in SQL: one transaction). If it doesn't, `setMany()` **refuses before attempting anything** — a half-applied batch is worse than a rejected one. Passing `{ allowNonAtomic: true }` opts into dependency-ordered sequential writes: branch values first, discriminant last, so a crash mid-batch tears in the benign direction (staged-but-unused values, never an active branch missing its values).
+Atomicity follows the declared capability. Against a provider with `atomicWrites: true`, the batch goes down as **one** `write()` call — one transaction, all-or-nothing, including the CAS abort: a version miss on any entry means nothing persisted, and the `WriteConflictError` names every conflicting key. Against a provider without it, `setMany()` **refuses before attempting anything** — a half-applied batch is worse than a rejected one. Passing `{ allowNonAtomic: true }` opts into core sequencing single-entry writes itself, in dependency order — branch values first, discriminant last — stopping at the first failure, so a crash mid-batch tears in the benign direction (staged-but-unused values, never an active branch missing its values). Either way the ordering is core's knowledge, never the provider's loop to get right.
 
 ## Switching a variant from the database
 
 Discriminant knobs are `freshness: "snapshot"` by rule: pinned at `ready()` and exempt from staleness re-reads. A database flip must never switch your process topology mid-flight.
 
-`set()` on a discriminant is therefore a **staged write**: it writes for the fleet but does not install locally and does not bump the epoch. The local binding adopts it only through an explicit `refresh()`, which re-reads the discriminant and its full active branch as one coherent `readMany` unit. Given a payments variant group:
+`set()` on a discriminant is therefore a **staged write**: it writes for the fleet but does not install locally and does not bump the epoch. The local binding adopts it only through an explicit `refresh()`, which re-reads the discriminant and its full active branch as one coherence-requiring batched read — one consistent cut when the provider's `consistentReads` holds and the branch fits in one batch, the bounded discriminant re-check loop otherwise. Given a payments variant group:
 
 ```ts
 // 1. Stage the target branch's values — legal while the branch is inactive.
@@ -318,13 +376,16 @@ A single `setMany()` with `allowNonAtomic: true` encodes the same runbook mechan
 
 ## When things fail
 
-Three different events, three different behaviors — never blurred together:
+Four different events, four different behaviors — never blurred together:
 
 | Event | Behavior | Error / hook |
 | --- | --- | --- |
 | Re-read returns an **invalid** value | Knob is poisoned: pins still succeed, the knob occupies an error slot | `InvalidLiveValueError` on `get`; `onInvalid` fires once per distinct invalid raw |
-| Provider **down** / no answer | Serve the cached value within `maxStalenessMs` (that budget is the contract, not inherited state); beyond it, throw | `SourceUnavailableError`; `onSourceError` — never routed through `onInvalid` |
+| An `{ error }` **slot** answers one key | Per-key unavailable: that key serves its cached value within `maxStalenessMs`, beyond it throws — the other keys in the batch are untouched | `SourceUnavailableError` naming the key; `onSourceError` |
+| Provider **throws** the whole call | Provider-down for every requested key: each serves its cached value within `maxStalenessMs` (that budget is the contract, not inherited state); beyond it, throw | `SourceUnavailableError`; `onSourceError` — never routed through `onInvalid` |
 | **Write** fails | Cache untouched, no epoch bump, core never retries (no loops — the provider or caller retries) | `WriteFailedError` with a scrubbed cause |
+
+The slot-versus-throw split is deliberate: one poisoned row must not DoS every knob on the provider. A single unreadable key degrades exactly that key; only connection-level failure degrades them all. And an `{ error }` slot is final — the provider already retried transients internally, so core adds no retry loop on top.
 
 Because `set()` validates before writing, a poisoned slot rarely comes from your own admin panel — it arrives via raw SQL edits or schema skew (below). Current truth wins: the invalid value poisons exactly that knob.
 

@@ -218,24 +218,39 @@ tagged JSON (`relv1|` content-addressed); nesting is rejected in v1
 ```ts
 import { bind } from "knobs/async";
 
+type ReadSlot =
+  | { raw: Json; version?: string }   // present
+  | { absent: true }                  // definitively absent
+  | { error: unknown };               // per-key store failure (final — provider retries transients)
+
 interface AsyncProvider {
   id: string;                 // stable identity — recorded in the lockfile (anonymous impls error on bake-covered targets)
   color: "async";             // declared, never guessed — untyped color is a compile error
-  read(key: string): Promise<{ raw: string | Json; version?: string } | undefined>;
-  readMany?(keys: readonly string[]): Promise<Map<string, { raw; version? } | undefined>>;
-  write?(key: string, raw: string | Json, opts?: { ifVersion?: string }): Promise<{ version?: string; storedRaw?: string | Json }>;
-  writeMany?(entries: ReadonlyArray<{ key; raw; ifVersion? }>): Promise<void>;
+  limits?: { maxReadBatch?: number; maxWriteBatch?: number };
+  read(keys: readonly string[]): Promise<readonly ReadSlot[]>;
+  // BATCH-ONLY, input-aligned: result[i] answers keys[i]; length mismatch = ProviderContractError.
+  write?(entries: ReadonlyArray<{ key: string; raw: Json; ifVersion?: string }>):
+    Promise<ReadonlyArray<{ version?: string; storedRaw?: Json }>>;
   capabilities?: {
     versionTokens?: "unique" | "coarse" | "none";  // timestamps are NOT versions
     strongRead?: boolean; echoWrite?: boolean; normalizes?: boolean;
+    atomicWrites?: boolean;      // batch write = one transaction, all-or-nothing incl. CAS abort
+    consistentReads?: boolean;   // one read() within maxReadBatch = one consistent cut
   };
 }
+// Core guarantees: unique keys, never-empty batches, chunking is CORE's job (provider-
+// internal chunking voids consistentReads), duplicate write keys rejected pre-I/O, and
+// multi-entry writes go ONLY to atomicWrites providers — otherwise core sequences singles
+// in dependency order. Per-key {error} slots route to a per-key unavailable path; a
+// whole-call throw = connection-level down. consistentReads is demoted to a round-trip
+// optimization: falsy/chunked coherent reads run a bounded discriminant re-check loop.
+// A published verifyProvider(impl) conformance kit is the bar for declaring capabilities.
 
 const cfg = bind({ rateLimit: provider(rateLimit, pg), flags: provider(flags, pg) },
                  { maxStalenessMs: 5_000 });   // async entries → AsyncBinding
-await cfg.ready();        // THE startup line — one readMany, validates all listed knobs
+await cfg.ready();        // THE startup line — one batch read, validates all listed knobs
 await cfg.get(k);         // colored read (scripts/jobs); request paths pin instead:
-await cfg.snapshot();     // fresh cache + one readMany for expired keys only
+await cfg.snapshot();     // fresh cache + one batch read for expired keys only
 await cfg.set(k, raw, { ifVersion, verify });  // input-typed: validate raw → write raw
                                        // verbatim → install PARSED in cache (read-your-writes) → epoch++
 // verify: "off" (default) | "report" | "revert" → SetResult
@@ -246,7 +261,7 @@ await cfg.set(k, raw, { ifVersion, verify });  // input-typed: validate raw → 
 // nowLive }. "revert" is capability-gated (unique version tokens + echoWrite/strongRead,
 // CAS implied, prev must exist and re-validate, secrets refuse unless opted in) —
 // VerifyCapabilityError at call time otherwise. Never reverts on inconclusive.
-await cfg.setMany(entries);            // post-state validated as a whole; atomic via writeMany
+await cfg.setMany(entries);            // post-state validated as a whole; atomic on atomicWrites providers
 await cfg.refresh();      // re-reads discriminants + full active branch as one coherent batch
 ```
 
