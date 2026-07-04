@@ -230,6 +230,19 @@ parameters carry the tuple inference the call shapes depend on).
   `.values` (a real frozen tuple for arrays — snapshots are deliberately *not* iterable,
   because positional iterable types are a lie in TypeScript). See
   [Binding](/docs/concepts/binding).
+- **Secret-class providers** — resolved (author proposal): provider-sourced secrets flow
+  through a dedicated `SecretProvider` — same batch shape (`class: "secret"` pin; the
+  write result is derived as `Omit<WriteResult, "storedRaw">`, so echo-leaking is
+  unrepresentable and `echoWrite` does not exist), bidirectional pairing at bind and bake,
+  `holdsSecrets` opt-in inheriting the full obligation set, error QUARANTINE (never
+  propagate provider error objects — connection errors embed the provider's own
+  credential), runtime result reshaping, exposure-segregated batches, `cacheUntil` as a
+  pure cache ceiling (leased/dynamic credentials are a written non-goal),
+  `SecretLiteralError` gating `literal()` on secrets outside tests, and public-only
+  discriminants. Secret write verification: version equality > `strongRead` digest >
+  honest `"unverified"` outcome (per-knob `requireVerifiedWrites` refuses). Open:
+  extending `read()` to version-pinned keys is deferred until conformance data across
+  real stores shows the `"superseded"` outcome is insufficient.
 - **Batch-only provider contract** — resolved (author proposal): `read`/`readMany` and
   `write`/`writeMany` collapsed into batch-shaped methods — "assume plural". Results are
   input-aligned slot arrays (`{ raw }` / `{ absent: true }` / `{ error }`); chunking is

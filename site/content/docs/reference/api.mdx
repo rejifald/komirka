@@ -219,8 +219,8 @@ tagged JSON (`relv1|` content-addressed); nesting is rejected in v1
 import { bind } from "knobs/async";
 
 type ReadSlot =
-  | { raw: Json; version?: string }   // present
-  | { absent: true }                  // definitively absent
+  | { raw: Json; version?: string; cacheUntil?: number }  // present; cacheUntil = CACHE ceiling:
+  | { absent: true }                  //   effective staleness = min(maxStalenessMs, cacheUntil - now)
   | { error: unknown };               // per-key store failure (final — provider retries transients)
 
 interface AsyncProvider {
@@ -245,6 +245,32 @@ interface AsyncProvider {
 // whole-call throw = connection-level down. consistentReads is demoted to a round-trip
 // optimization: falsy/chunked coherent reads run a bounded discriminant re-check loop.
 // A published verifyProvider(impl) conformance kit is the bar for declaring capabilities.
+
+// SECRET PROVIDERS — same batch shape, class pinned (see the Secrets page):
+interface SecretProvider {
+  id: string; color: "async";
+  class: "secret";                     // general providers: class?: "config" (default)
+  limits?: { maxReadBatch?; maxWriteBatch?; maxConcurrentBatches? }; // reads fan out in
+                                       //   parallel bounded by maxConcurrentBatches (~4);
+                                       //   writes stay sequential, dependency-ordered
+  read(keys: readonly string[]): Promise<readonly ReadSlot[]>;      // SHARED slot type
+  write?(entries): Promise<readonly SecretWriteResult[]>;
+  // SecretWriteResult = Omit<WriteResult, "storedRaw"> — DERIVED: an author cannot echo
+  // a secret; capabilities omit echoWrite. Core also runtime-reshapes every slot/result
+  // from secret-serving providers (whitelist copy) — the type is the lint, the reshape
+  // is the enforcement.
+  capabilities?: { versionTokens?; strongRead?; normalizes?; atomicWrites?; consistentReads? };
+}
+// PAIRING (bind + bake, lockfile {implId, class, holdsSecrets} normative): a secret-class
+// provider serves ONLY secret-exposure knobs; a provider-sourced SECRET knob requires a
+// secret-class provider OR a general provider declaring holdsSecrets: true — which
+// inherits the FULL secret obligation set (error QUARANTINE — provider error objects are
+// never propagated; result reshape; secret conformance profile; echo-verify disabled) and
+// exposure-SEGREGATED batches. env/file-sourced secrets are unaffected. Secret writes
+// verify by version equality > strongRead digest > honest "unverified" outcome
+// (per-knob requireVerifiedWrites refuses). literal() on a secret knob = SecretLiteralError
+// outside the test entry (secretLiteral()/fakeSecretProvider() live in the testing kit).
+// Variants discriminants must be exposure "public" (DescriptorError at construction).
 
 const cfg = bind({ rateLimit: provider(rateLimit, pg), flags: provider(flags, pg) },
                  { maxStalenessMs: 5_000 });   // async entries → AsyncBinding
@@ -353,6 +379,7 @@ Writes: `WriteConflictError` · `NotWritableError` · `WriteFailedError` ·
 Shapes & wiring: `LivenessViolationError` · `ReservedKeyError` · `UnknownWiringError` ·
 `WiringCollisionError` · `WiringExposureError` · `WiringSkewError` ·
 `DuplicateWiringError` · `NoWiringError`.
+Secret plane: `SecretLiteralError` · `ExposureMigrationError` · `DescriptorError`.
 Every error names the knob key, the layer, and a next step. For secret knobs, BYO
 validator text is untrusted (validators echo received values): reports carry issue counts
 and paths only. Full details: [Error taxonomy](/docs/reference/errors).

@@ -120,6 +120,15 @@ const mail = snap.match(email);
 
 Pinning re-runs any registered rules, so cross-knob invariants hold at every pin.
 
+## Discriminants are public — always
+
+A discriminant must be `exposure: "public"`, enforced at `variants()` construction and at
+descriptor level (`DescriptorError`). The branch a deployment selects is a *function of
+the discriminant's value*, and that selection leaks through surfaces no error scrub sees:
+`InactiveVariantError` messages name the active branch, the lockfile records it, health
+output mentions it. A secret discriminant would exfiltrate bits of the secret through
+every one of those channels.
+
 ## Discriminants are snapshots — always
 
 A discriminant (and any `when()` condition knob) must be `freshness: "snapshot"`. A live discriminant would switch topology mid-process: half of a request wired for smtp, the other half reading sendgrid. This is enforced twice — at `variants()` construction, and again at bind against the descriptor actually being bound — and both throw `LiveDiscriminantError`.

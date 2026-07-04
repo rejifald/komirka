@@ -148,6 +148,27 @@ Every feature must pass all of these. "It would be convenient" never overrides a
   run in the eager phase of every door; bind-site transforms only restate
   manifest-declared data (`WiringSkewError` on divergence).
 
+- **P21 — Secrets get a provider class, and the class has teeth.** Provider-sourced
+  secrets flow through `class: "secret"` providers (same batch shape — payload forks are
+  the dual-contract drift class, banned; the secret write result is *derived*:
+  `Omit<WriteResult, "storedRaw">`). The classing buys three mechanisms, stated honestly:
+  **routing** (bidirectional pairing — a secret-class provider serves only secret knobs;
+  provider-sourced secret knobs require a secret-class store or an explicit, lockfile-
+  flagged `holdsSecrets` opt-in that inherits the *full* obligation set); a **quarantine
+  perimeter** (error objects from secret-serving providers are never propagated — a store
+  client's connection error can embed the provider's own credential, which no knob-value
+  scrub can find; core substitutes `{providerId, key, errorName, messageDigest}`); and a
+  **conformance profile** (poisoned-fake probes; `fakeSecretProvider()` ships
+  pre-certified). It does *not* buy author infallibility — provider-internal caching or
+  logging of raws remains kit-probed only. Core runtime-reshapes every slot/result from
+  secret-serving providers (whitelist copy — the type is the lint, the reshape is the
+  enforcement), segregates batches by exposure, disables echo-verify for secret knobs
+  everywhere, gates `literal()` on secret knobs (`SecretLiteralError` outside tests), and
+  requires discriminants to be public (`DescriptorError` — branch selection is a function
+  of the discriminant's value). `cacheUntil` on a slot bounds the *cache*, never promises
+  lease handling: ceiling + provider-down fails closed, and leased/dynamic credentials
+  (Vault dynamic DB creds, STS tokens) are a written non-goal.
+
 ## 3. Pitfalls we must not (re)introduce
 
 Catalogued from adversarial review. Each entry: the failure, then the rule that prevents it.
@@ -556,6 +577,9 @@ gate.
   different sources plus overrides, one layer.
 - **No runtime registry, no derived-knob expression language, no reachability-analysis
   codegen** (the manifest is explicit).
+- **No leased/dynamic credentials** — Vault dynamic DB creds, STS session tokens, and
+  anything needing renewal must not be served through this library: `cacheUntil` bounds
+  the cache and nothing renews. Poll-on-read only; an expired credential fails closed.
 - **DB-backed config stays behind the P19 scope line** — pull-only, context-free, uniform,
   operator-plane writes. The moment any of the four clauses bends, it is a feature-flag /
   remote-config SDK and belongs in a different library.

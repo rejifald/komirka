@@ -65,7 +65,7 @@ it("a bad test value fails loudly", () => {
 });
 ```
 
-One rule: never commit *real* secret values in `literal()` entries — placeholders only. `bake` fails closed on literal-wired secrets in client targets, and a lint bans real-looking values.
+One rule, now enforced: `literal()` on a secret-exposure knob is `SecretLiteralError` outside the test entry point — a live credential in committed wiring JSON would bypass every name-based guard. In tests, use `secretLiteral()` from the testing kit (same shape, test-scoped), and `fakeSecretProvider()` — a pre-certified in-memory `SecretProvider` double, the `manualClock` pattern — for testing secret wiring end to end. Placeholders only, never real values.
 
 ## Inject at the composition root
 

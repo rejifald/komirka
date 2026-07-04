@@ -22,7 +22,7 @@ type ReadSlot =
 interface AsyncProvider {
   id: string;                // stable identity — recorded in the lockfile
   color: "async";
-  limits?: { maxReadBatch?: number; maxWriteBatch?: number };
+  limits?: { maxReadBatch?: number; maxWriteBatch?: number; maxConcurrentBatches?: number };
   read(keys: readonly string[]): Promise<readonly ReadSlot[]>;
   // INPUT-ALIGNED: result[i] answers keys[i]; a length mismatch is ProviderContractError.
   write?(entries: ReadonlyArray<{ key: string; raw: JsonValue; ifVersion?: string }>):
@@ -32,6 +32,7 @@ interface AsyncProvider {
     strongRead?: boolean; echoWrite?: boolean; normalizes?: boolean;
     atomicWrites?: boolean;      // batch write = one transaction, all-or-nothing incl. CAS abort
     consistentReads?: boolean;   // one read() call within maxReadBatch = one consistent cut
+    holdsSecrets?: boolean;      // this general store legitimately holds secrets — full secret obligations apply
   };
 }
 ```
@@ -40,6 +41,8 @@ The contract is batch-shaped all the way down — there is deliberately no singl
 
 The `id` is not decoration: it is what the lockfile records for bake-covered targets, so an anonymous impl is a bind-time error there. And `color` is load-bearing type information — leaving it untyped is a compile error, because coloring is how `bind` computes its result type.
 
+Providers also carry an optional `class` field: `class?: "config"` (the default) marks an ordinary configuration store, while `class: "secret"` marks the dedicated `SecretProvider`, covered on the Secrets page. A general (config-class) provider whose store legitimately holds secrets must declare `holdsSecrets: true` to be wireable to secret-exposure knobs. The pairing rule cuts both ways: a secret-class provider serves **only** secret knobs, and a provider-sourced secret knob requires either a secret-class provider or a `holdsSecrets` general provider (env- and file-sourced secrets are unaffected). `holdsSecrets` inherits the **full** secret obligation set — error quarantine, result reshaping, the secret conformance profile, echo-verify disabled for those knobs — the opt-in buys pairing legality, never reduced hygiene, and it lands in a flagged section of the lockfile.
+
 The envelope is versioned from day one: a present slot may carry a `version` (a SQL row version, a DynamoDB condition attribute, an etcd revision), and each `write` entry may carry `ifVersion` for compare-and-set. Providers without versions still work — they degrade to **documented** last-write-wins. That is an acceptable default and an unacceptable ceiling, so the seam exists even if your first provider ignores it.
 
 The heart of the contract is a two-sided treaty. Each side's list is short, and neither side may assume the other's job.
@@ -47,7 +50,8 @@ The heart of the contract is a two-sided treaty. Each side's list is short, and 
 **Core guarantees, on every call it makes:**
 
 - Keys in a read batch are unique, and batches are never empty.
-- A batch never exceeds the declared `limits` — chunking is exclusively core's job. A provider must **never** split a batch internally: internal chunking silently voids `consistentReads` and resurrects the torn-pair bug (a discriminant in one chunk, its branch values in another).
+- A batch never exceeds the declared `limits` — chunking is exclusively core's job. A provider must **never** split a batch internally: internal chunking silently voids `consistentReads` and resurrects the torn-pair bug (a discriminant in one chunk, its branch values in another). Read chunks fan out in parallel, bounded by `maxConcurrentBatches` (default ~4) — which is what makes a `maxReadBatch: 1` store like Vault KV v2 usable at `ready()` with 20 secrets — while write chunks stay sequential and dependency-ordered.
+- Batches are **segregated by exposure**: secret and public knobs never share one wire batch, even on the same provider — a batch-level error message on the public side must never be able to enumerate secret rows.
 - Duplicate keys in a write batch are rejected before any I/O happens.
 - Multi-entry writes are issued **only** to providers declaring `atomicWrites: true`. For everyone else, core sequences single-entry writes itself, in dependency order — branch values first, discriminant last — stopping at the first failure. Dependency ordering stays core's knowledge; it is never an unstated obligation on a provider's loop order.
 
@@ -100,6 +104,8 @@ export const pgProvider: AsyncProvider = {
   },
 };
 ```
+
+If this Postgres store also holds secrets, declare `holdsSecrets: true` in its capabilities and accept the full secret obligation set; otherwise keep secrets in a dedicated secret-class store.
 
 Wrapping a single-key store — a Redis client, a REST endpoint — is a three-line **recipe**, not a second contract form and not an exported helper:
 
@@ -287,6 +293,15 @@ comparison-visible.
   writer's local cache entry is immediately expired so it converges with the fleet
   instead of split-braining until its own staleness window.
 
+**Secret knobs verify differently.** Echo-verify is disabled for them regardless of
+provider — the secret write result carries no `storedRaw`, so there is nothing raw to
+compare. Precedence becomes: **version-token equality** first (the write's version equals
+the read-back version ⇒ `verified`, with zero raw comparison; a *newer* read-back version
+⇒ the non-throwing `superseded` — a concurrent rotation is not corruption), then **digest
+read-back** via `strongRead`, then the honest **unverified** outcome — the write installs,
+and a per-knob `requireVerifiedWrites` refuses it where policy demands. `WriteMangledError`
+for a secret carries expected/actual digests plus `nowLiveDigest`, never raw values.
+
 **Auto-revert (`verify: "revert"`) restores the previous value on confirmed mangling — and
 it is deliberately hard to hold wrong.** Revert requires version-confirmed corruption
 (same version token, different content — *never* on inconclusive), which in turn requires
@@ -385,7 +400,7 @@ Four different events, four different behaviors — never blurred together:
 | Provider **throws** the whole call | Provider-down for every requested key: each serves its cached value within `maxStalenessMs` (that budget is the contract, not inherited state); beyond it, throw | `SourceUnavailableError`; `onSourceError` — never routed through `onInvalid` |
 | **Write** fails | Cache untouched, no epoch bump, core never retries (no loops — the provider or caller retries) | `WriteFailedError` with a scrubbed cause |
 
-The slot-versus-throw split is deliberate: one poisoned row must not DoS every knob on the provider. A single unreadable key degrades exactly that key; only connection-level failure degrades them all. And an `{ error }` slot is final — the provider already retried transients internally, so core adds no retry loop on top.
+The slot-versus-throw split is deliberate: one poisoned row must not DoS every knob on the provider. A single unreadable key degrades exactly that key; only connection-level failure degrades them all. And an `{ error }` slot is final — the provider already retried transients internally, so core adds no retry loop on top. One more rule for secret-class and `holdsSecrets` providers: their errors are **quarantined** — never propagated as error objects or `cause` chains, with `SourceUnavailableError` carrying only `providerId`, `key`, `errorName`, and a `messageDigest` — because a store client's own connection error can embed the provider's credential in its message, which no knob-value scrub can find.
 
 Because `set()` validates before writing, a poisoned slot rarely comes from your own admin panel — it arrives via raw SQL edits or schema skew (below). Current truth wins: the invalid value poisons exactly that knob.
 

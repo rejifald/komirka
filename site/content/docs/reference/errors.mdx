@@ -322,6 +322,9 @@ And the call-shape / wiring family (details on the [Binding](/docs/concepts/bind
 - `WiringSkewError` — a baked artifact's wiring digest disagrees with the composition root's actual wiring (including bind-site transforms); fail-closed on bake-covered production targets.
 - `DuplicateWiringError` — a knob is reachable through two entries in one bind (including a group member wired again as a leaf); there is no precedence hierarchy — specialization goes inside the group combinator.
 - `NoWiringError` — a bare `env`/`file` ref under a bind entry point with no natural defaults (core `bind`); import the runtime's bind or wire the entry explicitly.
+- `SecretLiteralError` — `literal()` wired to a secret-exposure knob outside the test entry point: a live credential in committed wiring JSON bypasses every name-based guard. Tests use `secretLiteral()` from the testing kit; deployments use env or provider wiring.
+- `ExposureMigrationError` — a library flipped a knob's exposure (identity field) while a deployment still wires it under the old classification; bind compares the lockfile's recorded exposure before identity checks so the flip surfaces by name, with the exact rewiring steps, instead of as a bare descriptor-hash diff. Deliberately a hard error — a grace window would be the laundering window.
+- `DescriptorError` — a descriptor-level rule violated at construction; the first occupant: variants discriminants must be exposure `"public"` (branch selection is a function of the discriminant's value and leaks through selection metadata that no error scrub sees).
 
 ## Summary
 
