@@ -21,7 +21,7 @@ Every field of a descriptor is in exactly one of two buckets.
 | --- | --- | --- |
 | `key` | identity | The canonical name of the value. |
 | `exposure` | identity | A secret/public flip must never unify silently. |
-| `sources` | identity | Precedence is order-significant; reordering changes meaning. |
+| `sources` | identity | Declared precedence is order-significant; reordering changes meaning. |
 | `default` | identity | Presence **and** value both count — adding a default changes behavior. |
 | `schemaId` | identity, when available | A vendor fingerprint of the schema, or your explicit `version` discriminator. |
 | `freshness` | identity | Live-vs-snapshot is behaviorally load-bearing: relations reference discriminants by identity, and a `live` twin of a `snapshot` knob must never be identity-equal. |
@@ -31,7 +31,9 @@ Every field of a descriptor is in exactly one of two buckets.
 
 `doc` is excluded deliberately. A docs-only patch release — a typo fix, a changelog-driven wording change — must produce a descriptor that still binds against the previous version's. If prose were identity, every documentation edit would make two package versions unbindable against each other, which is exactly the failure mode identity exists to prevent.
 
-Identity is computed over the *effective* descriptor: omitted fields normalize first (`exposure` defaults to `"secret"`, `sources` defaults to the single env source named by `key`), so spelling a default out explicitly does not change the hash.
+Identity is computed over the *effective* descriptor: omitted fields normalize first (`exposure` defaults to `"secret"`, `sources` defaults to the single declared env ref named by `key`), so spelling a default out explicitly does not change the hash.
+
+One thing that is *never* in the table: deployment wiring. The per-entry combinators you apply at `bind` — a ref rename like `env(smtpUrl, "CUSTOM_SMTP_URL")`, a full `chain(...)` replacement, a group prefix — change which effective name supplies a value, and they are covered by the wiring digest and the lockfile's declared→effective map, not by the identity hash. Wiring never forks identity: the same knob wired three different ways in three services is still, everywhere, the same knob. Only *declared* refs — the fallback chain the library author ships on the descriptor itself — count as identity.
 
 The `schema` object itself is not JSON and does not round-trip; `schemaId` stands in for it. When the validator vendor provides a fingerprint, that is used. Otherwise your explicit `version` string is the discriminator — which is why the compatibility contract at the bottom of this page tells you to bump it on every schema change.
 
@@ -69,11 +71,10 @@ Every read resolves to exactly one of three outcomes:
 The third case is the diamond install making contact:
 
 ```ts
-import { bind } from "knobs";
-import { fromProcessEnv } from "knobs/node";
+import { bind } from "knobs/node";
 import { smtpUrl } from "@acme/mailer/knobs"; // v2: schema tightened, version: "2"
 
-const cfg = bind([smtpUrl], [fromProcessEnv()]);
+const cfg = bind([smtpUrl]); // bare entry: declared refs resolve against process.env
 
 // Meanwhile, a transitive dependency still bundles @acme/mailer@1,
 // whose copy of the descriptor carries version: "1". When that copy reads:
@@ -100,7 +101,7 @@ DescriptorMismatchError: key "SMTP_URL" is bound, but under a different descript
   If these contracts are compatible, accept one descriptor and alias the
   other identity at your composition root:
 
-    bind(knobs, sources, {
+    bind(entries, {
       unify: [{ accept: smtpUrl, aliases: ["knobv1:xxh128:41c09be2…"] }],
     })
 ```
@@ -112,7 +113,7 @@ Descriptors contain no resolved values, so this error is safe to log even for se
 When you have inspected the diff and decided the two contracts are compatible, you resolve the collision where all binding decisions live — the composition root:
 
 ```ts
-const cfg = bind([smtpUrl], [fromProcessEnv()], {
+const cfg = bind([smtpUrl], {
   unify: [
     // Reads made through the old v1 identity resolve to the v2 binding.
     { accept: smtpUrl, aliases: ["knobv1:xxh128:41c09be2…"] },
@@ -129,7 +130,7 @@ Hash-fallback resolutions — the dual-package case, where two *identical-identi
 ```ts
 // copyA and copyB are different objects from two module instances,
 // but identityOf(copyA) === identityOf(copyB).
-const cfg = bind([smtpUrlCopyA], [fromProcessEnv()]);
+const cfg = bind([smtpUrlCopyA]);
 
 cfg.get(smtpUrlCopyB);
 // hash-fallback hit: the raw value is re-validated with copyB's own schema
@@ -143,18 +144,20 @@ The same rule holds for reads through a `unify` alias: the aliased caller's valu
 Two packages using the same key are not automatically in conflict. `@acme/http` and `@acme/queue` can both ship a knob named `TIMEOUT_MS`; bound in separate bindings, they never interact, because there is nothing global for them to collide in:
 
 ```ts
-const httpCfg = bind(httpKnobs, [fromProcessEnv()]);
-const queueCfg = bind(queueKnobs, [fromProcessEnv()]);
+const httpCfg = bind(httpKnobs);
+const queueCfg = bind(queueKnobs);
 // No conflict. No registry, no ambient state, no meeting point.
 ```
 
 If both land in **one** binding, each stays independently readable — `get()` is identity-addressed, so each descriptor resolves its own contract — but dev mode warns, because two contracts over one raw key is usually version drift you have not noticed yet:
 
 ```ts
-const cfg = bind([...httpKnobs, ...queueKnobs], [fromProcessEnv()]);
+const cfg = bind([...httpKnobs, ...queueKnobs]);
 // [knobs] dev warning: duplicate key "TIMEOUT_MS" bound under two identities
 //   knobv1:xxh128:0d11… and knobv1:xxh128:77aa…
 ```
+
+Note the distinction: two *different* identities sharing a raw key is a warning, because it is legal and occasionally intentional. The *same* knob reaching one `bind` through two entries — listed twice, or once bare and once inside a wired group — is a hard `DuplicateWiringError`, because one knob must have exactly one wiring.
 
 ## The compatibility contract for library authors
 
@@ -166,7 +169,7 @@ If you ship knobs, your descriptor's identity fields are API surface. This table
 | Add custom metadata fields | preserved | Unknown fields are cosmetic by rule. |
 | Rename `key` | **broken** | It is a different knob now; document the migration. |
 | Change `exposure` | **broken** | Deliberate — a secret/public flip must force a decision downstream. |
-| Add, remove, or reorder `sources` | **broken** | Precedence order is meaning. |
+| Add, remove, or reorder `sources` | **broken** | Declared precedence order is meaning. (This is the declared fallback chain on the descriptor — deployment wiring at `bind` is not this, and never breaks identity.) |
 | Add or remove `default`, or change its value | **broken** | Presence and value both count. |
 | Change `freshness` | **broken** | A live knob and a snapshot knob are different contracts — one can be a variants discriminant, the other cannot. |
 | Bump `version` | **broken** | That is its job: bump it on every schema change. |

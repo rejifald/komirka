@@ -33,7 +33,7 @@ export const dbUrl = knob({
 
 **`exposure`** — `"secret"` or `"public"`. The default is `"secret"`: fail closed, always. Secret knobs redact in `explain()` and `toJSON()`, their values throw on serialization, and reading one through a public/browser context raises `ExposureError`. You opt *into* publicness; you never accidentally opt out of secrecy. Identity field.
 
-**`sources`** — an ordered precedence list of source references. First source that yields a raw value wins. Omitted, it defaults to a single env reference named after `key`. Order is significant and part of identity.
+**`sources`** — an ordered precedence list of source references. First source that yields a raw value wins. Omitted, it defaults to a single env reference named after `key`. Order is significant and part of identity. Deployment sites can override at bind — `env(knob, "NAME")` renames a declared ref in place, `chain()` replaces the set — without ever touching identity: the declared list stays the contract.
 
 ```ts
 type SourceRef =
@@ -46,6 +46,8 @@ type SourceRef =
 **`default`** — the fallback when no source yields a value. JSON only. There is no privileged path for defaults: at bind time a default is validated exactly like a sourced value, so a default that violates its own schema fails loudly instead of lurking until production.
 
 ```ts
+import { bind } from "knobs/node";
+
 const retries = knob({
   key: "RETRY_COUNT",
   schema: z.coerce.number().int().max(5),
@@ -53,7 +55,7 @@ const retries = knob({
   default: 10, // violates max(5) — defaults get no free pass
 });
 
-bind([retries], [fromProcessEnv()]);
+bind([retries]);
 // MissingConfigError: 1 knob failed to bind
 //   RETRY_COUNT — invalid (1 issue at <root>)
 ```
@@ -76,17 +78,17 @@ Calling `knob()` does *nothing* observable:
 This is the property everything else leans on:
 
 - **Import cost is bytes.** A library can export its knobs from its top-level entry and importing them costs a frozen object, not a config system boot. That's what makes shipping knobs as a library contract viable.
-- **Any runtime.** The same descriptor module loads in Node, browsers, Workers, Deno, Bun — nothing runtime-specific happens until *you* bind against a runtime-specific source.
-- **Testability.** Tests construct knobs freely and pair them with `snapshotOf()` literals — zero `process.env` mutation, no import-order rituals.
+- **Any runtime.** The same descriptor module loads in Node, browsers, Workers, Deno, Bun — nothing runtime-specific happens until *you* bind through a runtime-specific entry point.
+- **Testability.** Tests construct knobs freely and bind them as `literal()` entries — zero `process.env` mutation, no import-order rituals.
 - **Bake can trust the manifest.** `knobs bake` runs your manifest in a constrained context; because construction is inert, any I/O it observes is a bug in the manifest, not normal operation.
 
 The flip side: since the knob holds no value, reading one requires a binding, and a binding only answers for knobs it was given. There is no ambient fallback — the failure is a named error:
 
 ```ts
-import { bind, knob } from "knobs";
-import { fromProcessEnv } from "knobs/node";
+import { knob } from "knobs";
+import { bind } from "knobs/node";
 
-const cfg = bind([poolSize], [fromProcessEnv()]);
+const cfg = bind([poolSize]);
 
 cfg.get(dbUrl);
 // UnboundKnobError: "DATABASE_URL" is not part of this binding.
@@ -141,7 +143,7 @@ const poolSize = knob({
 });
 // poolSize : Knob<number>
 
-const cfg = bind([poolSize], [fromProcessEnv()]);
+const cfg = bind([poolSize]); // bind from "knobs/node"
 const n = cfg.get(poolSize); // n : number — no parseInt at call sites
 
 const region = knob({ key: "AWS_REGION", exposure: "public" });

@@ -9,9 +9,9 @@ Most config testing pain comes from one root cause: the library reads the ambien
 
 This library has no ambient anything. Values exist only inside explicit bindings — there is no global binding, no module-scope cache, no cache on the knob object. So a test never mutates the environment. It constructs its own snapshot, hands it to the code under test, and throws it away. The composition-root discipline that makes production wiring explicit is exactly what makes tests trivial: config arrives through a parameter, and a parameter is the easiest thing in the world to fake — except here you don't even fake it, you build a real one.
 
-## Literal snapshots with `snapshotOf`
+## Literal snapshots with `literal()`
 
-`snapshotOf` builds a pinned, immutable `Snapshot` from literal pairs. It comes from the `knobs/testing` entry and never touches `process.env`, the filesystem, or anything else ambient.
+`literal(entry, value)` wires a knob to an input-typed literal value, and a `bind` whose entries are all literals produces a pinned, immutable `Snapshot`. Both come from the core `knobs` entry — and core `bind` supplies no natural sources, so an all-literal binding *cannot* touch `process.env`, the filesystem, or anything else ambient. That is a structural guarantee, not a convention. There is no separate testing entry point, either: pinning a value in a test is the same `literal` combinator production wiring uses.
 
 Your app's descriptors are inert — zero I/O, zero validation at construction — so tests import the *real* knobs and exercise the *real* schemas. No test-only duplicates to drift out of sync.
 
@@ -39,29 +39,33 @@ export const dbKnobs = defineKnobs([dbUrl, poolSize]);
 
 ```ts
 import { it, expect } from "vitest";
-import { snapshotOf } from "knobs/testing";
+import { bind, literal } from "knobs";
 import { dbUrl, poolSize } from "../app/config/db";
 
 it("reads typed values from a literal snapshot", () => {
-  const cfg = snapshotOf([
-    [dbUrl, "postgres://127.0.0.1:5432/app_test"],
-    [poolSize, 2],
-  ]);
+  const cfg = bind({
+    dbUrl: literal(dbUrl, "postgres://127.0.0.1:5432/app_test"),
+    poolSize: literal(poolSize, 2),
+  });
 
   expect(cfg.get(dbUrl)).toBe("postgres://127.0.0.1:5432/app_test");
   expect(cfg.get(poolSize)).toBe(2); // typed number, inferred from the schema
 });
 ```
 
-The result is an ordinary `Snapshot` — the same `get`, `tryGet`, `pick`, and `explain` your production code sees. And it is still validated: a bad test value fails loudly at construction, with the same aggregated error eager `bind` produces. A test snapshot can never hold a value the production path would refuse.
+The result is an ordinary `Snapshot` — the binding type is computed from the entries, and all-literal entries yield the plainest one — with the same `get`, `tryGet`, `pick`, and `explain` your production code sees. And it is still validated: `literal` values run the schema at `bind`, so a bad test value fails loudly with the same aggregated error any eager bind produces. A test snapshot can never hold a value the production path would refuse.
 
 ```ts
 import { MissingConfigError } from "knobs";
 
 it("a bad test value fails loudly", () => {
-  expect(() => snapshotOf([[dbUrl, "not-a-url"]])).toThrow(MissingConfigError);
+  expect(() => bind({ dbUrl: literal(dbUrl, "not-a-url") })).toThrow(
+    MissingConfigError,
+  );
 });
 ```
+
+One rule: never commit *real* secret values in `literal()` entries — placeholders only. `bake` fails closed on literal-wired secrets in client targets, and a lint bans real-looking values.
 
 ## Inject at the composition root
 
@@ -79,22 +83,21 @@ export function createPool(cfg: Scope<ConfigOf<typeof dbKnobs>>) {
 
 ```ts
 // app/main.ts — the only place that touches the real environment
-import { bind } from "knobs";
-import { fromProcessEnv } from "knobs/node";
+import { bind } from "knobs/node";
 import { dbKnobs } from "./config/db";
 import { createPool } from "./db";
 
-const root = bind(dbKnobs, [fromProcessEnv()]);
+const root = bind(dbKnobs); // bare entries — declared refs resolve against process.env + files
 const pool = createPool(root.pick(dbKnobs));
 ```
 
 ```ts
 // db.test.ts — the same seam, fed by a literal snapshot
 it("caps the pool at the configured size", () => {
-  const cfg = snapshotOf([
-    [dbUrl, "postgres://127.0.0.1:5432/app_test"],
-    [poolSize, 2],
-  ]);
+  const cfg = bind({
+    dbUrl: literal(dbUrl, "postgres://127.0.0.1:5432/app_test"),
+    poolSize: literal(poolSize, 2),
+  });
 
   const pool = createPool(cfg.pick(dbKnobs));
   expect(pool.options.max).toBe(2);
@@ -107,12 +110,18 @@ Because there is no global state at all, two tests holding contradictory config 
 
 ```ts
 it.concurrent("small pool behaviour", () => {
-  const cfg = snapshotOf([[dbUrl, "postgres://127.0.0.1:5432/a"], [poolSize, 1]]);
+  const cfg = bind({
+    dbUrl: literal(dbUrl, "postgres://127.0.0.1:5432/a"),
+    poolSize: literal(poolSize, 1),
+  });
   expect(createPool(cfg.pick(dbKnobs)).options.max).toBe(1);
 });
 
 it.concurrent("large pool behaviour", () => {
-  const cfg = snapshotOf([[dbUrl, "postgres://127.0.0.1:5432/b"], [poolSize, 64]]);
+  const cfg = bind({
+    dbUrl: literal(dbUrl, "postgres://127.0.0.1:5432/b"),
+    poolSize: literal(poolSize, 64),
+  });
   expect(createPool(cfg.pick(dbKnobs)).options.max).toBe(64);
 });
 ```
@@ -124,12 +133,12 @@ it.concurrent("large pool behaviour", () => {
 Eager `bind` validates the whole bound set up front and throws one aggregated error naming every missing or invalid knob. Testing the boot-failure path needs no setup at all — absence is the natural state of a test process's environment.
 
 ```ts
-import { bind, MissingConfigError } from "knobs";
-import { fromProcessEnv } from "knobs/node";
+import { MissingConfigError } from "knobs";
+import { bind } from "knobs/node";
 
 it("boot refuses with every problem listed at once", () => {
   try {
-    bind(dbKnobs, [fromProcessEnv()]); // test env has no DATABASE_URL
+    bind(dbKnobs); // bare entries; the test env has no DATABASE_URL
     expect.unreachable("bind must throw");
   } catch (err) {
     expect(err).toBeInstanceOf(MissingConfigError);
@@ -142,14 +151,14 @@ it("boot refuses with every problem listed at once", () => {
 
 ### Present-but-invalid values: `tryGet`
 
-`tryGet` returns `{ ok: true, value }` or `{ ok: false, issues }` instead of throwing. To produce a present-but-invalid raw value without touching `process.env`, point a file-sourced knob at a temp file and take the half-lazy door — `bind.lazy` checks presence eagerly but defers validator execution to the first read.
+`tryGet` returns `{ ok: true, value }` or `{ ok: false, issues }` instead of throwing. To produce a present-but-invalid raw value without touching `process.env`, declare a file ref on a knob pointed at a temp file, bind it as a bare entry under `knobs/node`, and take the half-lazy door — `bind.lazy` checks presence eagerly but defers validator execution to the first read.
 
 ```ts
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { knob, bind } from "knobs";
-import { fromFiles } from "knobs/node";
+import { knob } from "knobs";
+import { bind } from "knobs/node";
 import { z } from "zod";
 
 it("surfaces validation issues without throwing", async () => {
@@ -163,7 +172,7 @@ it("surfaces validation issues without throwing", async () => {
     sources: [{ file }],
   });
 
-  const cfg = bind.lazy([timeoutMs], [fromFiles()]); // presence passes
+  const cfg = bind.lazy([timeoutMs]); // presence passes
   const result = cfg.tryGet(timeoutMs);
 
   expect(result.ok).toBe(false);
@@ -181,7 +190,9 @@ Secrets are fail-closed all the way down to serialization. `Snapshot.toJSON` red
 import { ExposureError } from "knobs";
 
 it("secrets cannot ride a serialized payload", () => {
-  const cfg = snapshotOf([[dbUrl, "postgres://127.0.0.1:5432/app_test"]]);
+  const cfg = bind({
+    dbUrl: literal(dbUrl, "postgres://127.0.0.1:5432/app_test"),
+  });
 
   // the snapshot redacts secrets by construction
   expect(JSON.stringify(cfg)).not.toContain("app_test");
@@ -194,14 +205,14 @@ it("secrets cannot ride a serialized payload", () => {
 
 ## Testing live config
 
-`freshness: "live"` only means anything for re-readable sources — files and providers. That makes live behavior easy to test: point a file source at a temp file you control. Don't sleep past the poll throttle (`maxStalenessMs`, roughly one second for files) — that's how flaky tests are born. `refresh(live)` forces one coherent re-read pass and returns a new pinned `Snapshot`, so the test is deterministic.
+`freshness: "live"` only means anything for re-readable refs — files and providers. That makes live behavior easy to test: point a knob's file ref at a temp file you control and bind it as a bare entry under `knobs/node`. Don't sleep past the poll throttle (`maxStalenessMs`, a `bind` option — roughly one second for files by default) — that's how flaky tests are born. `refresh(live)` forces one coherent re-read pass and returns a new pinned `Snapshot`, so the test is deterministic.
 
 ```ts
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { knob, bind, refresh } from "knobs";
-import { fromFiles } from "knobs/node";
+import { knob, refresh } from "knobs";
+import { bind } from "knobs/node";
 import { z } from "zod";
 
 async function tempUpstream() {
@@ -219,7 +230,7 @@ async function tempUpstream() {
 
 it("bumps the epoch when an accepted value changes", async () => {
   const { file, upstreamUrl } = await tempUpstream();
-  const live = bind([upstreamUrl], [fromFiles()]); // LiveBinding
+  const live = bind([upstreamUrl]); // LiveBinding — a live knob, no async entries
   const before = live.epoch(upstreamUrl);
 
   await writeFile(file, "https://api-blue.internal.test");
@@ -240,7 +251,7 @@ import { InvalidLiveValueError, keepLastGood } from "knobs";
 it("poisons the knob when the file goes bad", async () => {
   const { file, upstreamUrl } = await tempUpstream();
   const rejected: unknown[] = [];
-  const live = bind([upstreamUrl], [fromFiles()], {
+  const live = bind([upstreamUrl], {
     onInvalid: (k, raw, issues) => rejected.push(issues),
   });
   const bootEpoch = live.epoch(upstreamUrl);
@@ -256,7 +267,7 @@ it("poisons the knob when the file goes bad", async () => {
 
 it("keepLastGood is the explicit opt-in, bounded by maxCoastMs", async () => {
   const { file, upstreamUrl } = await tempUpstream();
-  const live = bind([upstreamUrl], [fromFiles()], {
+  const live = bind([upstreamUrl], {
     invalid: [keepLastGood(upstreamUrl, { maxCoastMs: 60_000 })],
   });
 
@@ -277,25 +288,24 @@ it("a never-yet-valid live knob throws NoValidValueError", async () => {
   const { file, upstreamUrl } = await tempUpstream();
   await writeFile(file, "not a url"); // invalid from the start
 
-  const live = bind.lazy([upstreamUrl], [fromFiles()]);
+  const live = bind.lazy([upstreamUrl]);
   expect(() => live.get(upstreamUrl)).toThrow(NoValidValueError);
 });
 ```
 
 ## Testing library code that takes a `Scope`
 
-A library ships its knobs as inert descriptors and types its factory against `Scope<ConfigOf<typeof itsKnobs>>`. Testing it is the same move the app makes at its composition root: build a snapshot, `pick`, pass it in. `snapshotOf` returns a real `Snapshot`, so `pick` works on it directly.
+A library ships its knobs as inert descriptors and types its factory against `Scope<ConfigOf<typeof itsKnobs>>`. Testing it is the same move the app makes at its composition root: build an all-literal binding, `pick`, pass it in. An all-literal `bind` returns a real `Snapshot`, so `pick` works on it directly.
 
 ```ts
-import { snapshotOf } from "knobs/testing";
-import { defineKnobs, NotInScopeError } from "knobs";
+import { bind, literal, defineKnobs, NotInScopeError } from "knobs";
 import { createMailer, mailerKnobs, smtpUrl, smtpFrom } from "@acme/mailer";
 
 it("wires the mailer from a picked scope", () => {
-  const cfg = snapshotOf([
-    [smtpUrl, "smtp://127.0.0.1:1025"],
-    [smtpFrom, "noreply@test.local"],
-  ]);
+  const cfg = bind({
+    smtpUrl: literal(smtpUrl, "smtp://127.0.0.1:1025"),
+    smtpFrom: literal(smtpFrom, "noreply@test.local"),
+  });
 
   const mailer = createMailer(cfg.pick(mailerKnobs));
   // createMailer(cfg) does not compile: the root Snapshot is deliberately
@@ -303,10 +313,10 @@ it("wires the mailer from a picked scope", () => {
 });
 
 it("a scope is runtime-restricted, not just typed", () => {
-  const cfg = snapshotOf([
-    [smtpUrl, "smtp://127.0.0.1:1025"],
-    [smtpFrom, "noreply@test.local"],
-  ]);
+  const cfg = bind({
+    smtpUrl: literal(smtpUrl, "smtp://127.0.0.1:1025"),
+    smtpFrom: literal(smtpFrom, "noreply@test.local"),
+  });
 
   const scope = cfg.pick(defineKnobs([smtpUrl]));
   expect(() => scope.get(smtpFrom)).toThrow(NotInScopeError);
@@ -324,7 +334,7 @@ Every pattern below exists to work around ambient config state. None of them is 
 vi.stubEnv("DATABASE_URL", "postgres://127.0.0.1:5432/app_test");
 ```
 
-`stubEnv` mutates a process-wide global: it races under `it.concurrent`, leaks into the next test if cleanup is forgotten, and carries untyped, unvalidated strings. Here it is also pointless — nothing reads the environment unless a binding you constructed says `fromProcessEnv()`.
+`stubEnv` mutates a process-wide global: it races under `it.concurrent`, leaks into the next test if cleanup is forgotten, and carries untyped, unvalidated strings. Here it is also pointless — nothing reads the environment unless you bound under an entry point whose natural defaults include it (`knobs/node`), and the core `bind` these tests use supplies no natural sources at all.
 
 ```ts
 // Anti-pattern: mutating process.env by hand
@@ -345,10 +355,10 @@ This mocks a shape, not a contract: validation is skipped entirely (`"64"` where
 
 ```ts
 // Instead: a real, validated snapshot per test
-const cfg = snapshotOf([
-  [dbUrl, "postgres://127.0.0.1:5432/app_test"],
-  [poolSize, 2],
-]);
+const cfg = bind({
+  dbUrl: literal(dbUrl, "postgres://127.0.0.1:5432/app_test"),
+  poolSize: literal(poolSize, 2),
+});
 const pool = createPool(cfg.pick(dbKnobs));
 ```
 

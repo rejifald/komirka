@@ -44,7 +44,7 @@ export const releaseChannel = knob({
 export const clientKnobs = defineKnobs([apiBaseUrl, releaseChannel]);
 ```
 
-`sources` is omitted, so each knob defaults to `[{ env: key }]` — bake resolves `API_BASE_URL` and `RELEASE_CHANNEL` from the **build** environment.
+Neither knob declares any refs beyond its `key`, so each carries the default declared env ref named by its key — bake resolves `API_BASE_URL` and `RELEASE_CHANNEL` from the **build** environment.
 
 ### 2. Declare the client target
 
@@ -62,7 +62,7 @@ export default {
 
 Listing a knob under `targets.client` is an **app attestation**. A package author declaring `exposure: "public"` is necessary but not sufficient — env-backed values are deny-by-default for the client, and nothing reaches a browser bundle unless the app names it here. This replaces Vite's `VITE_` prefix convention entirely: the manifest is the allowlist, and nothing in client code reads `import.meta.env` at all.
 
-A `server` target is optional. Mandatory-ness attaches to the trust boundary: untrusted client targets must be baked; a trusted server may runtime-bind with `bind()` instead.
+A `server` target is optional. Mandatory-ness attaches to the trust boundary: untrusted client targets must be baked; a trusted server may runtime-bind with `bind()` from `knobs/node` instead.
 
 ### 3. Run bake
 
@@ -77,7 +77,7 @@ $ knobs bake
 $ knobs bake --check   # CI drift gate — fails if the module is missing or stale
 ```
 
-Bake resolves each listed knob's sources in the build environment, runs your schema, and inlines the validated literal. A missing or invalid public value fails the bake with one aggregated report — the same eager, list-everything contract `bind()` gives you at runtime.
+Bake resolves each listed knob's declared refs in the build environment, runs your schema, and inlines the validated literal. A missing or invalid public value fails the bake with one aggregated report — the same eager, list-everything contract `bind()` gives you at runtime.
 
 For local development, run bake in watch mode; the generated file is an ordinary module, so Vite HMR reloads it like any other:
 
@@ -115,7 +115,7 @@ export const config: Scope<{
 }> = /* …inlined shim over VALUES… */;
 ```
 
-Three properties matter. It contains **public literals only** — bake never resolves secret values, so nothing secret exists to leak. It **imports nothing at runtime** — the shim is inlined, keeping the artifact zero-dependency. And it **carries the `Scope` brand**, so any library API typed `Scope<ConfigOf<typeof someKnobs>>` accepts it exactly like a `pick()`-produced scope.
+Three properties matter. It contains **public literals only** — bake never resolves secret values, so nothing secret exists to leak. It **imports nothing at runtime** — the shim is inlined, keeping the artifact zero-dependency. And it **carries the `Scope` brand**, so any library API typed `Scope<ConfigOf<typeof someKnobs>>` accepts it exactly like a `pick()`-produced scope. Bake also strips all wiring metadata from the client output — a pinned snapshot needs no refs, so the generated module discloses nothing about your env-name topology.
 
 ### 5. Use it
 
@@ -136,13 +136,13 @@ export function apiFetch(path: string) {
 In tests, build the same shape without touching `process.env`:
 
 ```ts
-import { snapshotOf } from "knobs/testing";
+import { bind, literal } from "knobs";
 import { clientKnobs, apiBaseUrl, releaseChannel } from "../src/config.knobs";
 
-const cfg = snapshotOf([
-  [apiBaseUrl, "https://api.test.local"],
-  [releaseChannel, "beta"],
-]).pick(clientKnobs); // still validated; pass it wherever a Scope is expected
+const cfg = bind({
+  apiBaseUrl: literal(apiBaseUrl, "https://api.test.local"),
+  releaseChannel: literal(releaseChannel, "beta"),
+}).pick(clientKnobs); // validation runs at bind; pass it wherever a Scope is expected
 ```
 
 ## Skipping bake
@@ -187,13 +187,13 @@ The refusal report contains key names only. Bake never resolves secret values fo
 
 ## Why there is no runtime bind() for browser secrets
 
-The guarantee is structural, not procedural. The universal `knobs` entry contains **no secret-capable sources by construction**: `fromProcessEnv` and `fromFiles` live in `knobs/node`, `fromWorkerEnv` lives in `knobs/workers`, and none of them resolve under the browser export condition. In a browser bundle there is nothing you could pass to `bind()` that can read your deployment's secrets — and reading a secret knob from a browser context throws `ExposureError` regardless.
+The guarantee is structural, not procedural. The universal `knobs` entry point ships a `bind` with **no natural sources by construction**: a bare env or file ref under it has nothing to resolve against and throws `NoWiringError`. The wiring that can actually reach an environment lives elsewhere — `knobs/node`'s `bind` supplies `process.env` and the filesystem as natural defaults, `knobs/workers` only reads the per-request bag you pass explicitly as `bind(entries, { env: envBag })`, and provider-backed entries require `bind` from `knobs/async` — and none of those resolve under the browser export condition. In a browser bundle there is nothing you could hand to `bind()` that can read your deployment's secrets — and reading a secret knob from a browser context throws `ExposureError` regardless.
 
 Baking is one layer of a defense stack, and no single mechanism is claimed sufficient on its own:
 
 1. Required `targets` declaration — a client target that exists must be baked.
 2. Generated-module-only delivery — client code has exactly one config import.
-3. No-secret-sources browser entry — the structural guarantee above.
+3. No-natural-sources browser entry — the structural guarantee above.
 4. An AST lint banning raw `process.env` and `import.meta.env` reads in client-designated code.
 5. A coverage report comparing the manifest against client-reachable knobs.
 6. The allowlist leak scan: any high-entropy string in emitted client assets — including sourcemaps and decompressed `.gz` / `.br` — that is not a registered public value gets flagged. Findings never print values.

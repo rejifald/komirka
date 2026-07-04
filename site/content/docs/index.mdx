@@ -51,33 +51,32 @@ export const poolSize = knob({
 ```
 
 ```ts
-// Node — eager validation of exactly what this entrypoint uses, at boot
-import { bind } from "knobs";
-import { fromProcessEnv } from "knobs/node";
+// Node — eager validation of exactly what this entrypoint uses, at boot.
+// Bare entries resolve their declared refs against process.env; overrides are inline.
+import { bind, env } from "knobs/node";
 import { dbUrl, poolSize } from "./config/db";
 
-const cfg = bind({ db: dbUrl, pool: poolSize }, fromProcessEnv());
+const cfg = bind({ db: env(dbUrl, "PLATFORM_PG_URL"), pool: poolSize });
 const pool = new Pool({ connectionString: cfg.values.db, max: cfg.values.pool });
 ```
 
 ```ts
 // Cloudflare Worker — the same descriptors, bound to the per-request env bag
-import { bind } from "knobs";
-import { fromWorkerEnv } from "knobs/workers";
+import { bind } from "knobs/workers";
 
 export default {
   fetch(req: Request, env: Env) {
-    const cfg = bind(dbUrl, fromWorkerEnv(env));
+    const cfg = bind(dbUrl, { env }); // the bag is a required option — never ambient
     return handle(req, cfg);
   },
 };
 ```
 
 ```ts
-// Tests — literal snapshots, zero process.env mutation
-import { snapshotOf } from "knobs/testing";
+// Tests — literal entries, zero process.env mutation
+import { bind, literal } from "knobs";
 
-const cfg = snapshotOf([[dbUrl, "postgres://localhost:5432/test"], [poolSize, 2]]);
+const cfg = bind({ db: literal(dbUrl, "postgres://localhost:5432/test") });
 ```
 
 ```ts

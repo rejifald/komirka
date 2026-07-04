@@ -1,6 +1,6 @@
 ---
 title: Conditional config (variants)
-description: Branch-dependent requirement sets with variants(), when(), and rule() — discriminant-first binding, typed match(), and precise failure semantics.
+description: Branch-dependent requirement sets with variants(), when(), and rule() — discriminant-first binding, typed match(), one-entry group wiring, and precise failure semantics.
 ---
 
 ## The problem
@@ -18,7 +18,7 @@ A flat knob list cannot express this. Mark `SMTP_HOST` required and every sendgr
 `variants(discriminant, branches)` takes a knob whose schema enumerates the modes, plus one member map per mode:
 
 ```ts
-import { knob, variants, bind, fromProcessEnv } from "knobs";
+import { knob, variants } from "knobs";
 import { z } from "zod";
 
 const emailService = knob({
@@ -47,23 +47,45 @@ export const email = variants(emailService, {
 });
 ```
 
-A group binds alongside plain knobs — it is just another entry in the bind set:
+A group binds alongside plain knobs — it is just another entry in the bind set. Bare entries resolve their declared refs against the entry point's natural defaults; under `knobs/node` that is `process.env` and the filesystem:
 
 ```ts
+import { bind } from "knobs/node";
+
 const appName = knob({ key: "APP_NAME", exposure: "public", default: "mailer" });
 
-const cfg = bind([email, appName], [fromProcessEnv()]);
+const cfg = bind({ email, appName });
 ```
+
+## Wiring a group
+
+A group is wired as **one entry**, never member-by-member. `env(group, opts)` renames every member's env ref in one stroke:
+
+```ts
+import { bind, env } from "knobs/node";
+
+const cfg = bind({
+  appName,
+  email: env(email, { prefix: "MAILER_", overrides: { password: "SECRET_PW" } }),
+});
+```
+
+The discriminant is a member for wiring purposes, so the prefix applies to it too: this deployment selects a branch from `MAILER_EMAIL_SERVICE_TYPE`, and the smtp branch reads `MAILER_SMTP_HOST`, `MAILER_SMTP_PORT`, and so on. Two laws govern the shape:
+
+- **One entry per knob, ever.** A member wired again elsewhere in the same bind — directly, or through another entry — is a `DuplicateWiringError` at bind time (groups are flattened for the check). Spelling the password out as its own entry next to the group is exactly this error, which is why specialization lives *inside* the group entry, via `overrides`.
+- **Overrides are exempt from the prefix.** `overrides: { password: "SECRET_PW" }` means the password reads exactly `SECRET_PW`, not `MAILER_SECRET_PW`. Per-member overrides are absolute — no transform touches them.
+
+None of this forks identity: the wired group hashes to the same `relv1|…` id it had bare. Wiring is deployment data, and `match()`, scopes, and every error below keep working against the same group object.
 
 ## Discriminant-first resolution
 
 `bind` resolves and validates the discriminant **first**, in every bind mode — including `bind.unchecked` — and then requires and validates only the members of the active branch. Deploy with `EMAIL_SERVICE_TYPE=sendgrid` and none of the `SMTP_*` variables need to exist. If active-branch members are missing, they join the usual single aggregated `MissingConfigError` alongside any missing plain knobs.
 
-A discriminant that no source produced and that declares no default cannot select a branch, so bind fails immediately:
+A discriminant whose refs produced nothing and that declares no default cannot select a branch, so bind fails immediately:
 
 ```
 MissingDiscriminantError: cannot select a branch of variants(EMAIL_SERVICE_TYPE):
-no source produced a value for EMAIL_SERVICE_TYPE and the knob declares no default.
+no ref produced a value for EMAIL_SERVICE_TYPE and the knob declares no default.
 ```
 
 ## Reading a group: match()
@@ -89,7 +111,7 @@ switch (mail.type) {
 }
 ```
 
-`match()` exists on `Snapshot` and on eager bindings only. It is deliberately absent from the `LiveBinding` and `AsyncBinding` types — pin first, then match, so both sides of the switch come from one coherent pass:
+`match()` exists on `Snapshot` and on eager bindings only. It is deliberately absent from the `LiveBinding` and `AsyncBinding` type views — pin first, then match, so both sides of the switch come from one coherent pass:
 
 ```ts
 const snap = live.snapshot();
@@ -144,7 +166,7 @@ match(email).type before reaching into branch values.
 
 Two membership conflicts are caught at bind time, not read time:
 
-- A branch knob that is **also bound directly** in the same binding → `AmbiguousKnobMembershipError`. The two claims contradict: always-required versus branch-conditional.
+- A branch knob that is **also bound as its own entry** in the same bind → `DuplicateWiringError` — one entry per knob, groups flattened. The two claims contradict anyway: always-required versus branch-conditional.
 - **Cross-group collisions** are still real. Two groups' active branches can both claim `SMTP_PORT` with different descriptors; the bind-time conflict pass over the *active* set throws `DescriptorMismatchError` with variant context. `bake` goes further and checks the full cross-product of branch combinations statically, so combinations you never happened to deploy are caught too.
 
 ## when(): presence-conditional requirements
@@ -160,7 +182,7 @@ export const proxyAuth = when({ knob: proxyUrl, is: "set" }, {
 });
 ```
 
-Condition forms: `"set"`, `{ equals: value }`, `{ in: [...values] }`. `"set"` means **a source produced a non-empty raw value**. Defaults do not count — otherwise any defaulted knob would be eternally "set" and the condition dead — and the empty string counts as unset. Condition knobs must be snapshot-fresh, same as discriminants.
+Condition forms: `"set"`, `{ equals: value }`, `{ in: [...values] }`. `"set"` means **a wired ref produced a non-empty raw value**. Defaults do not count — otherwise any defaulted knob would be eternally "set" and the condition dead — and the empty string counts as unset. Condition knobs must be snapshot-fresh, same as discriminants.
 
 ## rule(): arbitrary cross-knob checks
 
@@ -168,6 +190,7 @@ Condition forms: `"set"`, `{ equals: value }`, `{ in: [...values] }`. `"set"` me
 
 ```ts
 import { rule } from "knobs";
+import { bind } from "knobs/node";
 
 const poolBounds = rule(
   [poolMin, poolMax],
@@ -175,7 +198,7 @@ const poolBounds = rule(
   { id: "pool-bounds", description: "connection pool min must not exceed max" },
 );
 
-const cfg = bind([poolMin, poolMax, poolBounds], [fromProcessEnv()]);
+const cfg = bind([poolMin, poolMax, poolBounds]);
 ```
 
 Rules run at bind and at every `snapshot()` / pin — **never** at `get()`, so reads stay cheap and predictable. A rule's presence promotes its deps to eager even under `bind.lazy`, and all deps must live in the same bind set. Failure throws `RuleViolationError` naming the rule id. In JSON export a rule appears as `{"$rule": 1, "on": [ids], "id": ..., "description": ...}` — the function is honestly absent: a rule's check does not survive serialization, and the export never pretends otherwise.
@@ -191,7 +214,7 @@ Nesting `variants()` or `when()` inside a branch is rejected in v1 with `Variant
   "branches": {
     "console": {},
     "smtp": {
-      "host": { "key": "SMTP_HOST", "exposure": "secret", "freshness": "snapshot", "sources": [{ "env": "SMTP_HOST" }] },
+      "host": { "key": "SMTP_HOST", "exposure": "secret", "freshness": "snapshot", "refs": [{ "env": "SMTP_HOST" }] },
       "port": { "key": "SMTP_PORT", "exposure": "public", "freshness": "snapshot", "default": 587, "schemaId": "std1|4be0..." },
       "user": { "key": "SMTP_USER", "exposure": "secret", "freshness": "snapshot" },
       "password": { "key": "SMTP_PASSWORD", "exposure": "secret", "freshness": "snapshot" }
@@ -230,6 +253,8 @@ EMAIL_SERVICE_TYPE=console
 # SMTP_PASSWORD= — required when EMAIL_SERVICE_TYPE=smtp (secret)
 # SENDGRID_API_KEY= — required when EMAIL_SERVICE_TYPE=sendgrid (secret)
 ```
+
+Rendering speaks effective names: under the `MAILER_` wiring above, the same group renders `# MAILER_SMTP_HOST= — required when MAILER_EMAIL_SERVICE_TYPE=smtp`, and the password line becomes `# SECRET_PW=` — the override name, un-prefixed.
 
 ## Cost note
 

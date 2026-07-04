@@ -7,7 +7,7 @@ description: Serve knobs from a database — per-request pins with bounded stale
 
 Your configuration lives in a database table. An admin panel edits it. A fleet of replicas reads it. This guide covers that shape end to end.
 
-The tool is the **async binding**: a `LiveBinding` with async transport plus operator-plane writes. The mental model carries over unchanged — pin with `snapshot()`, compare `epoch()`, inspect `health()` — with two additions: reads that may touch the network are awaited, and `set()` writes back through the binding. It lives in the `knobs/async` subpath; only the shared types and error classes sit in core, which stays synchronous.
+The tool is the **async binding**: live semantics with async transport plus operator-plane writes. The mental model carries over unchanged — pin with `snapshot()`, compare `epoch()`, inspect `health()` — with two additions: reads that may touch the network are awaited, and `set()` writes back through the binding. You get one from the `knobs/async` entry point: its `bind` accepts async-colored entries, and the coloring rule does the typing — any async entry makes the whole binding an `AsyncBinding`. Only the shared types and error classes sit in core, which stays synchronous.
 
 ## The provider contract
 
@@ -15,8 +15,8 @@ The tool is the **async binding**: a `LiveBinding` with async transport plus ope
 import type { Json } from "knobs";
 
 interface AsyncProvider {
-  kind: "async";
-  name: string;
+  id: string;
+  color: "async";
   read(key: string): Promise<{ raw: string | Json; version?: string } | undefined>;
   readMany?(keys: readonly string[]): Promise<Map<string, { raw: string | Json; version?: string } | undefined>>;
   write?(key: string, raw: string | Json, opts?: { ifVersion?: string }): Promise<{ version?: string; storedRaw?: string | Json }>;
@@ -24,6 +24,8 @@ interface AsyncProvider {
   writeMany?(entries: ReadonlyArray<{ key: string; raw: string | Json; ifVersion?: string }>): Promise<void>;
 }
 ```
+
+The `id` is not decoration: it is what the lockfile records for bake-covered targets, so an anonymous impl is a bind-time error there. And `color` is load-bearing type information — leaving it untyped is a compile error, because coloring is how `bind` computes its result type.
 
 The envelope is versioned from day one: `read` may return a `version` (a SQL row version, a DynamoDB condition attribute, an etcd revision), and `write` may accept `ifVersion` for compare-and-set. Providers without versions still work — they degrade to **documented** last-write-wins. That is an acceptable default and an unacceptable ceiling, so the seam exists even if your first provider ignores it.
 
@@ -35,8 +37,8 @@ import { WriteConflictError } from "knobs";
 import { sql } from "./db";
 
 export const pgProvider: AsyncProvider = {
-  kind: "async",
-  name: "pg",
+  id: "pg-config",
+  color: "async",
   async read(key) {
     const [row] = await sql`SELECT raw, version FROM config WHERE key = ${key}`;
     return row ? { raw: row.raw, version: String(row.version) } : undefined;
@@ -63,7 +65,7 @@ export const pgProvider: AsyncProvider = {
 
 ```ts
 import { knob } from "knobs";
-import { bind } from "knobs/async";
+import { bind, provider } from "knobs/async";
 import { z } from "zod";
 
 export const rateLimit = knob({
@@ -71,7 +73,6 @@ export const rateLimit = knob({
   schema: z.coerce.number().int().positive(),
   doc: "Requests per minute, per API key.",
   exposure: "public",
-  sources: [{ provider: "pg" }],
   default: "100",
   freshness: "live",
 });
@@ -81,16 +82,35 @@ export const corsOrigins = knob({
   schema: z.string().transform((s) => s.split(",").map((o) => o.trim())),
   doc: "Comma-separated allowed origins.",
   exposure: "public",
-  sources: [{ provider: "pg" }],
   default: "https://app.example.com",
   freshness: "live",
 });
 
-const cfg = bind.async([rateLimit, corsOrigins], [pgProvider], { maxStalenessMs: 5_000 });
+const cfg = bind(
+  {
+    rateLimit: provider(rateLimit, pgProvider),
+    corsOrigins: provider(corsOrigins, pgProvider),
+  },
+  { maxStalenessMs: 5_000 },
+);
 await cfg.ready();
 ```
 
-The constructor is inert — it never performs I/O. `await cfg.ready()` is the startup line: one `readMany`, then resolve and validate every listed knob, failing fast with a single aggregated `MissingConfigError` that names everything wrong at once, not just the first thing.
+`bind` is inert — it never performs I/O. Each `provider()` entry is async-colored, so the result types as an `AsyncBinding` automatically; there is no separate async constructor. `await cfg.ready()` is the eager startup line: one `readMany`, then resolve and validate every bound knob, failing fast with a single aggregated `MissingConfigError` that names everything wrong at once, not just the first thing.
+
+Wiring is per entry, so one binding mixes transports freely. A knob that should read Parameter Store but fall back to an env var spells the whole chain out — `chain` is the only full-replacement wiring, and if the knob declared fallback refs of its own, errors will list exactly what the chain dropped:
+
+```ts
+import { chain } from "knobs";
+import { env } from "knobs/async"; // node combinators are re-exported here
+
+bind({
+  rateLimit: provider(rateLimit, pgProvider),
+  sendgridKey: chain(sendgridKey, provider(ssmProvider, "/prod/sendgrid/api-key"), env("SENDGRID_KEY")),
+});
+```
+
+Links carry color: the SSM link is async, so this binding is an `AsyncBinding` no matter that the `env` fallback behind it is sync.
 
 ## Reading
 
@@ -140,21 +160,29 @@ The pipeline: validate the raw against the knob's schema (an invalid write is re
 | Every other replica | Within `maxStalenessMs` plus provider replication lag |
 | Concurrent writers | Last-write-wins unless `ifVersion` is used; divergence bounded by `maxStalenessMs` |
 
-**It targets the highest-precedence source.** A write that lands below a shadowing source would change every replica except the operator's own — the one machine where the change appears to work is the one machine where it hasn't. Forbidden:
+**It targets the highest-precedence ref in the knob's wiring.** A write that lands below a shadowing ref would change every replica except the operator's own — the one machine where the change appears to work is the one machine where it hasn't. Forbidden:
 
 ```ts
+import { chain } from "knobs";
+import { file } from "knobs/async";
+
 const logLevel = knob({
   key: "log.level",
   schema: z.enum(["debug", "info", "warn", "error"]),
-  sources: [{ file: "./config.local.json" }, { provider: "pg" }],
   default: "info",
   freshness: "live",
 });
 
+const cfg = bind({
+  logLevel: chain(logLevel, file("./config.local.json"), provider(pgProvider)),
+});
+
 await cfg.set(logLevel, "debug");
 // NotWritableError: "log.level" is currently supplied by file "./config.local.json",
-// which shadows provider "pg". Remove the local override or write to the file.
+// which shadows provider "pg-config". Remove the local override or write to the file.
 ```
+
+The binding records which ref supplied each value, so the refusal names the shadowing ref precisely — the same provenance that `explain()` and `tryGet` report.
 
 ## Verifying writes: did the store keep what you gave it?
 
@@ -315,10 +343,16 @@ Where coasting beats throwing, opt in at the bind site (never in the descriptor 
 ```ts
 import { keepLastGood } from "knobs";
 
-const cfg = bind.async(knobs, [pgProvider], {
-  maxStalenessMs: 5_000,
-  invalid: [keepLastGood(rateLimit, { maxCoastMs: 300_000 })], // maxCoastMs is required
-});
+const cfg = bind(
+  {
+    rateLimit: provider(rateLimit, pgProvider),
+    corsOrigins: provider(corsOrigins, pgProvider),
+  },
+  {
+    maxStalenessMs: 5_000,
+    invalid: [keepLastGood(rateLimit, { maxCoastMs: 300_000 })], // maxCoastMs is required
+  },
+);
 // past the coast budget → CoastBudgetExceededError
 ```
 
@@ -371,8 +405,7 @@ The clock is a seam, so staleness tests need no timers:
 ```ts
 import { manualClock } from "knobs/testing";
 
-const clock = manualClock();
-const cfg = bind.async([rateLimit], [fakeProvider], { maxStalenessMs: 5_000, clock });
+const cfg = bind({ rateLimit: provider(rateLimit, fakeProvider) }, { maxStalenessMs: 5_000, clock });
 await cfg.ready();
 
 clock.advance(5_001);

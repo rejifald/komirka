@@ -53,22 +53,23 @@ export const appKnobs = defineKnobs([dbUrl, poolSize]);
 
 ```ts
 // worker.ts
-import { bind } from "knobs";
-import { fromWorkerEnv } from "knobs/workers";
-import { appKnobs, dbUrl, poolSize } from "./knobs";
+import { bind } from "knobs/workers";
+import { dbUrl, poolSize } from "./knobs";
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     // Eager bind: every listed knob is resolved and validated NOW.
     // Anything missing or invalid throws ONE aggregated MissingConfigError
     // for this request — before your handler touches a single value.
-    const cfg = bind(appKnobs, [fromWorkerEnv(env)]);
+    const cfg = bind({ dbUrl, poolSize }, { env });
 
     const db = connect(cfg.get(dbUrl), { max: cfg.get(poolSize) });
     return handle(request, db);
   },
 };
 ```
+
+The bag is a **required** option, at the type level. `bind` from `knobs/workers` supplies no natural defaults — there is no ambient environment on workerd for a bare entry to fall back to — so the entries resolve against the bag you pass, and omitting `{ env }` is a compile error, not a runtime surprise.
 
 The same pattern applies to `scheduled()` and `queue()` handlers — each receives its own `env`, and each gets its own bind.
 
@@ -86,7 +87,7 @@ let cached: Snapshot | undefined;
 
 export default {
   async fetch(request: Request, env: Env) {
-    cached ??= bind(appKnobs, [fromWorkerEnv(env)]);
+    cached ??= bind({ dbUrl, poolSize }, { env });
     // ...
   },
 };
@@ -94,7 +95,7 @@ export default {
 
 In any deployment where the bag can differ between requests — dispatch namespaces, per-tenant remapping, preview sessions — this serves request 1's tenant to everyone after it. Tenant A's `DATABASE_URL` answers tenant B's traffic: cross-tenant bleed, with secrets. It also quietly converts eager validation into "validated once, for possibly the wrong bag". And it is invisible in single-tenant dev, which is why it survives review.
 
-The fix is not cleverer caching. It is binding per request and letting the library make that cheap.
+The fix is not cleverer caching. It is binding per request and letting the library make that cheap. And note that the surface area for this bug is exactly the one line above: a per-request bag can never be captured inside wiring data — combinators like `env(knob, name)` are pure data, and capability enters only at `bind`.
 
 ## Per-request eager bind is close to free
 
@@ -123,7 +124,7 @@ const logLevel = knob({
   freshness: "live", // meaningless for a workerd env source — emits a dev-mode warning
 });
 
-const live = bind([logLevel], [fromWorkerEnv(env)]);
+const live = bind([logLevel], { env });
 // Typed as LiveBinding, but epoch(logLevel) never advances and every
 // snapshot() pins the same values — live over workerd env is pure overhead.
 ```
@@ -135,13 +136,14 @@ Declare env-sourced knobs with the default `freshness: "snapshot"` on Workers. R
 Some values genuinely change between deployments — a pricing table in KV, a remote-config document. Providers are re-readable, so `freshness: "live"` applies. But two constraints shape the pattern:
 
 1. Core never runs background loops, timers, or watchers — and workerd would not give it execution time between requests anyway.
-2. Providers are async, and `bind()` accepts sync sources only — an async source is a compile error (on the source's kind discriminant) and an `AsyncSourceInBindError` at runtime. Async sources go through `load()`, which resolves once so that every read afterwards is sync.
+2. Provider impls declare a **color** — `"sync"` or `"async"`; leaving it untyped is a compile error. Color propagates through the entries: one async entry makes the whole binding an `AsyncBinding`, and only the async-capable `bind` from `knobs/async` produces one. There is no separate load step — the async read happens where you `await` the binding's `snapshot()`, and every read after that pin is sync.
 
 So freshness rides the request lifecycle, via `ctx.waitUntil`:
 
 ```ts
-import { knob, load, refresh } from "knobs";
-import type { LiveBinding } from "knobs";
+import { knob, refresh } from "knobs";
+import { bind, provider } from "knobs/async";
+import type { AsyncBinding } from "knobs";
 
 const pricing = knob({
   key: "PRICING_TABLE",
@@ -151,52 +153,67 @@ const pricing = knob({
   freshness: "live", // providers are re-readable — live is meaningful here
 });
 
-// A provider is a plain function you write; core ships no KV or
-// secret-manager clients. This one reads from a KV namespace binding.
-let live: LiveBinding | undefined;
+// A provider impl is a plain object you write; core ships no KV or
+// secret-manager clients. The id is what the lockfile records; the
+// declared color is what colors the binding.
+function pricingKvProvider(kv: KVNamespace) {
+  return {
+    id: "pricing-kv",
+    color: "async" as const,
+    async read(key: string) {
+      return kv.get(key, "json");
+    },
+  };
+}
+
+let live: AsyncBinding | undefined;
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
-    live ??= await load([pricing], [pricingKvProvider(env.PRICING_KV)]);
+    // provider(entry, impl) supplies the impl for the knob's declared
+    // provider ref; the impl's async color makes this an AsyncBinding.
+    live ??= bind({ pricing: provider(pricing, pricingKvProvider(env.PRICING_KV)) });
 
-    const cfg = live.snapshot();  // pin: this request sees one coherent view, no torn reads
-    ctx.waitUntil(refresh(live)); // fetch a newer table for LATER requests
+    const cfg = await live.snapshot(); // pin: this request sees one coherent view, no torn reads
+    ctx.waitUntil(refresh(live));      // fetch a newer table for LATER requests
 
     return quote(request, cfg.get(pricing));
   },
 };
 ```
 
-The current request is always served from the last pinned snapshot; `refresh()` produces a new pinned snapshot for requests that come after. Refresh is single-flight coalesced in core, so a burst of concurrent requests each calling `waitUntil(refresh(live))` triggers one provider read, not a stampede. On failure it is all-or-nothing by default (opt in to `partial: "keep-old"` if you prefer), and a refresh that returns invalid data throws — the caller keeps the previous pinned snapshot, so a bad deploy of the pricing document fails the refresh loudly (with `onInvalid` fired once for the bad raw) instead of crashing the edge; requests keep serving the old snapshot they already hold. `live.health()` reports per-knob staleness and the last validation error if you expose a liveness probe.
+The current request is always served from the last pinned snapshot — the first `snapshot()` is where the provider read actually happens; `refresh()` produces a new pinned snapshot for requests that come after. Refresh is single-flight coalesced in core, so a burst of concurrent requests each calling `waitUntil(refresh(live))` triggers one provider read, not a stampede. On failure it is all-or-nothing by default (opt in to `partial: "keep-old"` if you prefer), and a refresh that returns invalid data throws — the caller keeps the previous pinned snapshot, so a bad deploy of the pricing document fails the refresh loudly (with `onInvalid` fired once for the bad raw) instead of crashing the edge; requests keep serving the old snapshot they already hold. `live.health()` reports per-knob staleness and the last validation error if you expose a liveness probe.
 
-One boundary, stated plainly: caching `live` at module scope is safe here *only* because nothing inside it is per-request — a KV namespace binding is fixed for the isolate's deployment. The per-request thing, the env bag's values under dispatch, must never be captured this way. Provider handles: cacheable. Tenant env: never.
+One boundary, stated plainly: caching `live` at module scope is safe here *only* because nothing inside it is per-request — the KV namespace handle the impl closed over is fixed for the isolate's deployment. The per-request thing, the env bag's values under dispatch, must never be captured this way. Provider handles: cacheable. Tenant env: never.
 
-## Multi-tenant: one contract, many env bags
+## Multi-tenant: one contract, many wirings
 
-`fromWorkerEnv()` takes a bag; it does not care where the bag came from. That makes per-tenant remapping a plain function, and the config contract identical across tenants:
+The env bag is a bind option and names are per-entry wiring data. That makes per-tenant remapping a pair of `env()` renames, and the config contract identical across tenants:
 
 ```ts
 // One physical Worker fronting many tenants; per-tenant vars live under
 // prefixed names in the same deployment:
 //   TENANT_ACME_DATABASE_URL,   TENANT_ACME_DB_POOL_SIZE,
 //   TENANT_ZENITH_DATABASE_URL, TENANT_ZENITH_DB_POOL_SIZE, …
+import { bind, env } from "knobs/workers";
+import { dbUrl, poolSize } from "./knobs";
 
-function tenantBag(env: Env, tenant: string): Record<string, string | undefined> {
+function tenantEntries(tenant: string) {
   const prefix = `TENANT_${tenant.toUpperCase()}_`;
-  const bag: Record<string, string | undefined> = {};
-  for (const key of ["DATABASE_URL", "DB_POOL_SIZE"] as const) {
-    // computed access on purpose — never a static member expression
-    bag[key] = (env as unknown as Record<string, string | undefined>)[prefix + key];
-  }
-  return bag;
+  // env() here is the wiring combinator — pure name-ref data, no bag captured
+  return {
+    dbUrl: env(dbUrl, `${prefix}DATABASE_URL`),
+    poolSize: env(poolSize, `${prefix}DB_POOL_SIZE`),
+  };
 }
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const tenant = tenantFromHost(new URL(request.url).hostname);
 
-    // Same descriptors, different bag. The contract does not change per tenant.
-    const cfg = bind(appKnobs, [fromWorkerEnv(tenantBag(env, tenant))]);
+    // Same descriptors, different names. Wiring never forks identity:
+    // the contract does not change per tenant.
+    const cfg = bind(tenantEntries(tenant), { env });
 
     // A misconfigured tenant fails HERE — one MissingConfigError naming every
     // missing or invalid knob — and only that tenant's requests fail.
@@ -205,23 +222,27 @@ export default {
 };
 ```
 
-Because binding is per request, the blast radius is per request: tenant ZENITH missing its pool size returns errors for ZENITH and nobody else. The validation cache keys on (identity, raw), so each tenant's values occupy their own entries — tenants do not evict each other, and the steady state stays validator-free even with hundreds of bags. When you need to see what actually resolved, `cfg.explain(dbUrl)` reports which source won and which key it read; the secret value itself is redacted.
+`env(dbUrl, name)` is a per-kind ref rename: it patches the knob's declared env ref in place and preserves any other declared fallbacks. It is deployment wiring, not a new knob — identity is untouched, so the contract, the lockfile entry, and the validation cache are shared across every tenant.
 
-On Workers for Platforms, the remapping disappears entirely: each dispatched user Worker receives its own `env`, and `bind(appKnobs, [fromWorkerEnv(env)])` inside it is already tenant-correct.
+Because binding is per request, the blast radius is per request: tenant ZENITH missing its pool size returns errors for ZENITH and nobody else — and the error speaks the effective name it looked for, `TENANT_ZENITH_DB_POOL_SIZE`, first. The validation cache keys on (identity, raw), so each tenant's values occupy their own entries — tenants do not evict each other, and the steady state stays validator-free even with hundreds of tenants. When you need to see what actually resolved, `cfg.explain(dbUrl)` reports which ref supplied the value and the effective name it read; the secret value itself is redacted.
+
+On Workers for Platforms, the renames disappear entirely: each dispatched user Worker receives its own `env`, and `bind({ dbUrl, poolSize }, { env })` inside it is already tenant-correct.
 
 ## Testing handlers without a Workers runtime
 
-Factor handler logic to accept a `Snapshot` (or a `Scope` via `pick()`), keep `fromWorkerEnv` confined to the `fetch()` entry point, and unit tests need neither miniflare nor a single `process.env` mutation:
+Factor handler logic to accept a `Snapshot` (or a `Scope` via `pick()`), keep the env bag confined to the `fetch()` entry point, and unit tests need neither miniflare nor a single `process.env` mutation — a test snapshot is an all-literal bind:
 
 ```ts
-import { snapshotOf } from "knobs/testing";
+import { bind, literal } from "knobs";
 import { dbUrl, poolSize } from "./knobs";
 
-const cfg = snapshotOf([
-  [dbUrl, "postgres://user:pw@localhost:5432/test"],
-  [poolSize, 2],
-]);
-// Still validated: a non-URL literal here fails exactly like production would.
+const cfg = bind({
+  dbUrl: literal(dbUrl, "postgres://user:pw@localhost:5432/test"),
+  poolSize: literal(poolSize, 2),
+});
+// Still validated, at bind: a non-URL literal here fails exactly like
+// production would. Literal entries need no bag and no natural defaults,
+// so this is core bind — no workers entry point in your tests at all.
 
 const res = await handle(new Request("https://example.test/health"), cfg);
 ```

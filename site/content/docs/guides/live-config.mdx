@@ -115,26 +115,25 @@ Descriptors stay inert: declaring `freshness: "live"` performs zero I/O and star
 ## Bind once, poll on read
 
 ```ts
-import { bind } from "knobs";
-import { fromFiles } from "knobs/node";
+import { bind } from "knobs/node";
 
-export const live = bind(
-  [logLevel, dbHost, dbPassword],
-  [fromFiles({ maxStalenessMs: 2_000 })], // default is ~1s for files
-  {
-    onInvalid(k, _raw, issues) {
-      // Observation plane: fires once per (knob, distinct invalid raw),
-      // not once per read. By the time it fires the knob is poisoned and
-      // reads of it throw; the hook and those errors share an incidentId,
-      // so this page and the request failures join in your logs.
-      // For secret knobs, _raw is { rawDigest, length } — never the value.
-      alerting.page("config-invalid", { key: k.key, issueCount: issues.length });
-    },
+export const live = bind([logLevel, dbHost, dbPassword], {
+  maxStalenessMs: 2_000, // default is ~1s for file refs
+  onInvalid(k, _raw, issues) {
+    // Observation plane: fires once per (knob, distinct invalid raw),
+    // not once per read. By the time it fires the knob is poisoned and
+    // reads of it throw; the hook and those errors share an incidentId,
+    // so this page and the request failures join in your logs.
+    // For secret knobs, _raw is { rawDigest, length } — never the value.
+    alerting.page("config-invalid", { key: k.key, issueCount: issues.length });
   },
-);
-// Because a bound knob is freshness:"live", bind returns a LiveBinding —
-// a distinct type, deliberately NOT assignable where a Snapshot is expected.
+});
+// Coloring: these entries hold live knobs and nothing async, so bind's
+// result type is LiveBinding — a type view deliberately NOT assignable
+// where a Snapshot is expected.
 ```
+
+Note what the bind call does *not* contain: a source list. The entries are **bare** — each knob already declares its file ref, and under the `knobs/node` entry point bare entries resolve against the runtime's natural defaults (`process.env` and the filesystem). The declared paths *are* the mount paths, so there is nothing to rewire. When a deployment does need different wiring, that's a per-entry combinator — `file(dbHost, "/etc/other-mount/DB_HOST")` patches the declared file ref in place — never a global source list. (Under the core `"knobs"` bind, which supplies no natural defaults, these bare file refs would refuse to bind with `NoWiringError` — that refusal is the browser bundle's structural guarantee, and the reason this page imports `bind` from `knobs/node`.)
 
 Binding is still eager over the bound subset: if the volume isn't mounted, boot dies right here with one aggregated `MissingConfigError` naming every missing knob — not three crashes spread over the first hour of traffic.
 
@@ -234,6 +233,8 @@ pinned.get(dbHost);
 //   lastValidAt  — when the source last produced a value that validated
 //   invalidSince — when it stopped
 //   incidentId   — the same id the onInvalid hook saw for this raw
+//   ref          — read provenance: the ref that supplied the raw
+//                  (here: file /etc/db-creds/DB_HOST)
 // (the offending raw value is attached only for non-secret knobs)
 ```
 
@@ -244,7 +245,7 @@ Poisoning is invalid-*after*-valid. A knob that has *never* validated in this pr
 ```ts
 // A half-lazy binding presence-checks eagerly but defers validation to
 // first read. The file exists — but a botched rotation left garbage in it:
-const lazy = bind.lazy([dbHost, dbPassword], [fromFiles()]);
+const lazy = bind.lazy([dbHost, dbPassword]);
 
 lazy.get(dbPassword);
 // NoValidValueError: DB_PASSWORD has never produced a valid value
@@ -286,19 +287,16 @@ Recovery rides the same clock: when the platform team fixes the Secret, the tran
 Keep-last-good still exists — as a bind-site opt-in, for knobs where availability beats freshness. Log verbosity is the canonical case: nobody should lose requests because the verbosity file has a typo.
 
 ```ts
-import { bind, keepLastGood } from "knobs";
-import { fromFiles } from "knobs/node";
+import { keepLastGood } from "knobs";
+import { bind } from "knobs/node";
 
-export const live = bind(
-  [logLevel, dbHost, dbPassword],
-  [fromFiles({ maxStalenessMs: 2_000 })],
-  {
-    invalid: [keepLastGood(logLevel, { maxCoastMs: 300_000 })],
-    onInvalid(k, _raw, issues) {
-      /* unchanged from above — it still fires when logLevel goes bad */
-    },
+export const live = bind([logLevel, dbHost, dbPassword], {
+  maxStalenessMs: 2_000,
+  invalid: [keepLastGood(logLevel, { maxCoastMs: 300_000 })],
+  onInvalid(k, _raw, issues) {
+    /* unchanged from above — it still fires when logLevel goes bad */
   },
-);
+});
 ```
 
 `maxCoastMs` is required — there is no unbounded coasting. For up to five minutes, reads of a poisoned `logLevel` keep returning the last valid value while `health()` reports the knob as `"coasting"`. Past the budget the knob throws `CoastBudgetExceededError` and the status hardens to `"invalid-was-valid"`: you bought time to fix the push, not permanence.
@@ -307,7 +305,7 @@ Note where the opt-in lives: at the bind site, never on the descriptor. Stalenes
 
 ### Invalid is not unavailable
 
-An unparseable value and an unreachable source are different failures. When the source goes down — the mount vanishes, reads start erroring — the binding keeps serving the cached value *within* `maxStalenessMs`. That is not inherited state; it is the staleness budget you signed at bind: `fromFiles({ maxStalenessMs: 2_000 })` declares that any read may be up to two seconds stale, outage or not. Beyond the budget, reads throw `SourceUnavailableError` — it carries `cause` and `staleSince` — and the `onSourceError` hook fires. An unavailable source is never routed through `onInvalid`: a down mount and a bad rotation deserve different pages.
+An unparseable value and an unreachable source are different failures. When the source goes down — the mount vanishes, reads start erroring — the binding keeps serving the cached value *within* `maxStalenessMs`. That is not inherited state; it is the staleness budget you signed at bind: `bind(entries, { maxStalenessMs: 2_000 })` declares that any read may be up to two seconds stale, outage or not. Beyond the budget, reads throw `SourceUnavailableError` — it carries `cause` and `staleSince` — and the `onSourceError` hook fires. An unavailable source is never routed through `onInvalid`: a down mount and a bad rotation deserve different pages.
 
 ### Recovery is one read
 
@@ -315,7 +313,7 @@ Poisoning changes the read cadence. Normally a read inside `maxStalenessMs` is s
 
 The bypass also collapses the file-tearing window. On Kubernetes it barely exists to begin with: the `..data` symlink swap is atomic for a single-file, single-pass read, and multi-file sources are read in one resolved-directory pass. The genuine risk is plain files outside Kubernetes, written non-atomically — a half-written file validates as garbage and poisons the knob, and the poisoned bypass means the very next read sees the completed write.
 
-The full taxonomy, one line each:
+The full taxonomy, one line each — and every one names the ref that produced it (read provenance; on this page, always a mounted file path):
 
 - `InvalidLiveValueError` — invalid after previously valid; carries `issues`, `lastValidAt`, `invalidSince`, `incidentId` (the raw value only for non-secret knobs).
 - `SourceUnavailableError` — source unreachable past the staleness budget; carries `cause` and `staleSince`.
@@ -368,7 +366,7 @@ The probe contract is strict: **liveness probes never consult knob validity, and
 
 Stated plainly, because every guarantee has a boundary:
 
-- **No push, no subscriptions.** Freshness is poll-on-read only. There is no `watch()`, `onChange`, or event stream, and there never will be a background loop in core. For provider-backed values (SSM, Vault-style functions), `refresh(live)` is the explicit re-pull: it returns a *new* pinned `Snapshot`, all-or-nothing on partial source failure (opt-in `partial: "keep-old"`), single-flight coalesced.
+- **No push, no subscriptions.** Freshness is poll-on-read only. There is no `watch()`, `onChange`, or event stream, and there never will be a background loop in core. For provider-backed values (SSM- or Vault-style impls wired with `provider()` under the async-capable `knobs/async` bind), `refresh(live)` is the explicit re-pull: it returns a *new* pinned `Snapshot`, all-or-nothing on partial source failure (opt-in `partial: "keep-old"`), single-flight coalesced.
 - **No construction-time magic.** Objects that consume a value once (pools, SDK clients) capture it forever; the `epoch()`-keyed rebuild above is the pattern, not an optional nicety.
 - **No live env vars.** OS process environments don't change; on Kubernetes that path is a pod restart. `live` plus an env source is a dev-mode warning, not a capability.
 - **No live on workerd.** The Workers `env` bag is fixed per deployment; `live` is a no-op there (dev warning).

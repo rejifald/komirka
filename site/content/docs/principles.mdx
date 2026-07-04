@@ -133,16 +133,25 @@ Every feature must pass all of these. "It would be convenient" never overrides a
   protection remains the poisoned-slot machinery — except for **mangled-but-valid**
   values (a truncated URL that is still a URL), which only verification catches.
 
-- **P20 — Remaps are deployment wiring, never contract.** A knob's declared refs are the
+- **P20 — Wiring is deployment reality, never contract.** A knob's declared refs are the
   library's contract (identity); *where that lives on this platform* is the deployment's
-  wiring (`prefix`/`rename` source transforms, `rebind`) — identity-preserving by
-  definition. Transforms are **data only** (no mapping functions), so bake can compute
-  every effective name; effective names propagate to *every* surface — `.env.example`,
-  the lockfile (`declared → effective`, normative), the leak scan's name union, and every
-  error message (effective name first, declared in parens). A non-secret knob may never
-  be remapped onto a name in the secret-name set (`RebindExposureError` — the laundering
-  ban); remap-created convergence errors (`RebindCollisionError`); remap soundness checks
-  run in the eager phase of every door.
+  wiring, spelled inline per entry (`env(knob, "NAME")` renames a declared ref in place,
+  preserving fallbacks; `chain()` is the only full-replacement spelling; group wiring is
+  one entry with `{ prefix, overrides }`) — identity-preserving by definition. Wiring
+  combinators are **pure JSON-representable data** (knob identity ref + ref kind +
+  strings + provider impl *ids*; impls declare `{ id, color }`): capability is granted
+  only by the bind entry point, never by wiring data — which is what keeps a per-request
+  Workers bag out of "inert" values, keeps every wiring attestable by the bake manifest
+  importing entry modules, and lets bake compute every effective name. Effective names
+  propagate to *every* surface — `.env.example`, the lockfile (`declared → effective`,
+  normative, the app-wide name → exposure authority), the leak scan's name union, and
+  every error message (effective name first, declared in parens). A non-secret knob may
+  never be wired onto a name in the secret-name set (`WiringExposureError` — the
+  laundering ban, backed by a well-known-secret-suffix denylist with an explicit
+  allowlist); wiring-created convergence errors (`WiringCollisionError`); one entry per
+  knob ever (`DuplicateWiringError` — no precedence hierarchy); wiring soundness checks
+  run in the eager phase of every door; bind-site transforms only restate
+  manifest-declared data (`WiringSkewError` on divergence).
 
 ## 3. Pitfalls we must not (re)introduce
 
@@ -198,7 +207,7 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
   return a Promise, and async-ness can be input-dependent — one probe at bind proves
   nothing. *Rule:* every validation site (eager bind, lazy first-read, live re-validation)
   checks for a thenable and throws `AsyncValidatorInSyncBindingError` naming the knob and
-  the remediation (`load()`/`refresh()` or a sync validator).
+  the remediation (an async provider entry — the binding becomes an `AsyncBinding` — or a sync validator).
 - **Shared mutable validated output.** Memoization hands every caller the same object; one
   caller's `hosts.pop()` corrupts config for the whole process. *Rule:* validated outputs
   are contractually immutable — deep-frozen in dev builds, documented as frozen in prod;
@@ -209,8 +218,8 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
 - **Cache keys that lie.** Memoize-by-raw must distinguish "raw absent → default used" from
   "raw equals the stringified default", and must record *which* source resolved (fallback
   chains change provenance without changing the string). *Rule:* cache key =
-  `(resolvedSourceIndex, rawString | ABSENT)`. With remapping, any value-stability
-  comparison keys on `(identity, effectiveRefsHash)` — two bindings may legally rebind
+  `(resolvedSourceIndex, rawString | ABSENT)`. With wiring overrides, any value-stability
+  comparison keys on `(identity, effectiveRefsHash)` — two bindings may legally wire
   the same knob differently.
 - **Iterable snapshots are a typed lie.** TypeScript destructures iterables by *element
   type*, never positionally — `const [url, size]` from an iterable types both slots as
@@ -230,13 +239,36 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
   live binding would silently freeze liveness. *Rule:* freshness is a type parameter
   defaulting to `'unknown'`, which gets *no* sugar (safe degradation) — plus the runtime
   `LivenessViolationError` backstop.
-- **Remapped names escape name-keyed guards.** The leak scan, `.env.example`, the baked
+- **Rewired names escape name-keyed guards.** The leak scan, `.env.example`, the baked
   name table, and error messages all keyed on *declared* names go blind (or start lying)
-  the moment a deployment remaps — a `MYAPP_STRIPE_KEY` in a client bundle matches
+  the moment a deployment rewires — a `MYAPP_STRIPE_KEY` in a client bundle matches
   nothing, and "set SMTP_URL" directs the 3am fix at a variable nothing reads. *Rule:*
-  P20 — effective names propagate everywhere; runtime-only remaps on bake-covered client
-  targets are an error; the baked shim carries a remap digest (`RemapSkewError` on
-  drift).
+  P20 — effective names propagate everywhere; wiring the manifest cannot see is an error
+  on bake-covered client targets; the baked shim carries a wiring digest
+  (`WiringSkewError` on drift).
+- **State captured in wiring data is a lifetime bug wearing a data costume.** A Workers
+  combinator holding the per-request env bag would freeze request #1's (tenant's!) bag
+  into exportable "inert" data. *Rule:* combinators construct pure JSON-representable
+  wiring; resolution capability enters only at the bind entry point — on workers the bag
+  is a required bind option — and an inert-entry conformance test (every combinator
+  output JSON-round-trips) mechanically enforces it.
+- **A rename that silently replaces is an outage deferred.** If `env(knob, "CUSTOM")`
+  replaced the declared ref *set*, a deployment that only meant to rename would silently
+  drop the file fallback the knob's author declared for outages. *Rule:*
+  `env`/`file`/`provider(knob, …)` rename the matching declared ref in place; `chain()`
+  is the only replacement spelling and its errors enumerate every dropped ref; read
+  provenance (which ref supplied each value) is recorded and surfaced.
+- **Chains must carry color.** A `chain()` whose link is an async provider must make the
+  whole binding an `AsyncBinding` — a sync-typed result over async I/O is a pending
+  Promise coerced into a connection string. *Rule:* provider impls declare
+  `{ id, color }` (a compile error otherwise — never a silently-sync guess); one async
+  link colors the chain; `load()` does not exist.
+- **Degraded types must not point at missing members.** The widening fail-safe types a
+  binding as the most restrictive view — if the runtime object lacked those members,
+  green builds would crash at runtime. *Rule:* one runtime shape, three type views:
+  every binding implements the union surface (`ready()` pre-resolved, `epoch` frozen 0,
+  `set()` throws `NotWritableError` where unsupported); types narrow what you may call,
+  never what exists.
 
 ### Runtimes & freshness
 
@@ -535,6 +567,14 @@ gate.
   re-read so `maxStalenessMs` stays honest); only ever as a loudly-named opt-in.
 - `cfg.update(knob, fn, { retries })` read-modify-write helper: deferred — it is a
   five-line userland loop over `get`/`set`/`WriteConflictError`.
+- Provider impl ergonomics: required `{ id, color }` object contract (default) vs an
+  id-keyed bind-opts provider table as the only form — revisit if impl authoring friction
+  shows up.
+- Server-side wiring-digest verification default: fail-closed in production on every
+  target (recommended for client-covered targets) vs opt-in `attest` — and the mechanism
+  must be an explicit flag, never `NODE_ENV` sniffing.
+- Dynamic (non-literal) name/path arguments to combinators on bake-covered targets:
+  banned in v1 (lint + bake refusal); revisit if a real case appears.
 - Final naming (see header).
 
 ## 7. Relationship to StitchAPI

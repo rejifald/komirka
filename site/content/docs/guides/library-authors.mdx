@@ -1,20 +1,20 @@
 ---
 title: For library authors (config DI)
-description: Ship inert knob descriptors with your package, type your API against a picked Scope, and let the consuming app own binding, sources, and baking.
+description: Ship inert knob descriptors with your package, type your API against a picked Scope, and let the consuming app own binding, wiring, and baking.
 ---
 
 ## The shape of the pattern
 
-A library never knows where its configuration comes from. The app might read process env on Node, a per-request env bag on Cloudflare Workers, a literal snapshot in tests, or a baked module in the browser. So the division of labor is strict:
+A library never knows where its configuration comes from. The app might read process env on Node, a per-request env bag on Cloudflare Workers, an all-literal binding in tests, or a baked module in the browser. So the division of labor is strict:
 
 - **You ship the contract**: inert `Knob` descriptors — names, schemas, exposure, defaults, docs. Importing them costs nothing: `knob()` performs zero I/O, zero validation, zero side effects, and the result is frozen.
-- **The app ships the values**: it binds your knobs at *its* composition root, chooses the sources, and hands your factory a narrowed `Scope`.
+- **The app ships the values**: it binds your knobs at *its* composition root, owns the wiring, and hands your factory a narrowed `Scope`.
 
 There is no `provide()`, no global registry, no ambient fallback. Your API accepts a scope as an argument, and that is the entire integration surface.
 
 ## Ship your knobs
 
-Export your descriptors from your package. Because construction is inert, this module is safe to import from anywhere — including browser bundles; the `knobs` core entry contains no secret-capable sources by construction.
+Export your descriptors from your package. Because construction is inert, this module is safe to import from anywhere — including browser bundles; the `knobs` core entry supplies no natural sources by construction, so a bare env or file ref bound there is a `NoWiringError`, not a silent read.
 
 ```ts
 // @acme/mailer — src/knobs.ts
@@ -78,12 +78,11 @@ The app binds once, at its composition root, then narrows per consumer:
 
 ```ts
 // app — src/config.ts
-import { bind } from "knobs";
-import { fromProcessEnv } from "knobs/node";
+import { bind } from "knobs/node";
 import { mailerKnobs } from "@acme/mailer";
 import { appKnobs } from "./knobs";
 
-export const root = bind([...appKnobs, ...mailerKnobs], [fromProcessEnv()]);
+export const root = bind([...appKnobs, ...mailerKnobs]);
 ```
 
 ```ts
@@ -94,6 +93,8 @@ import { root } from "./config";
 export const mailer = createMailer(root.pick(mailerKnobs));
 ```
 
+Every entry here is bare — no wiring combinators — so your declared refs resolve against the entry point's natural defaults: on `knobs/node`, `process.env` and the filesystem. When a deployment needs a different variable name, that is one wired entry, not a new knob: `env(smtpUrl, "SMTP_CONNECTION_STRING")` patches your declared env ref in place and preserves any declared fallbacks.
+
 `bind` is eager by default: if `MAILER_SMTP_URL` is unset in production, the app dies at boot with one aggregated `MissingConfigError` listing every missing or invalid knob — not on the first send, hours later. The failure modes are named and layered:
 
 ```ts
@@ -101,7 +102,7 @@ createMailer(root);
 // compile error: Snapshot is not assignable to Scope<...> — only pick() produces a Scope
 
 root.pick(mailerKnobs);
-// compile error at the pick site if mailerKnobs were never in the bind list —
+// compile error at the pick site if mailerKnobs were never among the bind entries —
 // "not bound" is caught by the type of the binding, before runtime
 
 const partial = root.pick(defineKnobs([fromAddress]));
@@ -112,14 +113,14 @@ partial.get(smtpUrl);
 Because the app owns binding, your package works unchanged on runtimes an import-time validator structurally cannot see:
 
 ```ts
-// app — Cloudflare Worker: env exists per request, not at import time
-import { bind } from "knobs";
-import { fromWorkerEnv } from "knobs/workers";
+// app — Cloudflare Worker: env exists per request, not at import time,
+// so the per-request bag is a required bind option
+import { bind } from "knobs/workers";
 import { createMailer, mailerKnobs } from "@acme/mailer";
 
 export default {
   async fetch(req: Request, env: Env) {
-    const cfg = bind(mailerKnobs, [fromWorkerEnv(env)]);
+    const cfg = bind(mailerKnobs, { env });
     const mailer = createMailer(cfg.pick(mailerKnobs));
     // ...
   },
@@ -129,17 +130,19 @@ export default {
 And your users test your library with zero `process.env` mutation:
 
 ```ts
-import { snapshotOf } from "knobs/testing";
+import { bind, literal } from "knobs";
 import { createMailer, mailerKnobs, smtpUrl, fromAddress, retryCount } from "@acme/mailer";
 
-const cfg = snapshotOf([
-  [smtpUrl, "smtps://test:test@localhost:2525"],
-  [fromAddress, "noreply@example.test"],
-  [retryCount, 0],
+const cfg = bind([
+  literal(smtpUrl, "smtps://test:test@localhost:2525"),
+  literal(fromAddress, "noreply@example.test"),
+  literal(retryCount, 0),
 ]);
 
 const mailer = createMailer(cfg.pick(mailerKnobs)); // still validated, fully parallel-safe
 ```
+
+Literal entries are input-typed, validation runs at bind, and exposure redaction still applies. Because every entry is fully wired, the core `knobs` entry suffices — test files need no runtime entry point and mutate no ambient state.
 
 ## The compatibility contract: what edits break identity
 
@@ -155,6 +158,8 @@ Knobs are content-addressed. `identityOf(retryCount)` returns something like `kn
 | schema identity (`version`, or vendor fingerprint) | Identity | Bump `version` whenever the schema's *meaning* changes |
 | `doc`, examples, deprecation notes | Cosmetic | Safe in a patch release; the hash does not move |
 | Unknown extra fields | Cosmetic | Ignored by identity |
+
+One thing deliberately *not* on this list: deployment wiring. A consumer renaming where your knob reads from — `env(smtpUrl, "SMTP_CONNECTION_STRING")` at their composition root — patches your declared env ref in place, preserves your declared fallbacks, and never forks identity. Renames *you* ship are different: they are declared fallback chains inside the descriptor, which is why the `sources` row is identity. Keep the two apart in your changelog — a consumer can wire around a name today without your involvement, but only a release of yours can change what the knob declares.
 
 If your validator vendor ships a fingerprint, schema changes are reflected in identity automatically. If not, set `version` explicitly and bump it on semantic schema changes — otherwise two releases with different validation rules hash identically, and the mismatch detector cannot help your users.
 
@@ -174,7 +179,7 @@ cfg.get(retryCount);
 The error carries both canonical descriptors, a field-level diff, and a paste-able resolution. The app — not your library — decides the diff is legitimate and unifies at its composition root:
 
 ```ts
-const root = bind([...appKnobs, ...mailerKnobs], [fromProcessEnv()], {
+const root = bind([...appKnobs, ...mailerKnobs], {
   unify: [{ accept: retryCount, aliases: ["knobv1:xxh128:41c0..."] }],
 });
 ```
@@ -214,7 +219,7 @@ Recommend `knobs bake --check` in CI to your consumers: it turns upgrade-after-b
 
 ## Why there is no global `provide()`
 
-A global registry would let *any* imported module redirect where your library's configuration comes from — at import time, before the app's composition root runs, silently. That is source spoofing, and it is why no such API exists. Sources are chosen exactly once, at the app's `bind()` or `load()` call, in code the app owns and reviews.
+A global registry would let *any* imported module redirect where your library's configuration comes from — at import time, before the app's composition root runs, silently. That is source spoofing, and it is why no such API exists. Wiring is chosen exactly once, at the app's `bind()` call, in code the app owns and reviews.
 
 That decision shapes your API design:
 
@@ -225,10 +230,11 @@ That decision shapes your API design:
 //    the browser entry, bake's coverage report, and every test.
 const url = process.env.MAILER_SMTP_URL; // also caught by the client-code AST lint
 
-// 2. Binding inside your library — hardcodes source policy the app should own,
-//    and pins your package to one runtime.
+// 2. Binding inside your library — hardcodes wiring policy the app should own,
+//    and pins your package to one runtime (the bind entry point you import
+//    *is* the runtime choice).
 export function createMailer() {
-  const cfg = bind(mailerKnobs, [fromProcessEnv()]); // do not do this
+  const cfg = bind(mailerKnobs); // bind from knobs/node — do not do this
 }
 
 // 3. Accepting "no scope" and falling back to something ambient — reintroduces
@@ -246,6 +252,7 @@ Be honest in your own docs about what this buys. `pick()` confines *mistakes*: y
 - Export inert descriptors and a `defineKnobs` group; never call `bind()` inside the package.
 - Type every config-consuming entry point as `Scope<ConfigOf<typeof yourKnobs>>`, with the parameter required.
 - Treat `key`, `sources`, `exposure`, `default`, `freshness`, and schema identity as public API; changing any is a breaking change — bump `version` on schema meaning changes.
+- Ship renames as declared fallback chains in a release; deployment-specific names are the consumer's job via `env(knob, "NAME")` at their bind site, and deployment wiring never forks identity.
 - Edit `doc` and examples freely; they are cosmetic and never move the identity hash.
 - Document the manifest attestation step for your public knobs, with a paste-able `config.manifest.ts` snippet.
 - Tell consumers to gate CI with `knobs bake --check`; `StaleBakeError` is the runtime backstop, not the plan.

@@ -172,7 +172,7 @@ $ echo $?
 Baking is not mandatory because builds are virtuous; it is mandatory exactly where the artifact crosses to an **untrusted runtime**:
 
 - **Declared client targets must bake.** Skipping bake with a `client` target declared fails the build: the generated module is the only way client code can read config, so its absence is an unresolvable import — and the required targets declaration turns that into a diagnosable "you declared an untrusted target and didn't bake it" instead of a mystery.
-- **Trusted servers may runtime-bind.** A server is free to skip baked wiring entirely and call `bind(allKnobs, [fromProcessEnv()])` at boot. The trust boundary is different: the process already holds the secrets.
+- **Trusted servers may runtime-bind.** A server is free to skip baked wiring entirely and call `bind(allKnobs)` from `knobs/node` at boot. The trust boundary is different: the process already holds the secrets.
 
 ## The defense stack
 

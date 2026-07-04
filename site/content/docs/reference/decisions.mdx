@@ -63,11 +63,11 @@ The bake pipeline inlines public literal values into the client artifact at buil
 
 **Option A — do nothing; document rebuild-per-environment.** Cheapest and honest (`knobs bake` once per environment in the CI matrix). It also angers precisely the teams with the strictest promotion pipelines — the ones most likely to care about this library.
 
-**Option B — a runtime-injected JSON mode (lean).** The deploy environment serves a small public document, conventionally `/config.json`; the client fetches it once at boot and resolves it as an ordinary async source through `load()`, so every read after boot is sync. Values still validate against the same knob schemas. The browser entry still contains no secret-capable sources, so a secret knob pointed at that document fails with `ExposureError` — the document cannot become a side-channel for secrets.
+**Option B — a runtime-injected JSON mode (lean).** The deploy environment serves a small public document, conventionally `/config.json`; the client fetches it once at boot through an async provider entry and pins (`await bind(entries).snapshot()`), so every read after boot is sync. Values still validate against the same knob schemas. The browser entry still contains no secret-capable sources, so a secret knob pointed at that document fails with `ExposureError` — the document cannot become a side-channel for secrets.
 
 **Option C — HTML injection.** The server templates the same JSON into a script tag; saves a request, couples you to a serving layer. Probably a documented variant of B rather than a separate mode.
 
-The undecided part is the shape, not the need. In the current contract the pieces already compose as a userland recipe — a provider `SourceRef` plus `load()`:
+The undecided part is the shape, not the need. In the current contract the pieces already compose as a userland recipe — a provider entry plus an async pin:
 
 ```ts
 // candidate recipe — sketch, not contract; the blessed shape is TBD
@@ -80,7 +80,7 @@ const apiBase = knob({
 
 // browser boot: runtimeConfigProvider is a userland provider that
 // fetches /config.json once; all reads are sync forever after
-const cfg = await load([apiBase], [runtimeConfigProvider]);
+const cfg = await bind({ apiBase: provider(apiBase, runtimeConfigProvider) }).snapshot();
 ```
 
 ```json
@@ -94,13 +94,13 @@ Open shape questions: does core bless a first-class browser source or only docum
 
 ## 3. Ship the Node file source in v0.1?
 
-**Option A — ship `fromFiles` in v0.1 (lean yes).** **Option B — env-only v0.1, files in v0.2.**
+**Option A — ship the file source in v0.1 (lean yes).** **Option B — env-only v0.1, files in v0.2.**
 
-The argument for shipping is that `fromFiles` is what makes `freshness: "live"` real. Live env vars are physically impossible on Node — a running process's OS environment never changes. Files are the one re-readable source with a mainstream deployment story: Kubernetes volume-mounted ConfigMaps update in place via the `..data` symlink swap (`subPath` mounts never update). Without a file source, `LiveBinding`, `epoch()`, `refresh()`, `health()`, and keep-last-good are paper features that no one can run — and a v0.1 that documents machinery it cannot demonstrate fails the honesty bar this project set for itself.
+The argument for shipping is that the file source is what makes `freshness: "live"` real. Live env vars are physically impossible on Node — a running process's OS environment never changes. Files are the one re-readable source with a mainstream deployment story: Kubernetes volume-mounted ConfigMaps update in place via the `..data` symlink swap (`subPath` mounts never update). Without a file source, `LiveBinding`, `epoch()`, `refresh()`, `health()`, and keep-last-good are paper features that no one can run — and a v0.1 that documents machinery it cannot demonstrate fails the honesty bar this project set for itself.
 
 ```ts
 import { knob, bind } from "knobs";
-import { fromFiles } from "knobs/node";
+import { bind } from "knobs/node";
 
 const rateLimit = knob({
   key: "RATE_LIMIT",
@@ -110,7 +110,7 @@ const rateLimit = knob({
   freshness: "live",
 });
 
-const live = bind([rateLimit], [fromFiles()]); // : LiveBinding
+const live = bind(rateLimit); // : LiveBinding — the declared { file } ref resolves via knobs/node
 
 // per-request pin — the documented pattern
 app.use((req, res, next) => {
@@ -140,10 +140,9 @@ The lean is a two-tier story rather than pretending one mechanism covers both:
 // Tier 2: the library is a real dependency here, and that is the point —
 // secrets validate at runtime, where the value actually lives
 import { bind } from "knobs";
-import { fromProcessEnv } from "knobs/node";
 import { serverKnobs } from "./config/knobs";
 
-const cfg = bind(serverKnobs, [fromProcessEnv()]);
+const cfg = bind(serverKnobs);
 // anything missing or invalid dies here, at boot, in ONE aggregated
 // MissingConfigError listing every offender — not request by request
 ```
@@ -202,12 +201,12 @@ silently *vanish* from the record — a stranger confusion than the spread resid
 The AST lint rule (no `cfg.values` as a function argument or spread in client/library
 code) is the misuse backstop.
 
-## 9. Attestation strictness for remapped wiring
+## 9. Attestation strictness for rewired deployments
 
 Open: should production binds on bake-covered targets *require* the lockfile digest check
 (fail-closed when the composition root's effective wiring diverges from the committed
 attestation) or is the check opt-in via `bind(..., { attest })` with a loud dev warning?
-Mandatory is the only thing that makes runtime-only remaps truly unable to sneak past the
+Mandatory is the only thing that makes manifest-invisible wiring truly unable to sneak past the
 manifest; the cost is coupling server boot to a committed artifact. Leaning mandatory for
 client-covered targets only. Related settled points: mapping *functions* are dropped from
 the public source-transform API pre-1.0 (data-only `prefix`/`rename` — nothing in the
@@ -231,10 +230,16 @@ parameters carry the tuple inference the call shapes depend on).
   `.values` (a real frozen tuple for arrays — snapshots are deliberately *not* iterable,
   because positional iterable types are a lie in TypeScript). See
   [Binding](/docs/concepts/binding).
-- **Remapping** — resolved: identity-preserving, data-only (`prefix`/`rename` +
-  `rebind`/`rebind.env`), effective names propagated to every artifact, error message,
-  and the leak scan's name union. Library renames use declared fallback chains, not
-  rebind. See [Binding](/docs/concepts/binding).
+- **Wiring (supersedes the sources argument AND `rebind`)** — resolved: per-entry
+  combinators — `env(knob, "NAME")` renames a declared ref in place preserving fallbacks,
+  `chain()` is the only full replacement, groups wire as one entry with
+  `{ prefix, overrides }`, bare entries resolve declared refs against the bind entry
+  point's natural defaults. Combinators are pure JSON data (provider impls declare
+  `{ id, color }`); capability enters only at the bind entry point (the Workers bag is a
+  required bind option). `load()` and `snapshotOf()` died into the same vocabulary
+  (async pin, `literal()` entries). Effective names still propagate to every artifact,
+  error message, and the leak scan's name union; library renames use declared fallback
+  chains, not deployment wiring. See [Binding](/docs/concepts/binding).
 
 ## 11. Final naming
 
@@ -255,18 +260,18 @@ Current lean: none. The docs use `knob` consistently so the eventual rename is a
 
 The last open decision is whether to ship at all, and it has a pass/fail procedure attached. Before a v0.1 tag exists, one public demo repository must show a **single knobs file, consumed unchanged** — never forked per runtime — by:
 
-1. **A Node server** — runtime `bind` over `fromProcessEnv()`, plus one `freshness: "live"` knob over `fromFiles()` proving keep-last-good and `epoch()` against an edited file.
-2. **A Cloudflare Worker** — per-request binding over `fromWorkerEnv(env)`: the case import-time validators structurally cannot handle, demonstrated rather than asserted.
+1. **A Node server** — runtime `bind` from `knobs/node` over bare entries, plus one `freshness: "live"` file-ref knob proving poisoning, `keepLastGood`, and `epoch()` against an edited file.
+2. **A Cloudflare Worker** — per-request `bind(entries, { env })` from `knobs/workers`: the case import-time validators structurally cannot handle, demonstrated rather than asserted.
 3. **A Vite client** — a baked target running on the zero-runtime-dep shim, with `knobs bake --check` green in CI.
 4. **A planted leak** — a hand-rolled high-entropy string smuggled into client code, and `knobs bake --check` failing the build via the allowlist scan. The gate is not that the scan exists; it is that it visibly catches the plant.
 5. **A vitest suite with zero `process.env` mutation** — every test constructs its own fixture and passes it into factories:
 
 ```ts
-import { snapshotOf } from "knobs/testing";
+import { bind, literal } from "knobs";
 
-const cfg = snapshotOf([
-  [apiBase, "https://test.local"],
-  [poolSize, 2],
+const cfg = bind([
+  literal(apiBase, "https://test.local"),
+  literal(poolSize, 2),
 ]); // still validated; no globals touched; safe under parallel test runners
 ```
 

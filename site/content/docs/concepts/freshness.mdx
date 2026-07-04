@@ -8,8 +8,8 @@ description: "Why config values are pinned by default, what live actually means 
 Every knob defaults to `freshness: "snapshot"`. When you bind, the value is resolved and validated once; the resulting `Snapshot` returns the same value for the life of the binding, on every call, from every consumer.
 
 ```ts
-import { knob, bind } from "knobs";
-import { fromProcessEnv } from "knobs/node";
+import { knob } from "knobs";
+import { bind } from "knobs/node";
 import { z } from "zod";
 
 const dbUrl = knob({
@@ -18,7 +18,7 @@ const dbUrl = knob({
   doc: "Primary Postgres connection string",
 });
 
-const cfg = bind([dbUrl], [fromProcessEnv()]); // : Snapshot — pinned
+const cfg = bind([dbUrl]); // : Snapshot — pinned
 cfg.get(dbUrl); // same value on every read, forever
 ```
 
@@ -36,8 +36,8 @@ So `freshness: "live"` on an env source emits a dev-mode warning and behaves as 
 ## Declaring a live knob
 
 ```ts
-import { knob, bind } from "knobs";
-import { fromFiles } from "knobs/node";
+import { knob } from "knobs";
+import { bind } from "knobs/node";
 import { z } from "zod";
 
 const upstreamUrl = knob({
@@ -56,10 +56,10 @@ const rateLimit = knob({
   freshness: "live",
 });
 
-const live = bind([upstreamUrl, rateLimit], [fromFiles()]); // : LiveBinding
+const live = bind([upstreamUrl, rateLimit]); // : LiveBinding
 ```
 
-If any bound knob is live, `bind` returns a `LiveBinding` instead of a `Snapshot`. This is a hard type split, and it is the point.
+The knobs declare their file refs themselves, so bare entries are all the bind site needs — under `knobs/node`, declared file refs resolve against the filesystem naturally. If any bound knob is live, the bind result type is a `LiveBinding` instead of a `Snapshot`. This is a hard type split, and it is the point.
 
 ## LiveBinding is not a Snapshot — deliberately
 
@@ -79,12 +79,12 @@ The consequence for DI: *the caller decides when time stops.* A dependency recei
 
 `live.get(knob)` uses **poll-on-read** — there are no watchers, no timers, no background loops in core, ever. The cost of freshness is paid at the read site, and three mechanisms keep it cheap and coherent:
 
-- **Throttle:** raw re-reads are throttled per source by `maxStalenessMs` (files default to about one second). Reads inside the staleness window return the current value without touching the filesystem.
+- **Throttle:** raw re-reads are throttled per source by the `maxStalenessMs` bind option (files default to about one second). Reads inside the staleness window return the current value without touching the filesystem.
 - **Memoize-by-raw:** the validator only runs when the raw content actually changed. A hot loop calling `live.get()` re-validates zero times while the file is stable.
 - **One coherent pass per source:** a single file read serves all knobs backed by that file, so two knobs from the same source never mix generations within one poll.
 
 ```ts
-const live = bind([upstreamUrl, rateLimit], [fromFiles({ maxStalenessMs: 5_000 })]);
+const live = bind([upstreamUrl, rateLimit], { maxStalenessMs: 5_000 });
 ```
 
 ## Torn config and the per-request pin
@@ -153,7 +153,7 @@ if (r.ok) {
 The `onInvalid` bind option is the **observation plane**: it fires once per `(knob, distinct invalid raw)` — not once per failing read — so a hot loop can't melt your metrics. The throws are the **consumption plane**. Both carry the same `incidentId`, so the hook's log line and a request's stack trace join (and dedupe) on one id:
 
 ```ts
-const live = bind([upstreamUrl, rateLimit], [fromFiles()], {
+const live = bind([upstreamUrl, rateLimit], {
   onInvalid: (k, raw, issues) => {
     metrics.increment("config_invalid", { key: k.key });
   },
@@ -173,7 +173,7 @@ Some values genuinely prefer availability over freshness — a rate limit, a ret
 ```ts
 import { keepLastGood } from "knobs";
 
-const live = bind([upstreamUrl, rateLimit], [fromFiles()], {
+const live = bind([upstreamUrl, rateLimit], {
   invalid: [keepLastGood(rateLimit, { maxCoastMs: 300_000 })],
 });
 ```
@@ -187,7 +187,7 @@ Why a bind option and not a descriptor field? Identity. On the descriptor's iden
 Current-truth-wins semantics apply after a first valid value. With the default eager `bind`, an invalid-at-boot value still dies at bind inside the aggregated `MissingConfigError`. Through the lazy doors, a knob that has *never* validated in this process throws `NoValidValueError`:
 
 ```ts
-const lazy = bind.unchecked([rateLimit], [fromFiles()]);
+const lazy = bind.unchecked([rateLimit]);
 lazy.get(rateLimit);
 // ✗ NoValidValueError: RATE_LIMIT has never produced a valid value in this process
 ```
@@ -263,12 +263,11 @@ Since core never schedules anything, *you* decide the cadence: refresh on a depl
 On Cloudflare Workers, the env bag is part of the deployment. It never changes for a running deployment — updating a binding or secret rolls a new deployment, and isolates see the new env from birth. `freshness: "live"` on a Workers env source is therefore a no-op with a dev-mode warning:
 
 ```ts
-import { bind } from "knobs";
-import { fromWorkerEnv } from "knobs/workers";
+import { bind } from "knobs/workers";
 
 export default {
   async fetch(request: Request, env: Env) {
-    const cfg = bind([upstreamUrl, rateLimit], [fromWorkerEnv(env)]);
+    const cfg = bind([upstreamUrl, rateLimit], { env });
     // Any freshness:"live" knob here degrades to snapshot semantics
     // (dev-mode warning): workerd env is immutable per deployment.
     return handle(request, cfg);

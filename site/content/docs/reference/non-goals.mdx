@@ -18,8 +18,8 @@ Percentage rollouts, per-user targeting, kill switches keyed on session attribut
 There is also a mechanical reason: core runs no background loops, timers, or watchers, ever. A subscription API implies a push channel, and a push channel implies machinery that keeps a process awake. So there is no `subscribe()`, no `onChange` callback — by design. What exists instead is a monotonic epoch and per-request pinning:
 
 ```ts
-import { knob, bind } from "knobs";
-import { fromFiles } from "knobs/node";
+import { knob } from "knobs";
+import { bind } from "knobs/node";
 import { z } from "zod";
 
 // In scope: an operational dial that ops flips by updating a mounted file.
@@ -32,7 +32,7 @@ const maintenanceMode = knob({
   doc: "Serve the maintenance page instead of the app",
 });
 
-const live = bind([maintenanceMode], [fromFiles()]);
+const live = bind([maintenanceMode]); // bare entry — the declared file ref resolves against node's natural defaults
 
 app.use((req, res, next) => {
   const pinned = live.snapshot(); // per-request pin — the documented pattern
@@ -55,39 +55,44 @@ node --env-file=.env --env-file=.env.local server.js
 bun run server.ts
 ```
 
-`bind` reads whatever the runtime placed in the environment; how it got there is not core's business:
+`bind` reads whatever the runtime placed in the environment — on the node entry, `process.env` is the natural default for bare entries; how it got there is not core's business:
 
 ```ts
-import { bind } from "knobs";
-import { fromProcessEnv } from "knobs/node";
+import { bind } from "knobs/node";
 
 // Works identically whether env came from --env-file, Bun, your PaaS,
 // or dotenv preloaded by your own bootstrap.
-const cfg = bind(appKnobs, [fromProcessEnv()]);
+const cfg = bind(appKnobs);
 ```
 
-If you want dotenv semantics that a runtime does not provide, dotenv is a userland provider — a source is just a function, so wrapping it is a few lines you own. Note that the `.env` file format is still a first-class *output*: `knobs bake` generates `.env.example` from your descriptors' `key` and `doc` fields. Core writes the template; it never parses the file.
+If you want dotenv semantics that a runtime does not provide, dotenv is a userland provider impl — `{ id: "dotenv", color: "sync", read }` is a few lines you own — or, simpler still, a bootstrap line that populates `process.env` before `bind` runs. Note that the `.env` file format is still a first-class *output*: `knobs bake` generates `.env.example` from your descriptors' `key` and `doc` fields. Core writes the template; it never parses the file.
 
 ## Secret-manager clients
 
-Core ships no AWS SSM, Secrets Manager, Vault, or GCP client. Those SDKs are heavy, churny, and platform-specific — any one of them would end the zero-dependency budget and the browser-safe universal entry in a single `import`. Providers are functions; adapters are community packages:
+Core ships no AWS SSM, Secrets Manager, Vault, or GCP client. Those SDKs are heavy, churny, and platform-specific — any one of them would end the zero-dependency budget and the browser-safe universal entry in a single `import`. Provider impls are plain objects; adapters are community packages:
 
 ```ts
-import { load } from "knobs";
-import { fromProcessEnv } from "knobs/node";
-import { fromSsm } from "@acme/knobs-ssm"; // community adapter — not part of core
+import { bind, provider } from "knobs/async";
+import { ssm } from "@acme/knobs-ssm"; // community provider impl — not part of core
 
-const cfg = await load(allKnobs, [fromProcessEnv(), fromSsm({ prefix: "/prod/app/" })]);
+const cfg = await bind({
+  dbUrl,                                              // bare entry: process.env, as usual
+  apiKey: provider(apiKey, ssm, "/prod/app/API_KEY"), // async-colored entry
+}).snapshot();
 
-cfg.get(dbUrl); // resolved once at load — every read after this is sync, forever
+cfg.get(apiKey); // resolved once at the pin — every read after this is sync, forever
 ```
 
-The async boundary is enforced, not advisory. An async source cannot sneak into the sync door:
+An impl declares `{ id: "ssm", color: "async", resolve }` — the `id` is what the lockfile records (anonymous impls are a bind-time error on bake-covered targets), and an untyped `color` is a compile error.
+
+The async boundary is enforced, not advisory — and it lives in the types. One async link colors the whole binding an `AsyncBinding`, so an async source cannot sneak into the sync door:
 
 ```ts
-bind(allKnobs, [fromSsm({ prefix: "/prod/app/" })]);
-// Compile error — bind() accepts sync sources only (kind discriminant).
-// If the types are defeated, runtime throws AsyncSourceInBindError.
+import { bind } from "knobs/node";
+
+bind({ apiKey: provider(apiKey, ssm, "/prod/app/API_KEY") });
+// Compile error — an async-colored entry needs the `knobs/async` bind and an
+// awaited pin. There is no spelling that hands an async read a sync face.
 ```
 
 ## Sealed boxes, TTL, rotation, audit trails
@@ -104,7 +109,7 @@ cfg.toJSON();                     // secrets redacted by construction
 structuredClone(cfg.get(apiKey)); // throws — serialization guard, no box required
 ```
 
-**Rotation cannot be sync-read-safe.** A token that expires mid-process would force `get()` to block, go async, or hand out a stale credential — each of which breaks the contract that all reads are sync after `load()`. A credential that rotates every 15 minutes fails the litmus: it is state. Fetch it with your vault's SDK. For config that legitimately re-resolves, rotation is spelled honestly as a deliberate act:
+**Rotation cannot be sync-read-safe.** A token that expires mid-process would force `get()` to block, go async, or hand out a stale credential — each of which breaks the contract that all reads are sync once a snapshot is pinned. A credential that rotates every 15 minutes fails the litmus: it is state. Fetch it with your vault's SDK. For config that legitimately re-resolves, rotation is spelled honestly as a deliberate act:
 
 ```ts
 // Re-resolve at a moment you choose — not on a timer core hides from you:
@@ -138,7 +143,9 @@ No global `provide()`, no ambient binding, no side-effectful registration at imp
 Reads resolve against an explicit binding — never an ambient lookup:
 
 ```ts
-const cfg = bind([dbUrl], [fromProcessEnv()]);
+import { bind } from "knobs/node";
+
+const cfg = bind([dbUrl]);
 
 cfg.get(dbUrl);    // bound here — fine
 cfg.get(poolSize); // UnboundKnobError — not in this binding, and no registry to fall back to
@@ -161,7 +168,7 @@ export default {
 No `derive()` knob, no expression strings in descriptors. Derivation is code, and a derivation DSL re-implements your language badly. It would also break the contract-not-dependency gate: descriptors round-trip as JSON, and closures do not serialize — while expression *strings* would be an eval surface. Compute derived values in the host language:
 
 ```ts
-const cfg = bind([dbHost, dbPort], [fromProcessEnv()]);
+const cfg = bind([dbHost, dbPort]);
 
 const connectionString = `pg://${cfg.get(dbHost)}:${cfg.get(dbPort)}/app`;
 ```
@@ -204,8 +211,8 @@ knobs bake --check
 | You want | Out of scope because | Reach for |
 | --- | --- | --- |
 | Feature flags, targeting | State, not config; core runs no loops | A flag SDK alongside; `freshness: "live"` files for ops dials |
-| `.env` parsing | Runtimes load env natively; Bun fights self-loaders | `node --env-file`, Bun's loader, dotenv as a userland provider |
-| Vault/SSM clients in core | Zero-dep, browser-safe core | Community providers via `load()` |
+| `.env` parsing | Runtimes load env natively; Bun fights self-loaders | `node --env-file`, Bun's loader, dotenv as a userland provider impl |
+| Vault/SSM clients in core | Zero-dep, browser-safe core | Community provider impls via the `knobs/async` bind |
 | Sealed boxes, TTL, rotation | SDKs take strings; sync reads; secrets-manager scope | Serialization guard, redaction, `refresh()`, a real secrets manager |
 | Environment cascades | Environments are sources plus overrides | Ordered `sources`; same descriptor, different deploys |
 | Runtime registry | Tree-shaking, import-order side effects | Explicit `bind` at the composition root; the bake manifest |

@@ -9,12 +9,11 @@ Configuration failures are boring, frequent, and usually fixed by someone who di
 2. **Which layer** — bind, read, scope, live, serialization, or bake.
 3. **What next** — a concrete remediation, in the message itself.
 
-Twelve named errors are detailed on this page; the variants and write errors get a compact summary at the end. Nothing else escapes the library.
+Eleven named errors are detailed on this page; the variants and write errors get a compact summary at the end. Nothing else escapes the library.
 
 | Error | Layer | Fires when |
 | --- | --- | --- |
 | `MissingConfigError` | bind | eager validation found missing or invalid knobs — aggregated |
-| `AsyncSourceInBindError` | bind | an async source was passed to sync `bind()` |
 | `AsyncValidatorInSyncBindingError` | any validation site | a validator returned a thenable in a sync binding |
 | `UnboundKnobError` | snapshot read | the knob was never in the bound set |
 | `DescriptorMismatchError` | snapshot read | same key, different descriptor identity |
@@ -34,11 +33,11 @@ One rule applies across every error surface. Validator libraries echo received v
 
 ## MissingConfigError
 
-**Layer: bind.** The eager default of `bind()` (and `load()`) validates the entire listed set immediately, and collects *everything* wrong into one aggregated error — so a broken deploy reports every problem in a single boot failure, not one problem per restart. `bind.lazy()` throws it too, but only for raw *presence*: missing variables still die at bind; validation is deferred to first read.
+**Layer: bind.** The eager default of `bind()` validates the entire listed set immediately (a binding with async entries validates at `ready()`/`snapshot()`), and collects *everything* wrong into one aggregated error — so a broken deploy reports every problem in a single boot failure, not one problem per restart. `bind.lazy()` throws it too, but only for raw *presence*: missing variables still die at bind; validation is deferred to first read.
 
 ```ts
-import { knob, bind } from "knobs";
-import { fromProcessEnv } from "knobs/node";
+import { knob } from "knobs";
+import { bind } from "knobs/node";
 import { z } from "zod";
 
 const dbUrl = knob({
@@ -59,13 +58,13 @@ const stripeKey = knob({
   schema: z.string().startsWith("sk_"),
 });
 
-const cfg = bind([dbUrl, poolSize, stripeKey], [fromProcessEnv()]);
+const cfg = bind([dbUrl, poolSize, stripeKey]);
 ```
 
 A realistic boot report, with two of three knobs failing:
 
 ```text
-MissingConfigError: 2 of 3 knobs failed at bind (sources: fromProcessEnv)
+MissingConfigError: 2 of 3 knobs failed at bind (entry point: knobs/node)
 
   ✕ DATABASE_URL       missing — no source produced a value
                        tried: env DATABASE_URL
@@ -77,19 +76,6 @@ MissingConfigError: 2 of 3 knobs failed at bind (sources: fromProcessEnv)
 ```
 
 Note the secret rule in action: `DATABASE_URL` is *missing*, so there is nothing to withhold; `STRIPE_SECRET_KEY` is *invalid*, so the report shows a count and a path, not the validator's message.
-
-## AsyncSourceInBindError
-
-**Layer: bind.** `bind()` accepts synchronous sources only, and enforces it twice. At the type level, a kind discriminant on sources makes the call a compile error. At runtime — for untyped call sites — the same mistake raises `AsyncSourceInBindError`, naming the offending source and pointing at the fix:
-
-```ts
-bind([dbUrl], [mySsmProvider]);
-// AsyncSourceInBindError: source "ssm" is async — bind() is synchronous.
-// Resolve async sources once with:  await load(knobs, sources)
-
-const cfg = await load([dbUrl], [fromProcessEnv(), mySsmProvider]);
-// resolve ONCE at the composition root; every read is sync forever after
-```
 
 ## AsyncValidatorInSyncBindingError
 
@@ -103,19 +89,19 @@ const apiKey = knob({
   schema: z.string().refine(async (v) => looksLikePartnerKey(v)),
 });
 
-const cfg = bind([apiKey], [fromProcessEnv()]);
+const cfg = bind([apiKey]);
 // AsyncValidatorInSyncBindingError: PARTNER_API_KEY's validator returned
 // a thenable during bind — sync bindings require sync validators.
 ```
 
-The fix is almost always to make the validator sync: validators must be pure, so anything that genuinely needs I/O (a network check, a lookup) doesn't belong in a validator at all — it belongs in an async *source* resolved through `load()`.
+The fix is almost always to make the validator sync: validators must be pure, so anything that genuinely needs I/O (a network check, a lookup) doesn't belong in a validator at all — it belongs in an async *provider* entry — the binding becomes an `AsyncBinding` and the type says so. Resolve it once at the composition root with `const cfg = await bind(entries).snapshot()` (import `bind` from `knobs/async`), and every read is sync forever after.
 
 ## UnboundKnobError
 
 **Layer: snapshot read.** There is no ambient configuration: values exist only inside explicit bindings, and a read outside one is a named error — never a silent fallback to `process.env`. `get()` has exactly three outcomes: a hit, `UnboundKnobError`, or `DescriptorMismatchError`.
 
 ```ts
-const cfg = bind([dbUrl], [fromProcessEnv()]);
+const cfg = bind([dbUrl]);
 
 cfg.get(poolSize);
 // UnboundKnobError: DB_POOL_SIZE is not in this binding's bound set (1 knob: DATABASE_URL).
@@ -148,7 +134,7 @@ DescriptorMismatchError: SMTP_URL is bound, but under a different descriptor.
 
   If these are the same logical knob, accept the newer descriptor and alias the old hash:
 
-    bind(knobs, sources, {
+    bind(knobs, {
       unify: [{ accept: smtpUrl, aliases: ["knobv1:xxh128:9f31c2e8…"] }],
     })
 ```
@@ -160,7 +146,7 @@ Two properties keep `unify` safe. The hash is an index, not a security boundary 
 **Layer: scope read.** `cfg.pick(group)` produces a `Scope` that is restricted at *runtime*, not just in types: reading any knob outside the picked group throws, and the message names the pick site that created the scope.
 
 ```ts
-const root = bind([...appKnobs, ...mailerKnobs], [fromProcessEnv()]);
+const root = bind([...appKnobs, ...mailerKnobs]);
 const mailer = createMailer(root.pick(mailerKnobs));
 
 // inside the mailer, someone reaches for an app-level knob:
@@ -178,7 +164,7 @@ The remediation is deliberately a design question: either widen the group at the
 
 ```ts
 export async function getServerSideProps() {
-  const cfg = bind([stripeKey, theme], [fromProcessEnv()]);
+  const cfg = bind([stripeKey, theme]);
   return { props: { theme: cfg.get(theme), key: cfg.get(stripeKey) } };
 }
 // the framework serializes props for hydration:
@@ -246,8 +232,9 @@ The remediation is at the source, not in code: restore the file or the provider'
 
 ```ts
 import { keepLastGood } from "knobs";
+import { bind } from "knobs/node";
 
-const live = bind([rateLimit, tiers], [fromFiles()], {
+const live = bind([rateLimit, tiers], {
   invalid: [keepLastGood(rateLimit, { maxCoastMs: 300_000 })],
 });
 ```
@@ -278,7 +265,7 @@ const tiers = knob({
   freshness: "live",
 });
 
-const live = bind.lazy([tiers], [fromFiles()]);
+const live = bind.lazy([tiers]);
 // file exists (presence check passed) but has been malformed since boot:
 
 live.get(tiers);
@@ -325,15 +312,17 @@ Conditional config and writable sources add their own named errors. They obey th
 - `VerifyCapabilityError` — `verify: "revert"` requested from a provider missing its preconditions (unique version tokens, `echoWrite`/`strongRead`, non-normalizing); refused at the call site, in development, not as misbehavior in production.
 - `ProviderContractError` — a provider that declares versions returned a write without one; surfaced on first occurrence rather than silently degrading every verification to inconclusive.
 
-And the call-shape / remapping family (details on the [Binding](/docs/concepts/binding) page):
+And the call-shape / wiring family (details on the [Binding](/docs/concepts/binding) page):
 
 - `LivenessViolationError` — `.value`/`.values` touched on a binding containing live or async knobs (the type split normally prevents this; the runtime backstop catches type-widened knobs). Pin first.
 - `ReservedKeyError` — a record-form bind used the key `toJSON`, `then`, or `constructor`, which would shadow the values bag's guards.
-- `UnknownRebindError` — a rebind targets a knob that is in neither the binding nor any bound variants branch; a typo'd remap must never silently no-op.
-- `RebindCollisionError` — a remap *created* a convergence (two knobs onto one effective name) that the declared refs did not have.
-- `RebindExposureError` — a non-secret knob was remapped onto a name in the secret-name set; routing credentials through public-exposure knobs would launder them past redaction and into bake's public inlining.
-- `RemapSkewError` — a baked artifact's remap digest disagrees with the composition root's actual wiring; fail-closed on bake-covered production targets.
+- `UnknownWiringError` — a wiring override (`env(knob, "NAME")`) targets a knob that declares no ref of that kind, or a knob in neither the binding nor any bound variants branch; a typo'd override must never silently no-op.
+- `WiringCollisionError` — wiring *created* a convergence (two knobs onto one effective name) that the declared refs did not have.
+- `WiringExposureError` — a non-secret knob was wired onto a name in the secret-name set (lockfile authority + well-known-secret-suffix denylist); routing credentials through public-exposure knobs would launder them past redaction and into bake's public inlining.
+- `WiringSkewError` — a baked artifact's wiring digest disagrees with the composition root's actual wiring (including bind-site transforms); fail-closed on bake-covered production targets.
+- `DuplicateWiringError` — a knob is reachable through two entries in one bind (including a group member wired again as a leaf); there is no precedence hierarchy — specialization goes inside the group combinator.
+- `NoWiringError` — a bare `env`/`file` ref under a bind entry point with no natural defaults (core `bind`); import the runtime's bind or wire the entry explicitly.
 
 ## Summary
 
-Bind-time errors (`MissingConfigError`, `AsyncSourceInBindError`) fail the boot, loudly and completely. Read-time errors (`UnboundKnobError`, `DescriptorMismatchError`, `NotInScopeError`, `AsyncValidatorInSyncBindingError`) refuse to guess — no fallback, no ambient lookup, ever. Boundary errors (`ExposureError`, `StaleBakeError`) are the runtime halves of guarantees that bake starts at build time. Live errors (`InvalidLiveValueError`, `SourceUnavailableError`, `CoastBudgetExceededError`, `NoValidValueError`) keep current truth honest: invalid throws exactly where the knob is used, unavailable coasts only inside a declared staleness budget, coasting itself has a signed budget, and never-valid is named for what it is. The variants and write errors extend the same contract to conditional config and writable sources. In every case: the key, the layer, the next step — in the first line.
+Bind-time errors (`MissingConfigError`, `AsyncValidatorInSyncBindingError`) fail the boot, loudly and completely. Read-time errors (`UnboundKnobError`, `DescriptorMismatchError`, `NotInScopeError`, `AsyncValidatorInSyncBindingError`) refuse to guess — no fallback, no ambient lookup, ever. Boundary errors (`ExposureError`, `StaleBakeError`) are the runtime halves of guarantees that bake starts at build time. Live errors (`InvalidLiveValueError`, `SourceUnavailableError`, `CoastBudgetExceededError`, `NoValidValueError`) keep current truth honest: invalid throws exactly where the knob is used, unavailable coasts only inside a declared staleness budget, coasting itself has a signed budget, and never-valid is named for what it is. The variants and write errors extend the same contract to conditional config and writable sources. In every case: the key, the layer, the next step — in the first line.

@@ -9,18 +9,23 @@ description: The complete provisional API surface — entries, the descriptor, b
 ## Entry points
 
 ```ts
-import { knob, defineKnobs, bind, load, refresh, identityOf } from "knobs";
-import type { Knob, Snapshot, LiveBinding, Scope, ConfigOf } from "knobs";
+import { knob, defineKnobs, refresh, identityOf } from "knobs";
+import { literal, chain, provider } from "knobs";         // universal wiring combinators (pure data)
+import type { Knob, Snapshot, LiveBinding, AsyncBinding, Scope, ConfigOf } from "knobs";
 
-import { fromProcessEnv, fromFiles } from "knobs/node";   // Node-only sources
-import { fromWorkerEnv } from "knobs/workers";            // Cloudflare Workers env bag
-import { snapshotOf } from "knobs/testing";               // test seam
+// pick ONE bind per entrypoint — the entry point is what grants capability:
+import { bind, env, file } from "knobs/node";     // natural defaults = process.env + fs
+// import { bind } from "knobs/workers";          // per-request bag REQUIRED at opts: bind(entries, { env })
+// import { bind } from "knobs/async";            // async-capable (providers); re-exports node combinators
+// import { bind } from "knobs";                  // core: no natural defaults — literal() entries only
 ```
 
 The core entry (`"knobs"`) is universal — it runs in browsers, Workers, Node, Deno, and
-Bun, and it contains **no secret-capable sources**. That absence is a structural security
-guarantee, not a lint rule: there is no code path in a browser bundle that can resolve a
-secret. Node-specific capabilities live behind subpath entries.
+Bun, and it ships **no source resolvers**: core `bind` supplies no natural defaults (a
+bare `env`/`file` ref under it is `NoWiringError`; only `literal()` entries resolve).
+`env`/`file` live in `knobs/node`, which imports `node:process`/`node:fs` so bundling it
+for a browser fails at build. Capability is granted only by the bind entry point — never
+by wiring data, which is pure JSON-representable description.
 
 ## `knob(config)` — the descriptor
 
@@ -77,46 +82,55 @@ function defineKnobs<T extends readonly Knob[]>(knobs: T): T;
 // JSON.stringify/console.log); spread = get() on every knob; ReservedKeyError for
 // record keys "toJSON" | "then" | "constructor".
 
-// EAGER (the default door): validates the listed set NOW.
-// All failures aggregate into ONE MissingConfigError.
-function bind<const K extends BindInput>(knobs: K, sources: Source | readonly Source[], opts?: BindOptions): BindResult<K>;
+// There is NO sources argument: wiring is per entry, and bare entries resolve their
+// DECLARED refs against the bind entry point's natural defaults.
+type Entry = Knob | VariantsGroup | WiredEntry;
+type BindInput = Entry | readonly Entry[] | Record<string, Entry>;
 
-// HALF-LAZY door: raw PRESENCE is still checked eagerly (missing vars die at bind);
-// validator execution is deferred to first read.
-bind.lazy(knobs, sources, opts?): Snapshot | LiveBinding;
+// EAGER (the default door): validates the listed set NOW — one aggregated MissingConfigError.
+function bind<const K extends BindInput>(entries: K, opts?: BindOptions): BindResult<K>;
+bind.lazy(entries, opts?);       // HALF-LAZY: presence eager, validation deferred
+bind.unchecked(entries, opts?);  // fully deferred — the name carries the warning
 
-// Fully deferred. The name carries the warning. Niche: multi-subcommand CLIs.
-bind.unchecked(knobs, sources, opts?): Snapshot | LiveBinding;
+// WIRING COMBINATORS (pure JSON-representable data — capability enters only at bind):
+env(knob, "PLATFORM_NAME")   // REF RENAME: patches the matching declared ref IN PLACE,
+file(knob, "/etc/app/x")     //   preserving declared fallbacks; UnknownWiringError if the
+provider(knob, impl, key?)   //   knob declares no ref of that kind. Name/path REQUIRED.
+chain(knob, provider(ssm, "/prod/sg"), env("SG_KEY"))
+                             // the ONLY full-replacement spelling — errors list dropped refs;
+                             //   links carry color: one async link → AsyncBinding
+env(group, { prefix: "MAILER_", overrides: { password: "SECRET_PW" } })
+                             // group wiring: ONE entry per knob ever (DuplicateWiringError);
+                             //   overrides escape the prefix; the discriminant is a member
+literal(knob, inputValue)    // input-typed; validation RUNS; exposure redaction applies
+                             //   (replaces snapshotOf — testing = all-literal entries)
 
-// Async sources (SSM, Vault, remote config): resolve ONCE here; reads are sync forever.
-async function load(knobs: readonly Knob[], sources: (SyncSource | AsyncSource)[], opts?): Promise<Snapshot>;
+// COLORING: the result type is computed from the entries —
+//   any async entry → AsyncBinding; else any live knob → LiveBinding; else Snapshot.
+// Provider impls declare { id, color: "sync" | "async" } — the id is what the lockfile
+// records; anonymous impls are a bind error on bake-covered targets. There is no load():
+//   const cfg = await bind(entries).snapshot();   // resolve once → sync reads forever
 
 interface BindOptions {
-  onInvalid?: (knob: Knob, raw: string, issues: Issue[]) => void; // fires ONCE per (knob, distinct invalid raw); secrets get { rawDigest, length }
-  onSourceError?: (knob: Knob, cause: unknown) => void;           // source unreachable — never routed through onInvalid
-  invalid?: KeepLastGood[];      // per-knob opt-in: keepLastGood(knob, { maxCoastMs }) — maxCoastMs required
+  env?: EnvBag;                  // workers: the per-request bag — REQUIRED there, never wiring data
+  transform?: { prefix?: string; rename?: Record<string, string> };
+                                 // app-wide, ONLY as a restatement of manifest-declared data
+                                 // (digest-verified → WiringSkewError). LAW: per-entry/group
+                                 // overrides are absolute; rename is terminal; prefix for the rest.
+  maxStalenessMs?: number;       // live/async poll-on-read staleness budget
+  onInvalid?: (knob: Knob, raw: string, issues: Issue[]) => void; // once per (knob, distinct raw); secrets get { rawDigest, length }
+  onSourceError?: (knob: Knob, cause: unknown) => void;           // never routed through onInvalid
+  invalid?: KeepLastGood[];      // keepLastGood(knob, { maxCoastMs }) — maxCoastMs required
   unify?: { accept: Knob; aliases: string[] }[];                  // identity alias table (see Identity)
-  rebind?: Rebind[];             // identity-preserving deployment wiring (see below)
 }
-
-// REMAPPING (identity-preserving; validated in the eager phase of EVERY door)
-fromProcessEnv({ prefix: "MYAPP_", rename: { DATABASE_URL: "PG_URL" } });
-// law: effective(name) = rename[name] ?? prefix + name — rename output is FINAL.
-// No mapping functions: transforms are data so bake can compute effective names.
-withNameTransform(source, { prefix?, rename? });   // the generic wrapper over any source
-rebind(knob, refs);            // full replacement of the knob's declared refs (drops fallbacks — errors say so)
-rebind.env(knob, "NEW_NAME");  // rewrites env refs in place, preserving the fallback chain
-// UnknownRebindError | RebindCollisionError (remap-CREATED convergence only)
-// | RebindExposureError (non-secret knob remapped onto a secret's name — laundering ban)
-// Every error prints the EFFECTIVE name first, declared name + rebind site in parens.
 ```
 
-Sources carry a `kind: "sync" | "async"` discriminant. Passing an async source to `bind()`
-is a **compile error**, and `AsyncSourceInBindError` at runtime. That is the entire
-sync/async coloring answer: reads are never async; only binding creation is.
-
-If any bound knob declares `freshness: "live"`, the return type is `LiveBinding` — which
-is deliberately **not** assignable where `Snapshot` is expected.
+**One runtime shape, three type views.** Every binding implements the union surface —
+`ready()` is pre-resolved on snapshots, `epoch` is frozen at 0, `get` is universal, and
+`set()` exists but throws `NotWritableError` where unsupported. `Snapshot`/`LiveBinding`/
+`AsyncBinding` only narrow what you *may* call, so the widening fail-safe is safe at
+runtime, not just in the type system. Validators are still checked at every validation
+site for input-dependent async-ness (`AsyncValidatorInSyncBindingError`).
 
 ## `Snapshot` — pinned, immutable
 
@@ -205,8 +219,8 @@ tagged JSON (`relv1|` content-addressed); nesting is rejected in v1
 import { bind } from "knobs/async";
 
 interface AsyncProvider {
-  kind: "async";
-  name: string;
+  id: string;                 // stable identity — recorded in the lockfile (anonymous impls error on bake-covered targets)
+  color: "async";             // declared, never guessed — untyped color is a compile error
   read(key: string): Promise<{ raw: string | Json; version?: string } | undefined>;
   readMany?(keys: readonly string[]): Promise<Map<string, { raw; version? } | undefined>>;
   write?(key: string, raw: string | Json, opts?: { ifVersion?: string }): Promise<{ version?: string; storedRaw?: string | Json }>;
@@ -217,7 +231,8 @@ interface AsyncProvider {
   };
 }
 
-const cfg = bind.async(knobs, [pgProvider], { maxStalenessMs: 5_000 });
+const cfg = bind({ rateLimit: provider(rateLimit, pg), flags: provider(flags, pg) },
+                 { maxStalenessMs: 5_000 });   // async entries → AsyncBinding
 await cfg.ready();        // THE startup line — one readMany, validates all listed knobs
 await cfg.get(k);         // colored read (scripts/jobs); request paths pin instead:
 await cfg.snapshot();     // fresh cache + one readMany for expired keys only
@@ -268,8 +283,12 @@ Consequences:
 ## Testing
 
 ```ts
-function snapshotOf(entries: [Knob<T>, T][]): Snapshot;
-// literal values, still validated, zero process.env mutation
+import { bind, literal } from "knobs";   // core bind — the purest test spelling
+
+const cfg = bind({ db: literal(dbUrl, "postgres://localhost:5432/test") });
+// input-typed, still validated (a bad test value fails loudly), zero process.env mutation
+// Never commit real secret values — placeholders only; bake fails closed on
+// literal-wired secrets in client targets.
 ```
 
 ## Bake — the CLI
@@ -308,7 +327,7 @@ Secrets validate at runtime, where the value actually lives. See
 ## Error taxonomy
 
 Core: `MissingConfigError` · `UnboundKnobError` · `DescriptorMismatchError` ·
-`NotInScopeError` · `ExposureError` · `AsyncSourceInBindError` ·
+`NotInScopeError` · `ExposureError` ·
 `AsyncValidatorInSyncBindingError` · `NoValidValueError` · `StaleBakeError`.
 Live: `InvalidLiveValueError` · `SourceUnavailableError` · `CoastBudgetExceededError`.
 Variants: `InactiveVariantError` (subclass of `UnboundKnobError`) ·
@@ -316,8 +335,9 @@ Variants: `InactiveVariantError` (subclass of `UnboundKnobError`) ·
 `VariantsNestingError` · `RuleViolationError` · `VariantsInClientTargetError`.
 Writes: `WriteConflictError` · `NotWritableError` · `WriteFailedError` ·
 `WriteMangledError` · `VerifyCapabilityError` · `ProviderContractError`.
-Shapes & remapping: `LivenessViolationError` · `ReservedKeyError` · `UnknownRebindError` ·
-`RebindCollisionError` · `RebindExposureError` · `RemapSkewError`.
+Shapes & wiring: `LivenessViolationError` · `ReservedKeyError` · `UnknownWiringError` ·
+`WiringCollisionError` · `WiringExposureError` · `WiringSkewError` ·
+`DuplicateWiringError` · `NoWiringError`.
 Every error names the knob key, the layer, and a next step. For secret knobs, BYO
 validator text is untrusted (validators echo received values): reports carry issue counts
 and paths only. Full details: [Error taxonomy](/docs/reference/errors).
