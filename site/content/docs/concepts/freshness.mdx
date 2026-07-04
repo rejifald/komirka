@@ -115,9 +115,42 @@ app.get("/proxy", (req, res) => {
 
 Requests get per-request freshness; nothing inside a request ever tears.
 
-## When the new value is invalid: keep-last-good
+## When the new value is invalid: current truth wins
 
-Someone fat-fingers the ConfigMap and `RATE_LIMIT` becomes `"unlimited"`. The default is **keep-last-good**: `live.get(rateLimit)` keeps returning the last valid value, and the `onInvalid` bind option fires (default: `console.error`) so the bad write is loud without taking you down:
+Someone fat-fingers the ConfigMap and `RATE_LIMIT` becomes `"unlimited"`. The default is **current truth wins**: there are no magically inherited values. A live re-read that yields an invalid value **poisons** that knob — reads of it fail until the source is fixed. The honest trade, in one sentence: throw-by-default converts a bad config push from silent staleness into a loud *partial* outage that lasts exactly until the push is fixed — opt into `keepLastGood` per knob where availability beats freshness.
+
+Partial is load-bearing. `live.snapshot()` never throws wholesale: pinning succeeds, and the poisoned knob occupies an **error slot** in the snapshot. Only reading *that* knob throws; every other knob keeps serving:
+
+```ts
+const cfg = live.snapshot(); // ✓ pins fine — the poison rides along in an error slot
+
+cfg.get(upstreamUrl); // ✓ unaffected knobs keep working
+cfg.get(rateLimit);
+// ✗ InvalidLiveValueError: RATE_LIMIT is invalid
+//   carries { issues, lastValidAt, invalidSince, incidentId }
+//   (and the raw value — for non-secret knobs only)
+```
+
+Blast radius is proportional to actual usage: one invalid knob that nothing reads must never 500 the site.
+
+A revocation list or a kill switch — worse stale than absent — needs no spelling at all anymore: throw-on-invalid is simply the default.
+
+### tryGet: the non-throwing read
+
+`tryGet(knob)` returns `{ ok: true, value }` or `{ ok: false, error }`. It is the first thing epoch-consumer code should reach for, and the right shape anywhere you would otherwise wrap `get` in try/catch:
+
+```ts
+const r = live.tryGet(rateLimit);
+if (r.ok) {
+  applyLimit(r.value);
+} else {
+  degrade(r.error); // InvalidLiveValueError — your fallback, chosen explicitly
+}
+```
+
+### Observation and consumption are different planes
+
+The `onInvalid` bind option is the **observation plane**: it fires once per `(knob, distinct invalid raw)` — not once per failing read — so a hot loop can't melt your metrics. The throws are the **consumption plane**. Both carry the same `incidentId`, so the hook's log line and a request's stack trace join (and dedupe) on one id:
 
 ```ts
 const live = bind([upstreamUrl, rateLimit], [fromFiles()], {
@@ -127,34 +160,50 @@ const live = bind([upstreamUrl, rateLimit], [fromFiles()], {
 });
 ```
 
-For secret knobs, `issues` carries issue counts and paths only — never validator messages, which echo the received value.
+For secret knobs the hook receives `{ rawDigest, length }` instead of the raw — the invalid value never reaches your logging pipeline.
 
-Some values are worse stale than absent — a revocation list, a kill switch. Those opt out per knob with `onInvalid: "throw"`, making reads fail instead of serving last-good:
+### Invalid is not unavailable
+
+A source that serves garbage and a source that is down are different failures. If the file is unreadable or the provider is unreachable, the binding serves the cached value **within `maxStalenessMs`** — that is not inherited state, it's the staleness budget the binder signed at the bind site. Past the budget, reads throw `SourceUnavailableError` (`{ cause, staleSince }`) and the `onSourceError` hook fires. Unavailability is never routed through `onInvalid`.
+
+### Opting into keep-last-good
+
+Some values genuinely prefer availability over freshness — a rate limit, a retry budget. Keep-last-good still exists, as a **bind-site opt-in** with a mandatory coasting budget:
 
 ```ts
-const revocationList = knob({
-  key: "REVOKED_TOKEN_IDS",
-  schema: z.array(z.string()),
-  sources: [{ file: "/etc/app-config/REVOKED_TOKEN_IDS" }],
-  freshness: "live",
-  onInvalid: "throw", // stale-is-worse-than-down
+import { keepLastGood } from "knobs";
+
+const live = bind([upstreamUrl, rateLimit], [fromFiles()], {
+  invalid: [keepLastGood(rateLimit, { maxCoastMs: 300_000 })],
 });
 ```
 
-Keep-last-good needs a last good. With the default eager `bind`, an invalid-at-boot value dies at bind inside the aggregated `MissingConfigError`. Through the lazy doors, a knob that has *never* validated has nothing to fall back to:
+`maxCoastMs` is required — there is no unbounded coasting. While the knob coasts on its last good value, `health()` reports it as `"coasting"`; past the budget, reads throw `CoastBudgetExceededError` and the status flips to `"invalid-was-valid"`. Reach for this exactly where availability beats freshness, and nowhere else.
+
+Why a bind option and not a descriptor field? Identity. On the descriptor's identity class, two teams that disagree about coasting would hold *different knobs* — a descriptor mismatch over an operational preference. On the cosmetic class, real runtime behavior would hide from identity. How *this process* copes with a bad push belongs to this process's bind site.
+
+### Never-valid is its own error
+
+Current-truth-wins semantics apply after a first valid value. With the default eager `bind`, an invalid-at-boot value still dies at bind inside the aggregated `MissingConfigError`. Through the lazy doors, a knob that has *never* validated in this process throws `NoValidValueError`:
 
 ```ts
 const lazy = bind.unchecked([rateLimit], [fromFiles()]);
 lazy.get(rateLimit);
-// ✗ NoValidValueError: RATE_LIMIT has never produced a valid value —
-//   keep-last-good has nothing to serve
+// ✗ NoValidValueError: RATE_LIMIT has never produced a valid value in this process
 ```
 
-For liveness probes, `live.health()` reports per-knob staleness and the last validation error, so a value quietly riding last-good for an hour shows up on a dashboard instead of in an incident review:
+### Recovery is one read, not one poll
+
+Poisoned state bypasses the staleness memoization: while a knob is poisoned, the next read re-reads the source immediately instead of waiting out `maxStalenessMs`. Fix the file or the row, and the very next read recovers. (On Kubernetes the `..data` symlink swap is atomic for single-file, single-pass reads, and multi-file sources are read in one resolved-dir pass — the genuine tear risk is plain files outside k8s, and the poisoned bypass collapses that window too.)
+
+### What health() reports
+
+`live.health()` gives each knob a status — `"valid"`, `"invalid-was-valid"`, `"never-valid"`, or `"coasting"` — plus `lastValidAt`, `lastInvalidAt`, `lastThrownAt`, and `throwCount`. Source observation and consumer impact stay distinct on purpose: a knob that went invalid but nothing reads ("invalid but dormant") is a different incident than one actively failing requests, and that split is how operators triage. Two probe rules: **liveness probes must never consult knob validity** — a bad config push must not get pods killed — and readiness may gate on `"never-valid"` at most.
 
 ```ts
 live.health();
-// per-knob: how stale the raw read is, and the last validation failure (if any)
+// per-knob: status ("valid" | "invalid-was-valid" | "never-valid" | "coasting"),
+// lastValidAt, lastInvalidAt, lastThrownAt, throwCount
 ```
 
 ## epoch(): rebuilding what you constructed
@@ -167,7 +216,7 @@ const client = makeUpstreamClient(live.get(upstreamUrl));
 // captured it. Later file swaps change what live.get() returns, not the client.
 ```
 
-There is deliberately no `watch()` or `subscribe()` — that's a background loop by another name. Instead, `live.epoch(knob)` is a monotonic counter that bumps whenever the *accepted* value changes (an invalid write held off by keep-last-good does not bump it). Check it where you already have a natural touchpoint:
+There is deliberately no `watch()` or `subscribe()` — that's a background loop by another name. Instead, `live.epoch(knob)` is a monotonic counter that bumps whenever the knob's observable state changes: a newly accepted value **and** the transition to invalid alike. One clock — consumers observe validity changes through the same counter they already poll, and use `tryGet` to learn which kind of change fired:
 
 ```ts
 let epoch = live.epoch(upstreamUrl);
@@ -176,9 +225,14 @@ let client = makeUpstreamClient(live.get(upstreamUrl));
 function getClient() {
   const now = live.epoch(upstreamUrl);
   if (now !== epoch) {
-    client.close();
-    client = makeUpstreamClient(live.get(upstreamUrl));
     epoch = now;
+    const r = live.tryGet(upstreamUrl);
+    if (r.ok) {
+      client.close();
+      client = makeUpstreamClient(r.value); // input actually changed: rebuild
+    } else {
+      degrade(r.error); // input went invalid: that's a change too — degrade, don't guess
+    }
   }
   return client;
 }

@@ -125,7 +125,7 @@ const logLevel = knob({
 
 const live = bind([logLevel], [fromWorkerEnv(env)]);
 // Typed as LiveBinding, but epoch(logLevel) never advances and every
-// snapshot() pins the same values. Keep-last-good never has anything to keep.
+// snapshot() pins the same values — live over workerd env is pure overhead.
 ```
 
 Declare env-sourced knobs with the default `freshness: "snapshot"` on Workers. Reserve `live` for the one place it is meaningful here: provider-backed values.
@@ -167,7 +167,7 @@ export default {
 };
 ```
 
-The current request is always served from the last pinned snapshot; `refresh()` produces a new pinned snapshot for requests that come after. Refresh is single-flight coalesced in core, so a burst of concurrent requests each calling `waitUntil(refresh(live))` triggers one provider read, not a stampede. On failure it is all-or-nothing by default (opt in to `partial: "keep-old"` if you prefer), and a refresh that returns invalid data falls under keep-last-good with your `onInvalid` hook — a bad deploy of the pricing document degrades to stale prices, not to a crashed edge. `live.health()` reports per-knob staleness and the last validation error if you expose a liveness probe.
+The current request is always served from the last pinned snapshot; `refresh()` produces a new pinned snapshot for requests that come after. Refresh is single-flight coalesced in core, so a burst of concurrent requests each calling `waitUntil(refresh(live))` triggers one provider read, not a stampede. On failure it is all-or-nothing by default (opt in to `partial: "keep-old"` if you prefer), and a refresh that returns invalid data throws — the caller keeps the previous pinned snapshot, so a bad deploy of the pricing document fails the refresh loudly (with `onInvalid` fired once for the bad raw) instead of crashing the edge; requests keep serving the old snapshot they already hold. `live.health()` reports per-knob staleness and the last validation error if you expose a liveness probe.
 
 One boundary, stated plainly: caching `live` at module scope is safe here *only* because nothing inside it is per-request — a KV namespace binding is fixed for the isolate's deployment. The per-request thing, the env bag's values under dispatch, must never be captured this way. Provider handles: cacheable. Tenant env: never.
 

@@ -3,7 +3,7 @@ title: Live config on Kubernetes
 description: The one honest live-reload story — ConfigMap volume mounts, poll-on-read file knobs, per-request pins, epoch-keyed pool rebuilds, keep-last-good, and a liveness probe.
 ---
 
-The house rule is: **if it can change while the process runs, it's state, not config.** The one declared exception is a re-readable source you opted into with `freshness: "live"` — and on Kubernetes there is exactly one re-readable source you get for free: a volume-mounted file. This page walks the whole path end to end: ConfigMap/Secret mount, live file knobs, per-request pinning, pool rebuilds keyed on `epoch()`, keep-last-good with alerting, and a health endpoint your liveness probe can hit.
+The house rule is: **if it can change while the process runs, it's state, not config.** The one declared exception is a re-readable source you opted into with `freshness: "live"` — and on Kubernetes there is exactly one re-readable source you get for free: a volume-mounted file. This page walks the whole path end to end: ConfigMap/Secret mount, live file knobs, per-request pinning, pool rebuilds keyed on `epoch()`, what happens when a rotation goes bad — current truth wins, with `keepLastGood` as the per-knob opt-in — and a `health()` report wired to probes that can't turn one bad push into a crash loop.
 
 ## Why env vars cannot do this
 
@@ -123,10 +123,11 @@ export const live = bind(
   [fromFiles({ maxStalenessMs: 2_000 })], // default is ~1s for files
   {
     onInvalid(k, _raw, issues) {
-      // keep-last-good has already happened by the time this fires;
-      // this hook exists so a bad rotation pages a human.
-      // For secret knobs, issues carry counts and paths only — never
-      // validator messages, never values.
+      // Observation plane: fires once per (knob, distinct invalid raw),
+      // not once per read. By the time it fires the knob is poisoned and
+      // reads of it throw; the hook and those errors share an incidentId,
+      // so this page and the request failures join in your logs.
+      // For secret knobs, _raw is { rawDigest, length } — never the value.
       alerting.page("config-invalid", { key: k.key, issueCount: issues.length });
     },
   },
@@ -193,7 +194,7 @@ const pool = new Pool({
 });
 ```
 
-Live values only help code that re-reads them. Long-lived objects need a rebuild trigger, and that trigger is `epoch()` — a monotonic per-knob counter that bumps only when an *accepted* (validated) value changes:
+Live values only help code that re-reads them. Long-lived objects need a rebuild trigger, and that trigger is `epoch()` — a monotonic per-knob counter that bumps whenever the knob's observable truth changes: a newly validated value, and equally a transition into (or out of) invalidity. One counter, one clock — validity changes arrive through the same number you key rebuilds on:
 
 ```ts
 import { Pool } from "pg";
@@ -216,13 +217,29 @@ export function getPool(): Pool {
 }
 ```
 
-A rewrite of identical bytes doesn't bump the epoch; a rotation that fails validation doesn't either — so the pool never churns on noise. Note what this is *not*: there is no `watch()`, no `subscribe()`, no change callback, by design. You check the epoch on a read path you already execute. If your process has no such path, it also has no live behavior — which is the honest outcome for a core that runs no timers.
+A rewrite of identical bytes doesn't bump the epoch, so the pool never churns on noise. A rotation that fails validation, though, *does* bump it — validity changes ride the same clock — and as written, `pinned.get(dbHost)` would throw mid-rebuild on that bump. That throw is the next section's subject; the hardened rebuild there reads through `tryGet` and degrades instead. Note what this is *not*: there is no `watch()`, no `subscribe()`, no change callback, by design. You check the epoch on a read path you already execute. If your process has no such path, it also has no live behavior — which is the honest outcome for a core that runs no timers.
 
-## Keep-last-good, and when to throw instead
+## When the file goes bad: current truth wins
 
-After boot, an invalid rotation does not take you down. If someone ships an empty `DB_HOST`, `live.get(dbHost)` keeps returning the last value that validated, `onInvalid` fires (your page above), and `health()` records the failure. Serving yesterday's config beats serving a 500.
+After boot, an invalid rotation is not papered over. There are no magically inherited values: if someone ships an empty `DB_HOST`, the knob becomes **poisoned**. Pinning still works — `live.snapshot()` never throws wholesale — but the poisoned knob occupies an *error slot* in the snapshot. Every other knob keeps answering; reading the poisoned one throws:
 
-Keep-last-good needs a last good value to keep. A knob that has *never* validated has nothing to fall back on:
+```ts
+const pinned = live.snapshot();  // never throws wholesale
+pinned.get(logLevel);            // unaffected — every other knob keeps working
+
+pinned.get(dbHost);
+// InvalidLiveValueError: DB_HOST is invalid after previously holding a
+// valid value
+//   issues       — the validator's findings
+//   lastValidAt  — when the source last produced a value that validated
+//   invalidSince — when it stopped
+//   incidentId   — the same id the onInvalid hook saw for this raw
+// (the offending raw value is attached only for non-secret knobs)
+```
+
+Blast radius is proportional to actual usage: an invalid knob nobody reads must never 500 the site, and an invalid knob on the hot path fails exactly the reads that depend on it. The trade, stated plainly: the throw default converts a bad config push from silent staleness into a loud partial outage that lasts until the push is fixed — and for knobs where availability beats freshness, you opt into `keepLastGood` per knob (below).
+
+Poisoning is invalid-*after*-valid. A knob that has *never* validated in this process is a different failure with its own error:
 
 ```ts
 // A half-lazy binding presence-checks eagerly but defers validation to
@@ -233,30 +250,119 @@ lazy.get(dbPassword);
 // NoValidValueError: DB_PASSWORD has never produced a valid value
 ```
 
-For values where a stale answer is *worse* than failing — a short-lived signing key, say — flip the default with the per-knob `onInvalid: "throw"` opt-in: reads surface the failure instead of serving the last-good value.
+`NoValidValueError` stays reserved for the lazy and unchecked doors; the eager `bind` this page uses still dies at bind time, so a running handler never sees it.
 
-## Wire health() to a liveness probe
+### tryGet, and the hardened pool rebuild
 
-Keep-last-good keeps you serving; `health()` keeps the degradation visible. It reports per-knob staleness and the last validation error, with secret values never appearing in the report:
+`tryGet` is the non-throwing consumption form — it returns `{ ok: true, value }` or `{ ok: false, error }` — and it is the first thing epoch-consumer code should reach for. The epoch bumps on the invalid transition too, so the rebuild pattern is mechanical: *epoch changed → `tryGet` → ok? rebuild with the value : degrade with the error.*
 
 ```ts
-app.get("/healthz", (_req, res) => {
-  const report = live.health(); // per-knob staleness + last validation error
-  const failing = Object.values(report).filter((entry) => entry.lastError);
-  res.status(failing.length ? 503 : 200).json(report);
+export function getPool(): Pool {
+  const epochs = `${live.epoch(dbHost)}:${live.epoch(dbPassword)}`;
+  if (!pool || epochs !== poolEpochs) {
+    const pinned = live.snapshot(); // coherent host+password pair
+    const host = pinned.tryGet(dbHost);
+    const password = pinned.tryGet(dbPassword);
+    if (host.ok && password.ok) {
+      void pool?.end();
+      pool = new Pool({ host: host.value, password: password.value });
+    } else if (pool) {
+      // Degrade: the rotation is bad, but the pool built from the last
+      // valid pair still dials fine. Keep it — onInvalid already paged.
+    } else {
+      // No pool yet and no valid pair to build one from.
+      throw host.ok ? password.error : host.error;
+    }
+    poolEpochs = epochs;
+  }
+  return pool;
+}
+```
+
+Recovery rides the same clock: when the platform team fixes the Secret, the transition back to valid bumps the epoch again and the next `getPool()` call rebuilds. No callback, no watcher — the same read path you already execute.
+
+### Opting into keep-last-good
+
+Keep-last-good still exists — as a bind-site opt-in, for knobs where availability beats freshness. Log verbosity is the canonical case: nobody should lose requests because the verbosity file has a typo.
+
+```ts
+import { bind, keepLastGood } from "knobs";
+import { fromFiles } from "knobs/node";
+
+export const live = bind(
+  [logLevel, dbHost, dbPassword],
+  [fromFiles({ maxStalenessMs: 2_000 })],
+  {
+    invalid: [keepLastGood(logLevel, { maxCoastMs: 300_000 })],
+    onInvalid(k, _raw, issues) {
+      /* unchanged from above — it still fires when logLevel goes bad */
+    },
+  },
+);
+```
+
+`maxCoastMs` is required — there is no unbounded coasting. For up to five minutes, reads of a poisoned `logLevel` keep returning the last valid value while `health()` reports the knob as `"coasting"`. Past the budget the knob throws `CoastBudgetExceededError` and the status hardens to `"invalid-was-valid"`: you bought time to fix the push, not permanence.
+
+Note where the opt-in lives: at the bind site, never on the descriptor. Staleness tolerance is a consumer preference, and descriptors are identity. As an identity-class field it would make two teams' differing staleness preferences a descriptor mismatch for the *same* knob; as a cosmetic-class field it would hide real behavior from identity. Both are wrong, so it is neither.
+
+### Invalid is not unavailable
+
+An unparseable value and an unreachable source are different failures. When the source goes down — the mount vanishes, reads start erroring — the binding keeps serving the cached value *within* `maxStalenessMs`. That is not inherited state; it is the staleness budget you signed at bind: `fromFiles({ maxStalenessMs: 2_000 })` declares that any read may be up to two seconds stale, outage or not. Beyond the budget, reads throw `SourceUnavailableError` — it carries `cause` and `staleSince` — and the `onSourceError` hook fires. An unavailable source is never routed through `onInvalid`: a down mount and a bad rotation deserve different pages.
+
+### Recovery is one read
+
+Poisoning changes the read cadence. Normally a read inside `maxStalenessMs` is served from memory; a poisoned knob bypasses that memoization, so the next read re-reads the source immediately. Fix the file and recovery costs one read, not one poll interval.
+
+The bypass also collapses the file-tearing window. On Kubernetes it barely exists to begin with: the `..data` symlink swap is atomic for a single-file, single-pass read, and multi-file sources are read in one resolved-directory pass. The genuine risk is plain files outside Kubernetes, written non-atomically — a half-written file validates as garbage and poisons the knob, and the poisoned bypass means the very next read sees the completed write.
+
+The full taxonomy, one line each:
+
+- `InvalidLiveValueError` — invalid after previously valid; carries `issues`, `lastValidAt`, `invalidSince`, `incidentId` (the raw value only for non-secret knobs).
+- `SourceUnavailableError` — source unreachable past the staleness budget; carries `cause` and `staleSince`.
+- `CoastBudgetExceededError` — a `keepLastGood` knob coasted past its `maxCoastMs`.
+- `NoValidValueError` — never valid in this process; lazy/unchecked doors only.
+
+## Wire health() to the right probe
+
+The throw default keeps failure loud at the point of use; `health()` gives the operator the map. It reports one entry per knob — secret values never appear in the report:
+
+- `status` — `"valid"`, `"invalid-was-valid"`, `"never-valid"`, or `"coasting"`
+- `lastValidAt` / `lastInvalidAt` — the source-observation side: what the binding has seen
+- `lastThrownAt` / `throwCount` — the consumer-impact side: what requests have felt
+
+The two sides stay distinct because they answer different questions: `"invalid-was-valid"` with a `throwCount` of zero is *invalid but dormant* — a bad value nobody currently reads; the same status with a climbing `throwCount` is *actively failing requests*. That is the operator triage split.
+
+```ts
+app.get("/livez", (_req, res) => {
+  // Liveness asks "is the process wedged?" — config validity is never
+  // part of that answer.
+  res.status(200).send("ok");
+});
+
+app.get("/readyz", (_req, res) => {
+  const report = live.health();
+  const neverValid = Object.values(report).some(
+    (entry) => entry.status === "never-valid",
+  );
+  res.status(neverValid ? 503 : 200).json(report);
 });
 ```
 
 ```yaml
 livenessProbe:
   httpGet:
-    path: /healthz
+    path: /livez
     port: 8080
   initialDelaySeconds: 5
   periodSeconds: 15
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: 8080
+  periodSeconds: 15
 ```
 
-"Still up" and "healthy" are different claims, and the probe policy is where you arbitrate between them: a pod that has been serving hour-old config because every rotation since has failed validation is exactly the kind of quiet rot a `failureThreshold` should eventually recycle.
+The probe contract is strict: **liveness probes never consult knob validity, and readiness reacts to `"never-valid"` at most.** Restarting a pod does not fix a bad ConfigMap — the replacement reads the same bytes, and with eager `bind` it dies at boot — so a liveness probe wired to validity turns one bad push into a fleet-wide crash loop. (With the eager bind on this page, `"never-valid"` can only appear through the lazy doors, which makes the readiness gate cheap insurance.) Route `"invalid-was-valid"` and `"coasting"` to dashboards and alerting, not to the kubelet.
 
 ## What live does not give you
 

@@ -232,10 +232,12 @@ it("bumps the epoch when an accepted value changes", async () => {
 
 There is deliberately no watch or subscribe API — code that must react to change rebuilds clients keyed on the epoch, so the epoch is also what tests assert.
 
-Invalid content after boot follows keep-last-good, and the epoch bumps only on *accepted* change:
+Invalid content after boot poisons the knob — current truth wins, and the epoch bumps on the *transition* so consumers can observe it with `tryGet`:
 
 ```ts
-it("keeps the last good value when the file goes bad", async () => {
+import { InvalidLiveValueError, keepLastGood } from "knobs";
+
+it("poisons the knob when the file goes bad", async () => {
   const { file, upstreamUrl } = await tempUpstream();
   const rejected: unknown[] = [];
   const live = bind([upstreamUrl], [fromFiles()], {
@@ -244,11 +246,25 @@ it("keeps the last good value when the file goes bad", async () => {
   const bootEpoch = live.epoch(upstreamUrl);
 
   await writeFile(file, "not a url");
-  await refresh(live);
+  await refresh(live).catch(() => {});
 
-  expect(live.get(upstreamUrl)).toBe("https://api.internal.test"); // last good
-  expect(live.epoch(upstreamUrl)).toBe(bootEpoch); // nothing accepted, no bump
-  expect(rejected).toHaveLength(1);
+  expect(() => live.get(upstreamUrl)).toThrow(InvalidLiveValueError);
+  expect(live.tryGet(upstreamUrl).ok).toBe(false);          // non-throwing form
+  expect(live.epoch(upstreamUrl)).toBeGreaterThan(bootEpoch); // transition bumps
+  expect(rejected).toHaveLength(1);                          // once per distinct raw
+});
+
+it("keepLastGood is the explicit opt-in, bounded by maxCoastMs", async () => {
+  const { file, upstreamUrl } = await tempUpstream();
+  const live = bind([upstreamUrl], [fromFiles()], {
+    invalid: [keepLastGood(upstreamUrl, { maxCoastMs: 60_000 })],
+  });
+
+  await writeFile(file, "not a url");
+  await refresh(live).catch(() => {});
+
+  expect(live.get(upstreamUrl)).toBe("https://api.internal.test"); // coasting
+  expect(live.health()[upstreamUrl.key].status).toBe("coasting");
 });
 ```
 

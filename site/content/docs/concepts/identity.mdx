@@ -24,10 +24,10 @@ Every field of a descriptor is in exactly one of two buckets.
 | `sources` | identity | Precedence is order-significant; reordering changes meaning. |
 | `default` | identity | Presence **and** value both count — adding a default changes behavior. |
 | `schemaId` | identity, when available | A vendor fingerprint of the schema, or your explicit `version` discriminator. |
+| `freshness` | identity | Live-vs-snapshot is behaviorally load-bearing: relations reference discriminants by identity, and a `live` twin of a `snapshot` knob must never be identity-equal. |
 | `doc` | cosmetic | See below. |
 | `examples`, `deprecation` | cosmetic | Documentation, not contract. |
 | any unknown field | cosmetic | Forward-compatible: future metadata never breaks old identities. |
-| `freshness` | excluded | Describes how a binding reads the value, not what the value is. |
 
 `doc` is excluded deliberately. A docs-only patch release — a typo fix, a changelog-driven wording change — must produce a descriptor that still binds against the previous version's. If prose were identity, every documentation edit would make two package versions unbindable against each other, which is exactly the failure mode identity exists to prevent.
 
@@ -168,6 +168,7 @@ If you ship knobs, your descriptor's identity fields are API surface. This table
 | Change `exposure` | **broken** | Deliberate — a secret/public flip must force a decision downstream. |
 | Add, remove, or reorder `sources` | **broken** | Precedence order is meaning. |
 | Add or remove `default`, or change its value | **broken** | Presence and value both count. |
+| Change `freshness` | **broken** | A live knob and a snapshot knob are different contracts — one can be a variants discriminant, the other cannot. |
 | Bump `version` | **broken** | That is its job: bump it on every schema change. |
 | Change the schema *without* bumping `version` (no vendor fingerprint) | preserved | Silent-drift hazard — identity cannot see the schema itself. This is why `version` exists, and why caller-schema re-validation is the runtime backstop. |
 

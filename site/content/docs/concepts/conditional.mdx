@@ -1,0 +1,236 @@
+---
+title: Conditional config (variants)
+description: Branch-dependent requirement sets with variants(), when(), and rule() — discriminant-first binding, typed match(), and precise failure semantics.
+---
+
+## The problem
+
+An email subsystem that runs in one of three modes is the canonical case:
+
+- `console` — log outgoing mail, require nothing.
+- `smtp` — requires `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`.
+- `sendgrid` — requires `SENDGRID_API_KEY`.
+
+A flat knob list cannot express this. Mark `SMTP_HOST` required and every sendgrid deploy fails at bind for a variable it will never read. Mark it optional and a misconfigured smtp deploy boots cleanly and fails on the first send. The conditionality belongs in the descriptor graph, so `bind` can enforce exactly the set this deployment actually needs — and nothing else.
+
+## Declaring a variants group
+
+`variants(discriminant, branches)` takes a knob whose schema enumerates the modes, plus one member map per mode:
+
+```ts
+import { knob, variants, bind, fromProcessEnv } from "knobs";
+import { z } from "zod";
+
+const emailService = knob({
+  key: "EMAIL_SERVICE_TYPE",
+  schema: z.enum(["console", "smtp", "sendgrid"]),
+  exposure: "public",
+  default: "console",
+});
+
+export const email = variants(emailService, {
+  console: {},
+  smtp: {
+    host: knob({ key: "SMTP_HOST", doc: "SMTP relay host" }),
+    port: knob({
+      key: "SMTP_PORT",
+      schema: z.coerce.number().int().min(1).max(65535),
+      default: 587,
+      exposure: "public",
+    }),
+    user: knob({ key: "SMTP_USER" }),
+    password: knob({ key: "SMTP_PASSWORD" }), // secret by default
+  },
+  sendgrid: {
+    apiKey: knob({ key: "SENDGRID_API_KEY" }),
+  },
+});
+```
+
+A group binds alongside plain knobs — it is just another entry in the bind set:
+
+```ts
+const appName = knob({ key: "APP_NAME", exposure: "public", default: "mailer" });
+
+const cfg = bind([email, appName], [fromProcessEnv()]);
+```
+
+## Discriminant-first resolution
+
+`bind` resolves and validates the discriminant **first**, in every bind mode — including `bind.unchecked` — and then requires and validates only the members of the active branch. Deploy with `EMAIL_SERVICE_TYPE=sendgrid` and none of the `SMTP_*` variables need to exist. If active-branch members are missing, they join the usual single aggregated `MissingConfigError` alongside any missing plain knobs.
+
+A discriminant that no source produced and that declares no default cannot select a branch, so bind fails immediately:
+
+```
+MissingDiscriminantError: cannot select a branch of variants(EMAIL_SERVICE_TYPE):
+no source produced a value for EMAIL_SERVICE_TYPE and the knob declares no default.
+```
+
+## Reading a group: match()
+
+`match(group)` returns a discriminated union. Every member has a `values` object — empty branches get an empty object — so generic code can handle all members uniformly:
+
+```ts
+const mail = cfg.match(email);
+// { type: "console";  values: {} }
+// | { type: "smtp";     values: { host: string; port: number; user: string; password: string } }
+// | { type: "sendgrid"; values: { apiKey: string } }
+
+switch (mail.type) {
+  case "smtp":
+    transport = smtpTransport(mail.values.host, mail.values.port, mail.values.user, mail.values.password);
+    break;
+  case "sendgrid":
+    transport = sendgridTransport(mail.values.apiKey);
+    break;
+  case "console":
+    transport = consoleTransport(); // mail.values is {}
+    break;
+}
+```
+
+`match()` exists on `Snapshot` and on eager bindings only. It is deliberately absent from the `LiveBinding` and `AsyncBinding` types — pin first, then match, so both sides of the switch come from one coherent pass:
+
+```ts
+const snap = live.snapshot();
+const mail = snap.match(email);
+```
+
+Pinning re-runs any registered rules, so cross-knob invariants hold at every pin.
+
+## Discriminants are snapshots — always
+
+A discriminant (and any `when()` condition knob) must be `freshness: "snapshot"`. A live discriminant would switch topology mid-process: half of a request wired for smtp, the other half reading sendgrid. This is enforced twice — at `variants()` construction, and again at bind against the descriptor actually being bound — and both throw `LiveDiscriminantError`.
+
+The double check is why freshness is part of the identity hash: a `freshness: "live"` twin of a snapshot discriminant hashes to a different identity, so it cannot slip past the construction-time check by being identity-equal at bind time.
+
+## Per-branch descriptors: conditional defaults and bounds
+
+Branches may reuse the **same key** with different schema or default. This is how per-mode defaults and bounds work:
+
+```ts
+// inside the smtp branch
+timeoutMs: knob({ key: "EMAIL_TIMEOUT_MS", schema: z.coerce.number().int().positive(), default: 5_000, exposure: "public" }),
+// inside the sendgrid branch
+timeoutMs: knob({ key: "EMAIL_TIMEOUT_MS", schema: z.coerce.number().int().positive(), default: 10_000, exposure: "public" }),
+```
+
+This is legal because sibling branches never co-bind — exactly one is active, so the two descriptors can never conflict at runtime. Their identities differ (`default` is an identity field), and that is expected, not a smell.
+
+## Lookup precedence and errors
+
+`get()` against a binding that contains groups follows a normative precedence:
+
+1. **Exact identity match** → hit.
+2. **Identity is a member of an inactive branch** of a bound group → `InactiveVariantError`. This is a subclass of `UnboundKnobError` carrying `group`, `discriminant`, `activeBranch`, and `expectedBranch` — the three-way `get()` contract is refined, not broken: the knob genuinely is not in the bound set, but you get told *why*.
+3. **Key collision against a direct or active-branch knob** with a different identity → `DescriptorMismatchError`, with the usual unify snippet. This is never produced against a sibling-branch descriptor — that error's advice is "unify these two descriptors," which is exactly wrong for intentionally-different branch twins.
+4. Otherwise → `UnboundKnobError`.
+
+A realistic case — smtp-only code reached on a sendgrid deploy:
+
+```
+InactiveVariantError: SMTP_HOST was not resolved in this binding.
+It belongs to branch "smtp" of variants(EMAIL_SERVICE_TYPE), but the bound
+discriminant selected branch "sendgrid" (EMAIL_SERVICE_TYPE = "sendgrid").
+
+  group:           variants(EMAIL_SERVICE_TYPE)   relv1|c41d97e2a90b33f8
+  discriminant:    EMAIL_SERVICE_TYPE = "sendgrid"
+  activeBranch:    sendgrid
+  expectedBranch:  smtp
+
+Reading an inactive branch member is usually a routing bug: check
+match(email).type before reaching into branch values.
+```
+
+Two membership conflicts are caught at bind time, not read time:
+
+- A branch knob that is **also bound directly** in the same binding → `AmbiguousKnobMembershipError`. The two claims contradict: always-required versus branch-conditional.
+- **Cross-group collisions** are still real. Two groups' active branches can both claim `SMTP_PORT` with different descriptors; the bind-time conflict pass over the *active* set throws `DescriptorMismatchError` with variant context. `bake` goes further and checks the full cross-product of branch combinations statically, so combinations you never happened to deploy are caught too.
+
+## when(): presence-conditional requirements
+
+When the condition is "this other knob is set" rather than a mode switch, use `when(cond, members)`. The condition is plain JSON, so it round-trips:
+
+```ts
+const proxyUrl = knob({ key: "OUTBOUND_PROXY_URL", exposure: "public", default: "" });
+
+export const proxyAuth = when({ knob: proxyUrl, is: "set" }, {
+  user: knob({ key: "PROXY_USER" }),
+  password: knob({ key: "PROXY_PASSWORD" }),
+});
+```
+
+Condition forms: `"set"`, `{ equals: value }`, `{ in: [...values] }`. `"set"` means **a source produced a non-empty raw value**. Defaults do not count — otherwise any defaulted knob would be eternally "set" and the condition dead — and the empty string counts as unset. Condition knobs must be snapshot-fresh, same as discriminants.
+
+## rule(): arbitrary cross-knob checks
+
+`variants` and `when` cover the declarative, JSON-serializable tier. For everything else there is `rule` — the code tier:
+
+```ts
+import { rule } from "knobs";
+
+const poolBounds = rule(
+  [poolMin, poolMax],
+  (min, max) => min <= max || `POOL_MIN (${min}) must not exceed POOL_MAX (${max})`,
+  { id: "pool-bounds", description: "connection pool min must not exceed max" },
+);
+
+const cfg = bind([poolMin, poolMax, poolBounds], [fromProcessEnv()]);
+```
+
+Rules run at bind and at every `snapshot()` / pin — **never** at `get()`, so reads stay cheap and predictable. A rule's presence promotes its deps to eager even under `bind.lazy`, and all deps must live in the same bind set. Failure throws `RuleViolationError` naming the rule id. In JSON export a rule appears as `{"$rule": 1, "on": [ids], "id": ..., "description": ...}` — the function is honestly absent: a rule's check does not survive serialization, and the export never pretends otherwise.
+
+## Nesting, and the relation wire format
+
+Nesting `variants()` or `when()` inside a branch is rejected in v1 with `VariantsNestingError` — compose two flat groups instead. The wire format, however, is recursive and tagged from day one: an entry is a knob descriptor, a `$when` relation, or a `$variants` relation, and each relation is content-addressed as `"relv1|" + RFC 8785 canonical JSON → xxh128`. The email group round-trips as (descriptor bodies abbreviated):
+
+```json
+{
+  "$variants": 1,
+  "on": "knobv1|8c72d1f0b6349aa1",
+  "branches": {
+    "console": {},
+    "smtp": {
+      "host": { "key": "SMTP_HOST", "exposure": "secret", "freshness": "snapshot", "sources": [{ "env": "SMTP_HOST" }] },
+      "port": { "key": "SMTP_PORT", "exposure": "public", "freshness": "snapshot", "default": 587, "schemaId": "std1|4be0..." },
+      "user": { "key": "SMTP_USER", "exposure": "secret", "freshness": "snapshot" },
+      "password": { "key": "SMTP_PASSWORD", "exposure": "secret", "freshness": "snapshot" }
+    },
+    "sendgrid": {
+      "apiKey": { "key": "SENDGRID_API_KEY", "exposure": "secret", "freshness": "snapshot" }
+    }
+  },
+  "id": "relv1|c41d97e2a90b33f8"
+}
+```
+
+Enabling nesting later is a flag flip, not a format break, and the semantics are already specified: inactivity is transitive — a default never resurrects a subtree whose ancestor branch is inactive.
+
+## Scopes
+
+`pick([email])` grants the whole group — discriminant plus all branches — and `scope.match(email)` works inside the scope. Picking an individual branch knob is also legal for leaf `get()` calls; be aware such a read may throw `InactiveVariantError`, which leaks one bit of branch state to the scoped consumer. That trade is deliberate and documented — the alternative is a lying `UnboundKnobError`.
+
+## Bake and client targets
+
+A variants group is client-ineligible **as a whole** in v1: putting one in a client target's manifest fails bake with `VariantsInClientTargetError`. Two reasons. Baking would freeze a build-time branch choice that runtime config can contradict. And mixed-exposure branches would ship torn half-branches — the public `SMTP_PORT` without the branch context that gives it meaning. A v2 escape hatch — an attested branch-freeze declared in the manifest and recorded in the lockfile — is an open decision.
+
+## .env.example rendering
+
+Branch members render commented, with their conditions AND-composed onto one line; a key appears uncommented at most once across the whole file; secrets render name-only:
+
+```bash
+APP_NAME=mailer
+
+# EMAIL_SERVICE_TYPE — one of: console | smtp | sendgrid (default: console)
+EMAIL_SERVICE_TYPE=console
+
+# SMTP_HOST= — required when EMAIL_SERVICE_TYPE=smtp
+# SMTP_PORT= — required when EMAIL_SERVICE_TYPE=smtp (default: 587)
+# SMTP_USER= — required when EMAIL_SERVICE_TYPE=smtp
+# SMTP_PASSWORD= — required when EMAIL_SERVICE_TYPE=smtp (secret)
+# SENDGRID_API_KEY= — required when EMAIL_SERVICE_TYPE=sendgrid (secret)
+```
+
+## Cost note
+
+Importing a variants group retains **all** branch schemas in the bundle — the group is one value, and tree-shaking cannot drop the sendgrid branch just because this deployment runs smtp. If a branch drags a heavy schema, define it in its own file and assemble the group in the module that binds it, rather than re-exporting the group from a barrel that everything imports. Baked clients are immune either way: they import only the generated `./config.baked` shim, which contains public literals and no descriptors at all.

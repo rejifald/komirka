@@ -151,6 +151,7 @@ Knobs are content-addressed. `identityOf(retryCount)` returns something like `kn
 | `sources` (order-significant) | Identity | Precedence is behavior; reordering is a real change |
 | `exposure` | Identity | You changed the trust contract |
 | `default` (presence and value) | Identity | Adding, removing, or changing a default all count |
+| `freshness` | Identity | A live knob and a snapshot twin are different contracts (only snapshot knobs can be discriminants) |
 | schema identity (`version`, or vendor fingerprint) | Identity | Bump `version` whenever the schema's *meaning* changes |
 | `doc`, examples, deprecation notes | Cosmetic | Safe in a patch release; the hash does not move |
 | Unknown extra fields | Cosmetic | Ignored by identity |
@@ -244,7 +245,7 @@ Be honest in your own docs about what this buys. `pick()` confines *mistakes*: y
 
 - Export inert descriptors and a `defineKnobs` group; never call `bind()` inside the package.
 - Type every config-consuming entry point as `Scope<ConfigOf<typeof yourKnobs>>`, with the parameter required.
-- Treat `key`, `sources`, `exposure`, `default`, and schema identity as public API; changing any is a breaking change — bump `version` on schema meaning changes.
+- Treat `key`, `sources`, `exposure`, `default`, `freshness`, and schema identity as public API; changing any is a breaking change — bump `version` on schema meaning changes.
 - Edit `doc` and examples freely; they are cosmetic and never move the identity hash.
 - Document the manifest attestation step for your public knobs, with a paste-able `config.manifest.ts` snippet.
 - Tell consumers to gate CI with `knobs bake --check`; `StaleBakeError` is the runtime backstop, not the plan.

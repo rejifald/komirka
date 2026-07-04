@@ -150,7 +150,50 @@ const cfg = bind(serverKnobs, [fromProcessEnv()]);
 
 The open sub-question is what the *optional* baked server wiring module checks. It already reads env dynamically — computed access over a key array, never static `process.env.KEY`, so DefinePlugin cannot fold values into literals. Candidates: presence-only checks at boot (schema-free, still catches the deploy that forgot a var), or pure enumeration with no checks at all. What is **not** on the table: serializing validators via generated code, or a mini validation DSL embedded in baked output — both collide head-on with BYO Standard Schema and the bundle-frugality gate.
 
-## 5. Final naming
+## 5. Nested `variants()` / `when()`
+
+**Decision for v1: rejected at construction** (`VariantsNestingError`) — compose two flat
+groups instead. Nesting semantics (transitive activity propagation, chained
+`InactiveVariantError`, condition algebra) are the hard 20% and nobody has presented the
+real case yet. **But the relation wire format is recursive and tagged from day one** —
+entries are a knob descriptor, a `$when` node, or a `$variants` node — so enabling nesting
+later is a feature flag, not a format break. Non-negotiable either way: transitive
+inactivity is specced now, so a default can never resurrect a subtree whose ancestor
+branch is inactive.
+
+## 6. Client bake for variants: the attested branch-freeze
+
+v1 ships whole-group client-ineligibility (`VariantsInClientTargetError`): baking would
+freeze a build-time branch choice that runtime can silently contradict, and
+mixed-exposure branches would ship torn half-branches. The v2 escape hatch is designed
+but not shipped: an **attested branch-freeze** — `{ group, frozenBranch }` declared in
+the manifest, bake resolves the discriminant, ships only that branch's public literals,
+and records the frozen value in the committed lockfile so the attestation diff shows
+exactly which branch the client was frozen to.
+
+## 7. Async reads: stale-while-revalidate?
+
+Not in v1. Expired reads block on a per-key single-flight re-read, so `maxStalenessMs`
+stays an honest hard bound — serve-stale-while-revalidating would make the name a lie.
+If demand materializes it arrives as a loudly-named opt-in, never a silent default.
+Related deferral: `cfg.update(knob, fn, { retries })` read-modify-write sugar — it is a
+five-line userland loop over `get`/`set`/`WriteConflictError`; core adds it only if
+demand proves out.
+
+## 8. Recently resolved
+
+- **Live-invalid default** — resolved by author decision: **current truth wins** (poisoned
+  slots, `InvalidLiveValueError`, `tryGet`), with `keepLastGood(knob, { maxCoastMs })` as
+  the explicit bind-site opt-in. See [Freshness](/docs/concepts/freshness).
+- **`freshness` in the identity hash** — resolved: **yes**. Live-vs-snapshot is
+  behaviorally load-bearing; relations reference discriminants by identity, and a live
+  twin must not be identity-equal. Pre-release was the last cheap day to make this change.
+- **Manifest shape** — resolved: the manifest is compose-only *source*; the attestation
+  artifact is a **committed lockfile** (`config.manifest.lock.json`) with per-entry
+  provenance, gated by `bake --check` in a zero-credential CI job. See
+  [Bake](/docs/bake/overview).
+
+## 9. Final naming
 
 `knob` is a working name, for the package and the descriptor both. The criteria: one noun that works for both the unit and the npm package; available or winnable on npm; greppable (search-unique in a codebase); no reactivity connotation; and ideally paired with a natural word for a group of them.
 
@@ -165,7 +208,7 @@ Parked candidates, grouped by family:
 
 Current lean: none. The docs use `knob` consistently so the eventual rename is a mechanical find-and-replace plus an npm availability check before first publish. Naming does not gate design review, and bikeshedding it before the proof gate passes would be effort spent in the wrong order.
 
-## 6. The v0.1 proof gate
+## 10. The v0.1 proof gate
 
 The last open decision is whether to ship at all, and it has a pass/fail procedure attached. Before a v0.1 tag exists, one public demo repository must show a **single knobs file, consumed unchanged** — never forked per runtime — by:
 

@@ -1,0 +1,303 @@
+---
+title: Database-backed config (async + writes)
+description: Serve knobs from a database — per-request pins with bounded staleness, plus operator-plane writes with write-through caching and optimistic concurrency.
+---
+
+## The setup
+
+Your configuration lives in a database table. An admin panel edits it. A fleet of replicas reads it. This guide covers that shape end to end.
+
+The tool is the **async binding**: a `LiveBinding` with async transport plus operator-plane writes. The mental model carries over unchanged — pin with `snapshot()`, compare `epoch()`, inspect `health()` — with two additions: reads that may touch the network are awaited, and `set()` writes back through the binding. It lives in the `knobs/async` subpath; only the shared types and error classes sit in core, which stays synchronous.
+
+## The provider contract
+
+```ts
+import type { Json } from "knobs";
+
+interface AsyncProvider {
+  kind: "async";
+  name: string;
+  read(key: string): Promise<{ raw: string | Json; version?: string } | undefined>;
+  readMany?(keys: readonly string[]): Promise<Map<string, { raw: string | Json; version?: string } | undefined>>;
+  write?(key: string, raw: string | Json, opts?: { ifVersion?: string }): Promise<{ version?: string }>;
+  writeMany?(entries: ReadonlyArray<{ key: string; raw: string | Json; ifVersion?: string }>): Promise<void>;
+}
+```
+
+The envelope is versioned from day one: `read` may return a `version` (a SQL row version, a DynamoDB condition attribute, an etcd revision), and `write` may accept `ifVersion` for compare-and-set. Providers without versions still work — they degrade to **documented** last-write-wins. That is an acceptable default and an unacceptable ceiling, so the seam exists even if your first provider ignores it.
+
+A Postgres provider is about a dozen lines:
+
+```ts
+import type { AsyncProvider } from "knobs/async";
+import { WriteConflictError } from "knobs";
+import { sql } from "./db";
+
+export const pgProvider: AsyncProvider = {
+  kind: "async",
+  name: "pg",
+  async read(key) {
+    const [row] = await sql`SELECT raw, version FROM config WHERE key = ${key}`;
+    return row ? { raw: row.raw, version: String(row.version) } : undefined;
+  },
+  async readMany(keys) {
+    const rows = await sql`SELECT key, raw, version FROM config WHERE key = ANY(${keys})`;
+    const found = new Map(rows.map((r) => [r.key, { raw: r.raw, version: String(r.version) }]));
+    return new Map(keys.map((k) => [k, found.get(k)]));
+  },
+  async write(key, raw, opts) {
+    const [row] = opts?.ifVersion
+      ? await sql`UPDATE config SET raw = ${raw}, version = version + 1
+                  WHERE key = ${key} AND version = ${opts.ifVersion} RETURNING version`
+      : await sql`INSERT INTO config (key, raw, version) VALUES (${key}, ${raw}, 1)
+                  ON CONFLICT (key) DO UPDATE SET raw = ${raw}, version = config.version + 1
+                  RETURNING version`;
+    if (!row) throw new WriteConflictError(key);
+    return { version: String(row.version) };
+  },
+};
+```
+
+## Wiring it up
+
+```ts
+import { knob } from "knobs";
+import { bind } from "knobs/async";
+import { z } from "zod";
+
+export const rateLimit = knob({
+  key: "api.rateLimit",
+  schema: z.coerce.number().int().positive(),
+  doc: "Requests per minute, per API key.",
+  exposure: "public",
+  sources: [{ provider: "pg" }],
+  default: "100",
+  freshness: "live",
+});
+
+export const corsOrigins = knob({
+  key: "http.corsOrigins",
+  schema: z.string().transform((s) => s.split(",").map((o) => o.trim())),
+  doc: "Comma-separated allowed origins.",
+  exposure: "public",
+  sources: [{ provider: "pg" }],
+  default: "https://app.example.com",
+  freshness: "live",
+});
+
+const cfg = bind.async([rateLimit, corsOrigins], [pgProvider], { maxStalenessMs: 5_000 });
+await cfg.ready();
+```
+
+The constructor is inert — it never performs I/O. `await cfg.ready()` is the startup line: one `readMany`, then resolve and validate every listed knob, failing fast with a single aggregated `MissingConfigError` that names everything wrong at once, not just the first thing.
+
+## Reading
+
+Request paths pin. `snapshot()` returns a coherent, immutable view: if the cache is fresh it costs zero I/O; if some keys have exceeded `maxStalenessMs`, it issues one `readMany` for exactly those keys.
+
+```ts
+app.use(async (req, _res, next) => {
+  req.config = await cfg.snapshot(); // usually zero-I/O
+  next();
+});
+
+app.get("/orders", (req, res) => {
+  const limit = req.config.get(rateLimit); // sync and stable for the whole request
+  // ...
+});
+```
+
+For scripts and jobs there is the colored read: `await cfg.get(rateLimit)`.
+
+`maxStalenessMs` is an honest hard bound, not a hint. An expired key **blocks** on a re-read — there is no silent stale-while-revalidate serving old values while claiming freshness. Expiry under load coalesces: a hot knob expiring during a traffic spike triggers **one** provider read via per-key single-flight, not one per request.
+
+## Writing: `set()` is write-through
+
+```ts
+await cfg.set(rateLimit, "200");
+```
+
+Three rules make `set()` predictable.
+
+**It takes the schema's input type — the raw — not the parsed output.** Standard Schema has no inverse: given `z.string().transform((s) => s.split(","))`, no library can turn the array back into the string — the transform only runs forward. So the caller owns the raw representation, and core never serializes or inverts:
+
+```ts
+snap.get(corsOrigins);
+// ["https://app.example.com"]  ← parsed output
+
+await cfg.set(corsOrigins, "https://app.example.com, https://admin.example.com");
+//                          ↑ raw input, exactly what a source would supply
+```
+
+The pipeline: validate the raw against the knob's schema (an invalid write is rejected before the provider ever sees it) → `provider.write(key, raw)` verbatim → install the **parsed** value into the local cache → bump the epoch.
+
+**Write-through, never invalidate-and-refetch.** Installing the parsed value locally is what guarantees read-your-writes on the writing replica, even when the provider's read path lags its write path (read replicas, eventually-consistent reads). Refetching after a write could hand back the pre-write value from a lagging reader.
+
+| Reader | Sees the write |
+| --- | --- |
+| The writing replica | Immediately (write-through) |
+| Every other replica | Within `maxStalenessMs` plus provider replication lag |
+| Concurrent writers | Last-write-wins unless `ifVersion` is used; divergence bounded by `maxStalenessMs` |
+
+**It targets the highest-precedence source.** A write that lands below a shadowing source would change every replica except the operator's own — the one machine where the change appears to work is the one machine where it hasn't. Forbidden:
+
+```ts
+const logLevel = knob({
+  key: "log.level",
+  schema: z.enum(["debug", "info", "warn", "error"]),
+  sources: [{ file: "./config.local.json" }, { provider: "pg" }],
+  default: "info",
+  freshness: "live",
+});
+
+await cfg.set(logLevel, "debug");
+// NotWritableError: "log.level" is currently supplied by file "./config.local.json",
+// which shadows provider "pg". Remove the local override or write to the file.
+```
+
+## Concurrent writers
+
+Read-modify-write without `ifVersion` loses updates silently: two admins both read `100`, both add 50, both save — the value lands on `150` and one increment vanishes without a trace. With `ifVersion`, the second write is refused instead:
+
+```ts
+async function bumpRateLimit(delta: number) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const snap = await cfg.snapshot();
+    const current = snap.get(rateLimit);
+    const { version } = snap.explain(rateLimit); // the provider version this cache last saw
+    try {
+      return await cfg.set(rateLimit, String(current + delta), { ifVersion: version });
+    } catch (e) {
+      if (e instanceof WriteConflictError) continue; // someone else won — re-read, recompute, retry
+      throw e;
+    }
+  }
+  throw new Error("gave up after 3 conflicts");
+}
+```
+
+## Multi-knob updates: `setMany()`
+
+An admin panel's Save button rarely writes one knob. `setMany()` validates the **post-state as a whole** — every schema, variant completeness, cross-knob rules — before a single byte reaches the provider. A plain `set()` validates against its own knob's schema only; that is the documented difference.
+
+```ts
+await cfg.setMany([
+  { knob: rateLimit, raw: "200", ifVersion: rlVersion },
+  { knob: corsOrigins, raw: "https://app.example.com,https://admin.example.com" },
+]);
+```
+
+Atomicity follows the provider. If it implements `writeMany`, the batch is atomic (in SQL: one transaction). If it doesn't, `setMany()` **refuses before attempting anything** — a half-applied batch is worse than a rejected one. Passing `{ allowNonAtomic: true }` opts into dependency-ordered sequential writes: branch values first, discriminant last, so a crash mid-batch tears in the benign direction (staged-but-unused values, never an active branch missing its values).
+
+## Switching a variant from the database
+
+Discriminant knobs are `freshness: "snapshot"` by rule: pinned at `ready()` and exempt from staleness re-reads. A database flip must never switch your process topology mid-flight.
+
+`set()` on a discriminant is therefore a **staged write**: it writes for the fleet but does not install locally and does not bump the epoch. The local binding adopts it only through an explicit `refresh()`, which re-reads the discriminant and its full active branch as one coherent `readMany` unit. Given a payments variant group:
+
+```ts
+// 1. Stage the target branch's values — legal while the branch is inactive.
+//    Writes validate against the target knob's own branch schema;
+//    InactiveVariantError is read-side only and never applies to writes.
+await cfg.set(adyenApiKey, "aq_live_9f…");
+await cfg.set(adyenMerchant, "ACME_EU");
+
+// 2. Flip the discriminant — staged: the fleet will see it, this process not yet.
+await cfg.set(paymentsProvider, "adyen");
+
+// 3. Adopt the new topology here, all-or-nothing.
+await cfg.refresh();
+```
+
+A single `setMany()` with `allowNonAtomic: true` encodes the same runbook mechanically.
+
+## When things fail
+
+Three different events, three different behaviors — never blurred together:
+
+| Event | Behavior | Error / hook |
+| --- | --- | --- |
+| Re-read returns an **invalid** value | Knob is poisoned: pins still succeed, the knob occupies an error slot | `InvalidLiveValueError` on `get`; `onInvalid` fires once per distinct invalid raw |
+| Provider **down** / no answer | Serve the cached value within `maxStalenessMs` (that budget is the contract, not inherited state); beyond it, throw | `SourceUnavailableError`; `onSourceError` — never routed through `onInvalid` |
+| **Write** fails | Cache untouched, no epoch bump, core never retries (no loops — the provider or caller retries) | `WriteFailedError` with a scrubbed cause |
+
+Because `set()` validates before writing, a poisoned slot rarely comes from your own admin panel — it arrives via raw SQL edits or schema skew (below). Current truth wins: the invalid value poisons exactly that knob.
+
+```ts
+const snap = await cfg.snapshot(); // never throws wholesale
+snap.get(rateLimit);
+// InvalidLiveValueError: "api.rateLimit" invalid since 2026-07-04T10:12:03Z (incident 01JZK…):
+//   expected positive integer, got "unlimited". Last valid value observed at 10:07:41Z.
+snap.tryGet(rateLimit); // { ok: false, error } — the non-throwing form
+```
+
+Every other knob keeps working; blast radius is proportional to actual usage of the broken one. Poisoned state also bypasses staleness memoization — the next read re-reads immediately, so recovery lands within one read of the fix, not one `maxStalenessMs`.
+
+Where coasting beats throwing, opt in at the bind site (never in the descriptor — the same knob may deserve different policies in different apps):
+
+```ts
+import { keepLastGood } from "knobs";
+
+const cfg = bind.async(knobs, [pgProvider], {
+  maxStalenessMs: 5_000,
+  invalid: [keepLastGood(rateLimit, { maxCoastMs: 300_000 })], // maxCoastMs is required
+});
+// past the coast budget → CoastBudgetExceededError
+```
+
+`health()` reports per knob: `"valid" | "invalid-was-valid" | "never-valid" | "coasting"`, plus `lastValidAt`, `lastInvalidAt`, `lastThrownAt`, `throwCount` — wire it into your health endpoint.
+
+## Reacting to change: epochs, not events
+
+There are no change events. The epoch is a number you compare — and it also bumps on the invalid transition, which is why epoch consumers reach for `tryGet`:
+
+```ts
+let pool = makePool((await cfg.snapshot()).get(poolSettings));
+let seen = cfg.epoch(poolSettings);
+
+app.use(async (req, _res, next) => {
+  const now = cfg.epoch(poolSettings);
+  if (now !== seen) {
+    const result = (await cfg.snapshot()).tryGet(poolSettings);
+    if (result.ok) {
+      const old = pool;
+      pool = makePool(result.value);
+      seen = now;
+      void old.drain();
+    } // invalid transition: keep the old pool; health() shows "invalid-was-valid"
+  }
+  next();
+});
+```
+
+## Rolling deploys and schema skew
+
+`set()` validates against the **calling process's** schema version. During a rolling deploy, a v1 replica can write a value that v2 replicas reject at read time — poisoning that slot on half the fleet. Containment is the story above: error slots keep the blast radius to one knob, `health()` makes the skew visible per replica, and `keepLastGood` is recommended for DB-sourced knobs precisely because admin writes and deploys overlap in real fleets.
+
+## Secrets in the database
+
+`set()` on an `exposure: "secret"` knob is allowed — refusing would push operators to raw SQL with zero validation, which is strictly worse. Redaction is structural, not advisory: `onInvalid` receives `{ rawDigest, length }` and never the raw; core substring-scrubs the raw value out of every validator and provider error message it surfaces (best-effort, and documented as such); `WriteFailedError` carries a scrubbed cause. And `bake` never resolves secret values, so a DB-stored secret cannot reach a client bundle by construction.
+
+## What this is not
+
+Four clauses keep database-backed config from mutating into a remote-config SDK:
+
+1. **Pull-only.** No `watch`, no `subscribe`, no `onChange` — ever. The epoch is a number you compare, not an event you receive.
+2. **Context-free reads.** The moment `get()` takes a per-request or per-user context, it is a feature-flag SDK. We refuse.
+3. **Uniform.** One value per process per knob, never per-caller.
+4. **Writes are operator-plane.** `set()` exists for admin panels, CLIs, and migrations. The litmus test: if `set()` appears in a request handler, config is being used as application state — use a database library.
+
+## Testing staleness
+
+The clock is a seam, so staleness tests need no timers:
+
+```ts
+import { manualClock } from "knobs/testing";
+
+const clock = manualClock();
+const cfg = bind.async([rateLimit], [fakeProvider], { maxStalenessMs: 5_000, clock });
+await cfg.ready();
+
+clock.advance(5_001);
+await cfg.snapshot(); // re-reads expired keys — deterministic, no sleeps
+```

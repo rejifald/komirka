@@ -29,6 +29,30 @@ export default {
 };
 ```
 
+### Isn't this the monolith again?
+
+No — and the distinction is load-bearing. The blob this library exists to kill is the
+*runtime* god-object: imported by app code, shipped to bundles, validating everything at
+import. The manifest is none of those things. It is build-time-only, never imported by
+runtime code, holds *references* rather than values or behavior, and deleting it breaks
+`bake` — not the app.
+
+Two rules keep it from growing into a definition blob:
+
+- **Feature modules own their knobs.** Groups live next to the code that uses them
+  (`email.knobs.ts`, `checkout.knobs.ts`); the manifest is **compose-only** — imports and
+  spreads. Defining knobs (or relations) directly inside the manifest draws a bake lint
+  warning, keyed on the defining module of every constructor call.
+- **The attestation artifact is a committed lockfile, not this file.** Spreads hide
+  deltas: a dependency bump that adds a knob to `widgetKnobs` leaves `config.manifest.ts`
+  byte-identical — CODEOWNERS on it would never fire. So bake emits
+  `config.manifest.lock.json` — RFC 8785 canonical, sorted by identity hash, with
+  per-entry provenance (which manifest export, which module or `package@version`
+  contributed it, and its source refs, so "this knob became DB-mutable" is a visible
+  transition). That file is committed, CODEOWNERS sits on *it*, and `bake --check` fails
+  CI on any drift with the client-target delta rendered human-readably. Every discovery
+  or composition mistake becomes a reviewable diff.
+
 ### Targets are an app attestation
 
 The `client` list is **deny-by-default**. A package declaring `exposure: "public"` on a knob is *necessary* — bake refuses to put any secret-exposure knob in a client target — but it is **not sufficient**:
@@ -47,11 +71,15 @@ export const widgetTheme = knob({
 
 Two parties must agree before a value is shipped to an untrusted client: the package that declared the knob public, and the application that listed it in `targets.client`. Env-sourced values crossing into the client artifact go through this allowlist; nothing rides along implicitly.
 
+One categorical exclusion: a `variants()` group is client-ineligible as a whole in v1 — any member (or its discriminant) in `targets.client` fails the bake with `VariantsInClientTargetError`. Baking would freeze a build-time branch choice that runtime can silently contradict, and mixed-exposure branches would ship torn half-branches. The attested branch-freeze escape hatch is an [open decision](/docs/reference/decisions) for v2.
+
 ### The manifest is side-effect-free — by contract, and detectably
 
 Bake executes `config.manifest.ts` in a constrained context. This is where knob inertness pays off structurally: constructing a knob performs zero I/O, zero validation, zero side effects — so a manifest module has *no legitimate reason* to touch the network, the filesystem, or child processes. Any I/O observed during manifest evaluation is a contract violation, and bake fails the build and reports the offending module.
 
 This closes the build-time RCE class that haunts eval-your-config-at-build tools: "run this config file" cannot quietly become "run this arbitrary program in CI with CI's credentials," because the legitimate behavior of the file is so narrow that everything else stands out.
+
+One consequence is taken seriously: `bake --check` runs on every PR, which makes the manifest import closure — including knob files inside dependency-bumped third-party packages — *adversary-triggerable* in CI. The constrained context is therefore a security boundary there, not hygiene: no network, no filesystem writes outside the declared output, no reads of CI secret env — and the check job itself runs with **zero credentials** (it needs only the checkout and the committed lockfile).
 
 ## What bake emits
 

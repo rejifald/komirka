@@ -9,7 +9,7 @@ Configuration failures are boring, frequent, and usually fixed by someone who di
 2. **Which layer** — bind, read, scope, live, serialization, or bake.
 3. **What next** — a concrete remediation, in the message itself.
 
-There are nine named errors. Nothing else escapes the library.
+Twelve named errors are detailed on this page; the variants and write errors get a compact summary at the end. Nothing else escapes the library.
 
 | Error | Layer | Fires when |
 | --- | --- | --- |
@@ -20,10 +20,13 @@ There are nine named errors. Nothing else escapes the library.
 | `DescriptorMismatchError` | snapshot read | same key, different descriptor identity |
 | `NotInScopeError` | scope read | the knob is not in the group passed to `pick()` |
 | `ExposureError` | exposure boundary | a secret value was about to cross into a public context |
-| `NoValidValueError` | live read | keep-last-good, but there is no last good |
+| `InvalidLiveValueError` | live read | a live re-read turned invalid after a valid value — the knob is poisoned |
+| `SourceUnavailableError` | live read | the source is unreachable and the staleness budget is spent |
+| `CoastBudgetExceededError` | live read | a `keepLastGood` knob coasted past its `maxCoastMs` |
+| `NoValidValueError` | live read | the knob has never produced a valid value in this process |
 | `StaleBakeError` | baked client read | the baked identity hash no longer matches the imported descriptor |
 
-Reads also have a non-throwing door: `cfg.tryGet(knob)` returns `{ ok: false, issues }` instead of throwing, `live.health()` reports per-knob staleness and last validation error, and `cfg.explain(knob)` shows provenance. Use those for probes and diagnostics; the errors below are for code paths that must not proceed.
+Reads also have a non-throwing door: `tryGet(knob)` returns `{ ok: true, value }` or `{ ok: false, error }` instead of throwing (on a live binding it is the first thing epoch-consumer code should use), `live.health()` reports per-knob status and timestamps, and `cfg.explain(knob)` shows provenance. Use those for probes and diagnostics; the errors below are for code paths that must not proceed.
 
 ## Secret knobs: counts and paths, never text
 
@@ -186,11 +189,85 @@ export async function getServerSideProps() {
 
 `cfg.toJSON()` never throws — it redacts secrets by construction; the guard exists for the raw values themselves. Note that changing `exposure` is an identity field: flipping a knob to `"public"` changes its hash and shows up in review and in bake's manifest, which is the point.
 
+## InvalidLiveValueError
+
+**Layer: live read.** The live default is **current truth wins**: a knob's value is what its source says right now — never a value silently inherited from an earlier read. When a live re-read yields a value that fails validation, the knob becomes *poisoned*, and reads of it throw. The honest trade, stated up front: this default converts a bad config push from silent staleness into a loud partial outage that lasts until the push is fixed — opt into `keepLastGood` per knob where availability beats freshness.
+
+Poisoning is deliberately narrow. `live.snapshot()` — and any pinned snapshot — never throws wholesale: the invalid knob occupies an *error slot*, and only `get()` on that knob throws. Every other knob keeps working, so the blast radius is proportional to actual usage — one invalid knob nobody reads must never 500 the site.
+
+```ts
+const snap = live.snapshot(); // never throws — poisoned knobs ride along in error slots
+
+snap.get(rateLimit);
+// InvalidLiveValueError: RATE_LIMIT re-read as invalid after a valid value.
+// 2 issues (paths: burst, windowMs). Last valid 2026-07-04T09:12:31Z,
+// invalid since 2026-07-04T09:14:02Z. incident 01JZK3VQ9M.
+// Fix the value at its source — while poisoned, the next read re-checks immediately.
+```
+
+The error carries `issues`, `lastValidAt`, `invalidSince`, and an `incidentId`. The raw value is included only for non-secret knobs — the secret rule above applies unchanged, which is why the example shows counts and paths, not the rejected text.
+
+**Consumption: `tryGet` and the epoch.** The invalid *transition* bumps the epoch, exactly like an accepted change — there is a single clock, and consumers observe validity changes through the same counter they already watch. The rebuild pattern:
+
+```ts
+if (live.epoch() !== seen) {
+  seen = live.epoch();
+  const r = live.tryGet(rateLimit);
+  if (r.ok) rebuild(r.value);
+  else degrade(r.error); // the same InvalidLiveValueError get() would throw
+}
+```
+
+`tryGet(knob)` returns `{ ok: true, value }` or `{ ok: false, error }` and is the first thing epoch-consumer code should use.
+
+**Observation: `onInvalid`.** The `onInvalid(knob, raw, issues)` bind option fires **once per knob per distinct invalid raw** — it is the observation plane; the throws are the consumption plane. Both carry the same `incidentId`, so logs join and dedupe cleanly. For secret knobs the hook receives `{ rawDigest, length }` in place of the raw — never the rejected text.
+
+**Recovery is one read, not one poll.** Poisoned state bypasses the staleness memoization: while a knob is poisoned, the next read re-reads the source immediately. Fix the file or the row, and the very next read recovers — you do not wait out a poll interval. (On Kubernetes, the `..data` symlink swap makes a single-file read atomic in a single pass, and multi-file sources are read in one resolved-dir pass; the genuine tear risk is plain files outside k8s — and the poisoned-state bypass collapses exactly that window.)
+
+**What `health()` shows.** Per knob: a status — `"valid"`, `"invalid-was-valid"`, `"never-valid"`, or `"coasting"` — plus `lastValidAt`, `lastInvalidAt`, `lastThrownAt`, and `throwCount`. Source observation and consumer impact are kept distinct on purpose: "invalid but dormant" and "actively failing requests" are different operator situations, and the triage split lives in `lastThrownAt` and `throwCount`. Probe contract: liveness probes must **never** consult knob validity; readiness may gate on `"never-valid"` at most.
+
+## SourceUnavailableError
+
+**Layer: live read.** Invalid is not unavailable. When a source turns *unreadable* — the file is gone, the provider is unreachable — there is no new truth to judge, so reads keep serving the cached value **within `maxStalenessMs`**. That is not inherited state; it is the declared staleness budget the binder signed when configuring the source. Beyond the budget, reads throw `SourceUnavailableError`, which carries `{ cause, staleSince }`, and the `onSourceError` bind option fires. Unavailability is never routed through `onInvalid` — the two hooks report different failures.
+
+```ts
+live.get(tiers);
+// SourceUnavailableError: FEATURE_TIERS's source has been unreachable past
+// its staleness budget. /etc/app/tiers.json unreadable since
+// 2026-07-04T09:14:02Z (cause: EACCES); maxStalenessMs 30000 exceeded.
+// Restore the source — or raise maxStalenessMs if this budget is too tight.
+```
+
+The remediation is at the source, not in code: restore the file or the provider's reachability, and the next read serves fresh truth. If the value *is* readable but fails validation, that is `InvalidLiveValueError` above — keep the two dashboards separate.
+
+## CoastBudgetExceededError
+
+**Layer: live read.** Keep-last-good still exists — as a **bind-site opt-in**, for knobs where availability beats freshness:
+
+```ts
+import { keepLastGood } from "knobs";
+
+const live = bind([rateLimit, tiers], [fromFiles()], {
+  invalid: [keepLastGood(rateLimit, { maxCoastMs: 300_000 })],
+});
+```
+
+`maxCoastMs` is required — there is no unbounded coasting. Within the budget, the knob keeps serving its last good value and `health()` reports it as `"coasting"`. Past the budget, `get()` throws `CoastBudgetExceededError` and the status moves from `"coasting"` to `"invalid-was-valid"`.
+
+```ts
+live.get(rateLimit);
+// CoastBudgetExceededError: RATE_LIMIT coasted on its last good value for
+// 300000 ms and the source is still invalid. Last valid 2026-07-04T08:42:10Z,
+// coasting since 2026-07-04T09:14:02Z.
+// Fix the value at its source — or raise maxCoastMs if availability should
+// win for longer.
+```
+
+Why a bind option and not a descriptor field: as an identity field, two teams' staleness preferences for the same knob would become a `DescriptorMismatchError`; as a cosmetic field, real runtime behavior would hide outside identity. Neither is acceptable, so the policy lives where policy belongs — at the bind site, chosen by the process that runs it. Reach for `keepLastGood` on the knobs where serving something slightly stale beats serving an error; everywhere else, the throw-by-default of `InvalidLiveValueError` is simply the default — there is no per-knob spelling to opt into it.
+
 ## NoValidValueError
 
-**Layer: live read.** Live bindings default to **keep-last-good**: when a re-readable source turns invalid after boot, reads keep serving the last accepted value and the `onInvalid` bind option fires (default: `console.error`). `NoValidValueError` is what happens when there is no last good to keep — the knob has *never* validated successfully in this process.
-
-That combination requires a lazy door, because an eager `bind()` validates at bind and refuses to hand you a binding at all:
+**Layer: live read.** Reserved for exactly one situation: the knob has **never** produced a valid value in this process. There is no invalid-after-valid transition to report and no last good to coast on — this is the never-valid case, and only the lazy and unchecked doors can reach it, because an eager `bind()` validates at bind and refuses to hand you a binding at all:
 
 ```ts
 const tiers = knob({
@@ -210,9 +287,9 @@ live.get(tiers);
 // Fix the source, or bind eagerly to fail at boot instead of at read.
 ```
 
-`live.health()` reports the same never-valid state for liveness probes, with the last validation error — counts and paths only if the knob is secret.
+`live.health()` reports the knob as `"never-valid"`, with the last validation error — counts and paths only if the knob is secret. Under the probe contract, this is the only status readiness may gate on; liveness probes never consult knob validity.
 
-**The restart story.** Keep-last-good is process memory; it is not persisted. If a process restarts while the source is still broken, there is no last good to inherit — and with the eager default, boot fails with an aggregated `MissingConfigError` instead. That asymmetry is deliberate: a *running* process rides out a bad config push, but a *new* process never boots on config that has never been valid. For knobs where stale is worse than down, opt in per knob with `{ onInvalid: "throw" }`.
+**The restart story.** Nothing is inherited: live values are current truth, not process memory. That makes failure *symmetric* across restarts — a running pod and a freshly restarted pod fail on exactly the same values. The running process throws `InvalidLiveValueError` on the poisoned knob; the restarted one dies at eager bind with an aggregated `MissingConfigError`, or throws `NoValidValueError` through a lazy door. A restart can never silently "fix" a bad push by resurrecting a value the source no longer contains, so what you debug on one pod is true of all of them. For knobs where availability beats freshness, opt in at the bind site with `keepLastGood` — see `CoastBudgetExceededError` above.
 
 ## StaleBakeError
 
@@ -230,6 +307,21 @@ config.get(widgetTheme);
 
 The remediation chain is mechanical: `knobs bake` regenerates, `knobs bake --check` is the CI drift gate that makes shipping this state impossible, and `knobs bake --watch` keeps dev and HMR in sync so you never meet it locally.
 
+## Variants and write errors (summary)
+
+Conditional config and writable sources add their own named errors. They obey the same first-line contract; here they get one line each — full treatment lives on the Conditional config and Database-backed config pages.
+
+- `InactiveVariantError` — subclass of `UnboundKnobError`, refining `get()`'s three-way contract: the knob is declared, but in a variant branch that is not active; carries `group`, `discriminant`, `activeBranch`, and `expectedBranch`.
+- `MissingDiscriminantError` — a variant group's discriminant knob produced no value, so no branch can be selected.
+- `LiveDiscriminantError` — a discriminant resolved through a live source; branch selection must be stable for the life of the process.
+- `AmbiguousKnobMembershipError` — a knob appears in more than one variant branch or group, so membership cannot be resolved.
+- `VariantsNestingError` — a variant group declared inside another variant's branch; nesting is rejected.
+- `RuleViolationError` — a declared cross-knob rule failed even though every member knob validated individually.
+- `VariantsInClientTargetError` — a variant group reached the client bake target; branch selection is server-side.
+- `WriteConflictError` — a compare-and-set write with `ifVersion` found the stored version had moved; re-read and retry.
+- `NotWritableError` — the write would be shadowed by a higher-precedence source, so its effect would never be observable; refused up front.
+- `WriteFailedError` — the provider failed during a write; the cause is scrubbed, the cache is untouched, and no epoch bump occurs.
+
 ## Summary
 
-Bind-time errors (`MissingConfigError`, `AsyncSourceInBindError`) fail the boot, loudly and completely. Read-time errors (`UnboundKnobError`, `DescriptorMismatchError`, `NotInScopeError`, `AsyncValidatorInSyncBindingError`) refuse to guess — no fallback, no ambient lookup, ever. Boundary errors (`ExposureError`, `StaleBakeError`) are the runtime halves of guarantees that bake starts at build time. And `NoValidValueError` is the one honest answer left when keep-last-good has nothing to keep. In every case: the key, the layer, the next step — in the first line.
+Bind-time errors (`MissingConfigError`, `AsyncSourceInBindError`) fail the boot, loudly and completely. Read-time errors (`UnboundKnobError`, `DescriptorMismatchError`, `NotInScopeError`, `AsyncValidatorInSyncBindingError`) refuse to guess — no fallback, no ambient lookup, ever. Boundary errors (`ExposureError`, `StaleBakeError`) are the runtime halves of guarantees that bake starts at build time. Live errors (`InvalidLiveValueError`, `SourceUnavailableError`, `CoastBudgetExceededError`, `NoValidValueError`) keep current truth honest: invalid throws exactly where the knob is used, unavailable coasts only inside a declared staleness budget, coasting itself has a signed budget, and never-valid is named for what it is. The variants and write errors extend the same contract to conditional config and writable sources. In every case: the key, the layer, the next step — in the first line.

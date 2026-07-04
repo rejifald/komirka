@@ -74,11 +74,13 @@ Every feature must pass all of these. "It would be convenient" never overrides a
   deduplication of concurrent `refresh()` calls is allowed: it removes work, it doesn't
   create it.)
 - **P11 — Content-addressed identity with a frozen field list.** Identity =
-  `{ key, exposure, sources (order-significant), default (presence + value), schemaId? }`,
+  `{ key, exposure, sources (order-significant), default (presence + value), freshness, schemaId? }`,
   canonicalized as `knobv1|` + RFC 8785 JSON, hashed with xxh128. The hash is an index, not
   a security boundary; structural equality of the identity subset is authoritative.
   `doc`, examples, deprecation metadata, and **all unknown fields** are cosmetic — excluded,
-  so a changelog edit can never make two package versions unbindable.
+  so a changelog edit can never make two package versions unbindable. `freshness` is in the
+  hash because live-vs-snapshot is behaviorally load-bearing: relations reference
+  discriminants by identity, and a live twin of a snapshot knob must not be identity-equal.
 - **P12 — `pick()` runtime-restricts.** Narrowing is enforced at runtime (a new scope table
   containing only picked entries) and in the type system (a brand only `pick()` produces;
   the root `Snapshot` is deliberately *not* assignable to `Scope`). This is least-privilege
@@ -99,6 +101,26 @@ Every feature must pass all of these. "It would be convenient" never overrides a
 - **P17 — Honest claims.** Every guarantee we advertise states its boundary in the same
   breath: what the leak scan cannot see, what `pick()` does not defend against, what "live"
   cannot do on which runtime. A security story that overclaims is itself a vulnerability.
+- **P18 — Conditional structure is a relation, not a mutable descriptor.** Requiredness
+  that depends on another knob (`EMAIL_SERVICE_TYPE` selecting smtp vs sendgrid, a
+  parameter required only when another is set, per-mode defaults/bounds) is expressed by
+  composition objects — `variants()`, `when()`, `rule()` — never by making descriptor
+  fields dynamic. Per-branch differences are *different descriptors*. Relations round-trip
+  as recursive tagged JSON (`relv1|` content-addressed) even though nesting is rejected in
+  v1. Discriminants and `when()` condition knobs are `snapshot`-only and eagerly resolved
+  in **every** bind mode; `rule()` runs at bind and pin, never at `get()`.
+- **P19 — Writes are operator-plane, input-typed, and write-through.** `set()` takes the
+  schema's *input* type (Standard Schema has no inverse — parsed values can never
+  round-trip), validates the raw, writes it verbatim, installs the parsed value into the
+  local cache (read-your-writes by construction), then bumps epoch. The provider contract
+  carries a versioned envelope (`{ raw, version? }`, `ifVersion` CAS) from day one —
+  last-write-wins is an acceptable default and an unacceptable ceiling. The scope line
+  that keeps DB config from becoming a remote-config SDK, as four testable clauses:
+  **pull-only** (no watch/subscribe/onChange ever; epoch is a number you compare),
+  **context-free reads** (a `get()` that takes per-request/per-user context is a flag SDK
+  — refuse), **uniform** (one value per process per knob), **operator-plane writes**
+  (`set()` is for admin panels, CLIs, migrations; request-path `set()` is using config as
+  state).
 
 ## 3. Pitfalls we must not (re)introduce
 
@@ -117,11 +139,39 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
   *Rule:* eager-over-bound-subset is the default; the lazy door is half-lazy (presence still
   eager); `bind.unchecked` is the only fully deferred form and is named to deter.
 - **Boot-validated green, invalid at 3am.** A `live` knob re-validates when its raw value
-  changes; an operator typo would make `get()` throw deep in request handling where nothing
-  catches config errors. *Rule:* invalid-after-boot defaults to **keep-last-good + report**
-  (`onInvalid` hook, `health()` observability); per-knob `"throw"` opt-in for
-  stale-is-worse-than-down values; keep-last-good degrades to a named `NoValidValueError`
-  when no valid value has ever existed in this process.
+  changes; an operator typo can make reads fail on paths that boot-validated green.
+  *Decision (author):* **current truth wins** — no magically inherited values. The knob
+  becomes *poisoned*: `get()` throws `InvalidLiveValueError` (`issues`, `lastValidAt`,
+  `invalidSince`, shared `incidentId`); `tryGet()` is the non-throwing form; `epoch` bumps
+  on the invalid *transition* (single clock — epoch consumers use `tryGet`); `onInvalid`
+  fires once per (knob, distinct invalid raw), receiving `{ rawDigest, length }` for
+  secrets. Keep-last-good is a **bind-site opt-in** —
+  `{ invalid: [keepLastGood(knob, { maxCoastMs })] }`, `maxCoastMs` required, past budget
+  → `CoastBudgetExceededError` — never a descriptor field (identity-class would make two
+  teams' staleness preferences a descriptor mismatch; cosmetic-class would hide a
+  behavioral field). `NoValidValueError` stays reserved for never-valid. Poisoned state
+  bypasses staleness memoization so recovery is one read, not one poll interval. The docs
+  state the trade in one honest sentence: throw-default converts a bad config push from
+  silent staleness into a loud partial outage lasting until the push is fixed.
+- **One bad knob must not 500 the whole site.** All-or-nothing pins would turn one invalid
+  *unused* knob into a 100% outage at the per-request pin. *Rule:* `snapshot()` never
+  throws wholesale — an invalid knob occupies an **error slot**; only `get()` of that knob
+  throws. Blast radius stays proportional to actual usage. (Restart asymmetry — eager bind
+  at boot still fails whole-process — is inherent and accepted: a restarted pod and a
+  running pod now at least fail on the *same values*.)
+- **Invalid is not unavailable.** A provider that answered with a bad value and a provider
+  that did not answer are different events. *Rule:* invalid value → the poisoned path
+  above; source down/unreadable → serve the cached value **within `maxStalenessMs`** (that
+  is the declared staleness budget the binder signed, not inherited state), beyond it →
+  `SourceUnavailableError` + `onSourceError` (never routed through `onInvalid`). Otherwise
+  the config store becomes a request-path availability dependency and fleet availability
+  = min(app, config DB).
+- **Health probes amplify config failures.** "Any live knob invalid" wired into readiness
+  takes every pod out of the LB simultaneously — connection failures instead of 500s.
+  *Rule:* `health()` distinguishes `valid | invalid-was-valid | never-valid | coasting`
+  (plus `lastThrownAt`/`throwCount` — "invalid but dormant" vs "actively failing" is the
+  operator's triage split); documented probe contract: liveness never consults knob
+  validity, readiness at most `never-valid`.
 - **Async validators detonating in sync paths.** Standard Schema's `validate()` may legally
   return a Promise, and async-ness can be input-dependent — one probe at bind proves
   nothing. *Rule:* every validation site (eager bind, lazy first-read, live re-validation)
@@ -209,6 +259,68 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
   redirect a knob's source at import time. *Rule:* there is no global provide; providers
   are supplied at bind, at the composition root, full stop.
 
+### Conditional config (variants) & writes
+
+- **`get()` precedence must never suggest `unify()` across sibling branches.** Same-key
+  different-descriptor across branches is *sanctioned* (that is how per-mode
+  defaults/bounds work — branches never co-bind); a naive key-collision check would fire
+  `DescriptorMismatchError` telling the user to merge two intentionally different
+  descriptors. *Rule:* normative lookup order — exact identity hit → inactive-branch
+  member → `InactiveVariantError` (a *subclass* of `UnboundKnobError`, so the three-way
+  contract is refined, not broken) → key collision vs direct/*active* knobs only →
+  `DescriptorMismatchError` → `UnboundKnobError`.
+- **A live discriminant is torn topology.** A branch switch mid-process means half a
+  request on smtp, half on sendgrid. *Rule:* discriminants and `when()` condition knobs
+  are `snapshot`-only, enforced at construction *and* at bind (`LiveDiscriminantError`) —
+  and `freshness` sits in the identity hash so a live twin cannot pass identity matching.
+  In `AsyncBinding`, the discriminant is pinned at `ready()` and exempt from staleness
+  re-reads; `set()` on it is a *staged* write (fleet-visible, locally inert) that takes
+  effect only via explicit `refresh()`, which re-reads discriminant + full active branch
+  as one coherent batch.
+- **Branch knobs bound directly are contradictory membership.** `bind([email, smtp.host])`
+  claims smtp.host is both always-required and branch-conditional. *Rule:*
+  `AmbiguousKnobMembershipError` at bind.
+- **Sibling-branch exclusivity is intra-group only.** Two different groups' active
+  branches can both claim `SMTP_PORT` with different descriptors. *Rule:* bind-time
+  conflict pass over the *active* set (error carries the variant context); bake checks the
+  cross-product of branch combinations statically.
+- **Defaults must not resurrect a dead subtree.** A condition knob living in an inactive
+  branch would resolve via its default and make its own group look active. *Rule:*
+  transitive inactivity is specced; nesting is rejected in v1 (`VariantsNestingError`)
+  but the relation wire format is recursive from day one, so enabling nesting later is a
+  flag, not a format break.
+- **Variants are client-ineligible in v1.** Baking would freeze a build-time branch choice
+  that runtime can silently contradict, and mixed-exposure branches would ship torn
+  half-branches. *Rule:* any variants member in a client target →
+  `VariantsInClientTargetError` (fail, never silently drop). The v2 escape hatch — an
+  *attested branch-freeze* recorded in the lockfile — is designed but not shipped.
+- **`set()` with parsed values cannot round-trip.** Standard Schema has no inverse; a
+  transforming schema breaks write-back forever. *Rule:* P19 — `set()` is input-typed, raw
+  written verbatim, parsed value cached.
+- **Invalidate-and-refetch breaks read-your-writes.** Re-reading a lagging replica after a
+  write serves the pre-write value to the operator who just saved. *Rule:* write-through
+  cache; never re-read as part of `set()`.
+- **Multi-knob writes tear durable state.** A crash between the discriminant write and its
+  branch values leaves the *database itself* saying smtp-with-no-host — every replica
+  poisons on next read. *Rule:* `setMany()` validates the post-state as a whole and is
+  atomic via provider `writeMany` (SQL transaction); without it, refuse by default —
+  `{ allowNonAtomic: true }` writes in dependency order (branch values first, discriminant
+  last) so a crash tears in the benign direction. Read-side branch gating never applies to
+  writes (staging inactive-branch values is the *safe* order).
+- **Write-time validation is writer-local.** A v1 replica's `set()` can write a value v2
+  replicas reject at read time (rolling-deploy schema skew) — and operators can bypass
+  `set()` entirely with raw SQL. *Rule:* documented plainly; containment = error slots +
+  `health()` + per-knob `keepLastGood` recommended for DB-sourced knobs.
+- **Hot-knob expiry is a thundering herd.** 500 concurrent requests one ms after staleness
+  expiry = 500 provider reads. *Rule:* per-key single-flight; expired reads block on the
+  one in-flight read so `maxStalenessMs` stays an honest hard bound (stale-while-revalidate
+  only ever as a loudly-named opt-in).
+- **The write path re-opens secret leaks.** `onInvalid(knob, raw, …)` pipes raw secrets to
+  log hooks; validator and DB-driver messages echo values; `set()` rethrows provider
+  errors to admin UIs. *Rule:* structural redaction for secret knobs — hooks receive
+  `{ rawDigest, length }`; core scrubs the raw from every surfaced message (best-effort,
+  documented); `WriteFailedError` carries a scrubbed cause.
+
 ### Bundling & bake
 
 - **DefinePlugin folds "wiring" into values.** Emitting static `process.env.KEY` in
@@ -241,6 +353,35 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
 - **Registry side effects.** Any runtime "all knobs" registry breaks tree-shaking and
   reintroduces import-order magic. *Rule:* enumeration happens only at bake time, from the
   explicit manifest. There is no runtime registry, period.
+- **The spread hides the attestation delta.** With a compose-only manifest
+  (`client: [...emailPublic]`), a dependency bump that adds a knob to `emailPublic` leaves
+  the manifest byte-identical — CODEOWNERS never fires, and the new knob ships to the
+  browser unreviewed. *Rule:* the manifest is compose-only *source*; the **attestation
+  artifact is a committed lockfile** (`config.manifest.lock.json` — RFC 8785 canonical,
+  sorted by identity hash, per-entry provenance including defining module / package
+  version and source refs, so "this knob became DB-mutable" shows up in review).
+  CODEOWNERS sits on the lockfile; `bake --check` is a frozen-diff CI gate
+  (`--frozen-lockfile` semantics) with the client-target delta rendered human-readably.
+  Feature modules own their knob groups next to their code; knob definitions *inside* the
+  manifest draw a lint warning (hygiene — the lockfile is the enforcement).
+- **The CI gate is adversary-triggerable.** `bake --check` runs on every PR and executes
+  the manifest import closure — including knob files inside dependency-bumped third-party
+  packages — which is the PR-#438 build-time-RCE class relocated into CI. *Rule:*
+  constrained execution is a security boundary in CI, not hygiene: no network, no fs
+  writes outside declared output, no CI-secret env reads, and the check job runs with
+  **zero credentials** (it needs only the checkout and the committed lockfile).
+- **Glob discovery captures the wrong knobs.** Repo-root globs pull sibling apps' secrets
+  into this app's enumeration, execute test fixtures with intentionally broken
+  descriptors, and order nondeterministically. *Rule:* import-graph or explicit package
+  lists are the documented discovery path; glob is an authoring convenience, workspace-
+  rooted with default excludes — and either way the expansion flows through the committed
+  lockfile, converting every discovery mistake into a reviewable diff.
+- **A variants group is one bundle unit.** Importing the group retains *all* branch
+  descriptors and schemas (bundlers cannot DCE properties of a shared object) — a
+  console-branch browser build would still carry smtp+sendgrid schema chains. *Rule:*
+  split heavy branches into their own files; annotate constructors `/* @__PURE__ */`;
+  baked clients are immune (shim only), enforced by the client-graph lint (no `*.knobs.ts`
+  reachable from a client entry).
 
 ## 4. Security model
 
@@ -302,6 +443,9 @@ gate.
   different sources plus overrides, one layer.
 - **No runtime registry, no derived-knob expression language, no reachability-analysis
   codegen** (the manifest is explicit).
+- **DB-backed config stays behind the P19 scope line** — pull-only, context-free, uniform,
+  operator-plane writes. The moment any of the four clauses bends, it is a feature-flag /
+  remote-config SDK and belongs in a different library.
 
 ## 6. Open decisions
 
@@ -313,6 +457,16 @@ gate.
 - Server-target zero-runtime-dep vs runtime validation: they are mutually exclusive for
   runtime-varying values (validators don't serialize). Two-tier story: baked constants =
   zero-dep; runtime values = tiny runtime core. Say it plainly.
+- Nested `variants()`/`when()`: rejected in v1 (`VariantsNestingError`, compose two flat
+  groups) — but the recursive tagged wire format ships from day one so enabling nesting is
+  a flag, not a format break.
+- Client escape hatch for variants: v1 = whole-group ineligible; v2 design = *attested
+  branch-freeze* (`{ group, frozenBranch }` in the manifest, frozen discriminant value
+  recorded in the lockfile so the attestation diff shows it).
+- Stale-while-revalidate for async reads: not in v1 (expired reads block on a single-flight
+  re-read so `maxStalenessMs` stays honest); only ever as a loudly-named opt-in.
+- `cfg.update(knob, fn, { retries })` read-modify-write helper: deferred — it is a
+  five-line userland loop over `get`/`set`/`WriteConflictError`.
 - Final naming (see header).
 
 ## 7. Relationship to StitchAPI
