@@ -4,3 +4,8 @@ node_modules/
 .DS_Store
 *.tsbuildinfo
 next-env.d.ts
+
+# Library build + tooling output
+dist/
+coverage/
+*.log

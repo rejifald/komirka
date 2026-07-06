@@ -1,0 +1,9 @@
+dist/
+coverage/
+node_modules/
+pnpm-lock.yaml
+site/
+.claude/
+LICENSE
+# Hand-authored design docs are wrapped deliberately; don't let Prettier reflow them.
+*.md
