@@ -1,6 +1,6 @@
 ---
 title: Database-backed config (async + writes)
-description: Serve knobs from a database — per-request pins with bounded staleness, plus operator-plane writes with write-through caching and optimistic concurrency.
+description: Serve zernos from a database — per-request pins with bounded staleness, plus operator-plane writes with write-through caching and optimistic concurrency.
 ---
 
 ## The setup
@@ -12,10 +12,10 @@ The tool is the **async binding**: live semantics with async transport plus oper
 ## The provider contract
 
 ```ts
-import type { JsonValue } from "komirka";
+import type { Json } from "komirka";
 
 type ReadSlot =
-  | { raw: JsonValue; version?: string }   // present
+  | { raw: Json; version?: string }   // present
   | { absent: true }                       // definitively absent
   | { error: unknown };                    // per-key store failure (final — provider retries transients internally)
 
@@ -25,8 +25,8 @@ interface AsyncProvider {
   limits?: { maxReadBatch?: number; maxWriteBatch?: number; maxConcurrentBatches?: number };
   read(keys: readonly string[]): Promise<readonly ReadSlot[]>;
   // INPUT-ALIGNED: result[i] answers keys[i]; a length mismatch is ProviderContractError.
-  write?(entries: ReadonlyArray<{ key: string; raw: JsonValue; ifVersion?: string }>):
-    Promise<ReadonlyArray<{ version?: string; storedRaw?: JsonValue }>>;
+  write?(entries: ReadonlyArray<{ key: string; raw: Json; ifVersion?: string }>):
+    Promise<ReadonlyArray<{ version?: string; storedRaw?: Json }>>;
   capabilities?: {
     versionTokens?: "unique" | "coarse" | "none";   // timestamps are NOT versions
     strongRead?: boolean; echoWrite?: boolean; normalizes?: boolean;
@@ -37,11 +37,11 @@ interface AsyncProvider {
 }
 ```
 
-The contract is batch-shaped all the way down — there is deliberately no single-key method. `get()` and `set()` ride the same path as single-element batches that core unwraps, so the binding surface never changes and a provider has exactly one read path and one write path to get right: the batch path is the tested path. Results are **input-aligned** — `result[i]` answers `keys[i]` — and a length mismatch is a `ProviderContractError`, surfaced loudly instead of values silently attributed to the wrong knob.
+The contract is batch-shaped all the way down — there is deliberately no single-key method. `unwrap()` and `set()` ride the same path as single-element batches that core unwraps, so the binding surface never changes and a provider has exactly one read path and one write path to get right: the batch path is the tested path. Results are **input-aligned** — `result[i]` answers `keys[i]` — and a length mismatch is a `ProviderContractError`, surfaced loudly instead of values silently attributed to the wrong zerno.
 
 The `id` is not decoration: it is what the lockfile records for bake-covered targets, so an anonymous impl is a bind-time error there. And `color` is load-bearing type information — leaving it untyped is a compile error, because coloring is how `bind` computes its result type.
 
-Providers also carry an optional `class` field: `class?: "config"` (the default) marks an ordinary configuration store, while `class: "secret"` marks the dedicated `SecretProvider`, covered on the Secrets page. A general (config-class) provider whose store legitimately holds secrets must declare `holdsSecrets: true` to be wireable to secret-exposure knobs. The pairing rule cuts both ways: a secret-class provider serves **only** secret knobs, and a provider-sourced secret knob requires either a secret-class provider or a `holdsSecrets` general provider (env- and file-sourced secrets are unaffected). `holdsSecrets` inherits the **full** secret obligation set — error quarantine, result reshaping, the secret conformance profile, echo-verify disabled for those knobs — the opt-in buys pairing legality, never reduced hygiene, and it lands in a flagged section of the lockfile.
+Providers also carry an optional `class` field: `class?: "config"` (the default) marks an ordinary configuration store, while `class: "secret"` marks the dedicated `SecretProvider`, covered on the Secrets page. A general (config-class) provider whose store legitimately holds secrets must declare `holdsSecrets: true` to be wireable to secret-exposure zernos. The pairing rule cuts both ways: a secret-class provider serves **only** secret zernos, and a provider-sourced secret zerno requires either a secret-class provider or a `holdsSecrets` general provider (env- and file-sourced secrets are unaffected). `holdsSecrets` inherits the **full** secret obligation set — error quarantine, result reshaping, the secret conformance profile, echo-verify disabled for those zernos — the opt-in buys pairing legality, never reduced hygiene, and it lands in a flagged section of the lockfile.
 
 The envelope is versioned from day one: a present slot may carry a `version` (a SQL row version, a DynamoDB condition attribute, an etcd revision), and each `write` entry may carry `ifVersion` for compare-and-set. Providers without versions still work — they degrade to **documented** last-write-wins. That is an acceptable default and an unacceptable ceiling, so the seam exists even if your first provider ignores it.
 
@@ -51,7 +51,7 @@ The heart of the contract is a two-sided treaty. Each side's list is short, and 
 
 - Keys in a read batch are unique, and batches are never empty.
 - A batch never exceeds the declared `limits` — chunking is exclusively core's job. A provider must **never** split a batch internally: internal chunking silently voids `consistentReads` and resurrects the torn-pair bug (a discriminant in one chunk, its branch values in another). Read chunks fan out in parallel, bounded by `maxConcurrentBatches` (default ~4) — which is what makes a `maxReadBatch: 1` store like Vault KV v2 usable at `ready()` with 20 secrets — while write chunks stay sequential and dependency-ordered.
-- Batches are **segregated by exposure**: secret and public knobs never share one wire batch, even on the same provider — a batch-level error message on the public side must never be able to enumerate secret rows.
+- Batches are **segregated by exposure**: secret and public zernos never share one wire batch, even on the same provider — a batch-level error message on the public side must never be able to enumerate secret rows.
 - Duplicate keys in a write batch are rejected before any I/O happens.
 - Multi-entry writes are issued **only** to providers declaring `atomicWrites: true`. For everyone else, core sequences single-entry writes itself, in dependency order — branch values first, discriminant last — stopping at the first failure. Dependency ordering stays core's knowledge; it is never an unstated obligation on a provider's loop order.
 
@@ -123,11 +123,11 @@ A wrapper like this must not declare `consistentReads` — each key is its own r
 ## Wiring it up
 
 ```ts
-import { knob } from "komirka";
+import { zerno } from "komirka";
 import { bind, provider } from "komirka/async";
 import { z } from "zod";
 
-export const rateLimit = knob({
+export const rateLimit = zerno({
   key: "api.rateLimit",
   schema: z.coerce.number().int().positive(),
   doc: "Requests per minute, per API key.",
@@ -136,7 +136,7 @@ export const rateLimit = knob({
   freshness: "live",
 });
 
-export const corsOrigins = knob({
+export const corsOrigins = zerno({
   key: "http.corsOrigins",
   schema: z.string().transform((s) => s.split(",").map((o) => o.trim())),
   doc: "Comma-separated allowed origins.",
@@ -155,9 +155,9 @@ const cfg = bind(
 await cfg.ready();
 ```
 
-`bind` is inert — it never performs I/O. Each `provider()` entry is async-colored, so the result types as an `AsyncBinding` automatically; there is no separate async constructor. `await cfg.ready()` is the eager startup line: one batched `read` (chunked against `limits.maxReadBatch` when needed), then resolve and validate every bound knob, failing fast with a single aggregated `MissingConfigError` that names everything wrong at once, not just the first thing.
+`bind` is inert — it never performs I/O. Each `provider()` entry is async-colored, so the result types as an `AsyncBinding` automatically; there is no separate async constructor. `await cfg.ready()` is the eager startup line: one batched `read` (chunked against `limits.maxReadBatch` when needed), then resolve and validate every bound zerno, failing fast with a single aggregated `MissingConfigError` that names everything wrong at once, not just the first thing.
 
-Wiring is per entry, so one binding mixes transports freely. A knob that should read Parameter Store but fall back to an env var spells the whole chain out — `chain` is the only full-replacement wiring, and if the knob declared fallback refs of its own, errors will list exactly what the chain dropped:
+Wiring is per entry, so one binding mixes transports freely. A zerno that should read Parameter Store but fall back to an env var spells the whole chain out — `chain` is the only full-replacement wiring, and if the zerno declared fallback refs of its own, errors will list exactly what the chain dropped:
 
 ```ts
 import { chain } from "komirka";
@@ -182,14 +182,14 @@ app.use(async (req, _res, next) => {
 });
 
 app.get("/orders", (req, res) => {
-  const limit = req.config.get(rateLimit); // sync and stable for the whole request
+  const limit = req.config.unwrap(rateLimit); // sync and stable for the whole request
   // ...
 });
 ```
 
-For scripts and jobs there is the colored read: `await cfg.get(rateLimit)`.
+For scripts and jobs there is the colored read: `await cfg.unwrap(rateLimit)`.
 
-`maxStalenessMs` is an honest hard bound, not a hint. An expired key **blocks** on a re-read — there is no silent stale-while-revalidate serving old values while claiming freshness. Expiry under load coalesces: a hot knob expiring during a traffic spike triggers **one** provider read via per-key single-flight, not one per request.
+`maxStalenessMs` is an honest hard bound, not a hint. An expired key **blocks** on a re-read — there is no silent stale-while-revalidate serving old values while claiming freshness. Expiry under load coalesces: a hot zerno expiring during a traffic spike triggers **one** provider read via per-key single-flight, not one per request.
 
 "Coherent" is a claim about the store, and core does not take it on faith. `consistentReads` is a declared capability demoted from honor-claim to round-trip optimization: when a provider declares it and a coherence-requiring read fits in one `maxReadBatch` batch, that single `read()` call is one consistent cut and core is done in one round trip. When the capability is falsy — or core had to chunk the read across batches — core buys coherence itself with a bounded re-check loop: read the batch, re-read the discriminant, and retry (up to 3×) if it moved. **DynamoDB pitfall:** `BatchGetItem` is per-item consistency, not one cut — a provider built on it must declare `consistentReads: false` and let the re-check loop do its job, or switch to `TransactGetItems` and declare `maxReadBatch: 100`.
 
@@ -204,14 +204,14 @@ Three rules make `set()` predictable.
 **It takes the schema's input type — the raw — not the parsed output.** Standard Schema has no inverse: given `z.string().transform((s) => s.split(","))`, no library can turn the array back into the string — the transform only runs forward. So the caller owns the raw representation, and core never serializes or inverts:
 
 ```ts
-snap.get(corsOrigins);
+snap.unwrap(corsOrigins);
 // ["https://app.example.com"]  ← parsed output
 
 await cfg.set(corsOrigins, "https://app.example.com, https://admin.example.com");
 //                          ↑ raw input, exactly what a source would supply
 ```
 
-The pipeline: validate the raw against the knob's schema (an invalid write is rejected before the provider ever sees it) → `provider.write([{ key, raw }])` — a single-element batch — verbatim → install the **parsed** value into the local cache → bump the epoch.
+The pipeline: validate the raw against the zerno's schema (an invalid write is rejected before the provider ever sees it) → `provider.write([{ key, raw }])` — a single-element batch — verbatim → install the **parsed** value into the local cache → bump the epoch.
 
 **Write-through, never invalidate-and-refetch.** Installing the parsed value locally is what guarantees read-your-writes on the writing replica, even when the provider's read path lags its write path (read replicas, eventually-consistent reads). Refetching after a write could hand back the pre-write value from a lagging reader.
 
@@ -221,13 +221,13 @@ The pipeline: validate the raw against the knob's schema (an invalid write is re
 | Every other replica | Within `maxStalenessMs` plus provider replication lag |
 | Concurrent writers | Last-write-wins unless `ifVersion` is used; divergence bounded by `maxStalenessMs` |
 
-**It targets the highest-precedence ref in the knob's wiring.** A write that lands below a shadowing ref would change every replica except the operator's own — the one machine where the change appears to work is the one machine where it hasn't. Forbidden:
+**It targets the highest-precedence ref in the zerno's wiring.** A write that lands below a shadowing ref would change every replica except the operator's own — the one machine where the change appears to work is the one machine where it hasn't. Forbidden:
 
 ```ts
 import { chain } from "komirka";
 import { file } from "komirka/async";
 
-const logLevel = knob({
+const logLevel = zerno({
   key: "log.level",
   schema: z.enum(["debug", "info", "warn", "error"]),
   default: "info",
@@ -243,7 +243,7 @@ await cfg.set(logLevel, "debug");
 // which shadows provider "pg-config". Remove the local override or write to the file.
 ```
 
-The binding records which ref supplied each value, so the refusal names the shadowing ref precisely — the same provenance that `explain()` and `tryGet` report.
+The binding records which ref supplied each value, so the refusal names the shadowing ref precisely — the same provenance that `explain()` and `safe` report.
 
 ## Verifying writes: did the store keep what you gave it?
 
@@ -258,7 +258,7 @@ catches that class.
 
 ```ts
 const result = await cfg.set(endpointUrl, url, { ifVersion: version, verify: "revert" });
-// SetResult: { version, outcome: "verified" | "inconclusive" | "superseded", reason? }
+// SetResult: { version, outcome: "installed" | "verified" | "inconclusive" | "superseded", reason? }
 ```
 
 **How verification works, in order of preference:**
@@ -276,7 +276,7 @@ const result = await cfg.set(endpointUrl, url, { ifVersion: version, verify: "re
 canonical-JSON equality for JSON raws. A JSONB store reordering keys therefore passes
 canonical comparison in report mode — but such a store should still declare
 `normalizes: true`, which keeps revert gated off. Truncation, charset mangling, and
-number-precision loss all fail — they change the canonical form. A per-knob `equals()`
+number-precision loss all fail — they change the canonical form. A per-zerno `equals()`
 hook is the escape hatch for stores whose rewrites are semantic-preserving but
 comparison-visible.
 
@@ -293,13 +293,13 @@ comparison-visible.
   writer's local cache entry is immediately expired so it converges with the fleet
   instead of split-braining until its own staleness window.
 
-**Secret knobs verify differently.** Echo-verify is disabled for them regardless of
+**Secret zernos verify differently.** Echo-verify is disabled for them regardless of
 provider — the secret write result carries no `storedRaw`, so there is nothing raw to
 compare. Precedence becomes: **version-token equality** first (the write's version equals
 the read-back version ⇒ `verified`, with zero raw comparison; a *newer* read-back version
 ⇒ the non-throwing `superseded` — a concurrent rotation is not corruption), then **digest
 read-back** via `strongRead`, then the honest **unverified** outcome — the write installs,
-and a per-knob `requireVerifiedWrites` refuses it where policy demands. `WriteMangledError`
+and a per-zerno `requireVerifiedWrites` refuses it where policy demands. `WriteMangledError`
 for a secret carries expected/actual digests plus `nowLiveDigest`, never raw values.
 
 **Auto-revert (`verify: "revert"`) restores the previous value on confirmed mangling — and
@@ -317,7 +317,7 @@ the full precondition bundle, checked at the `set()` call with a typed
   predecessor;
 - `rawPrev` exists (a *create* has nothing to revert to — downgraded to report) and
   re-validates before being written back;
-- **secret knobs refuse revert unless opted in per knob** — auto-revert of a credential
+- **secret zernos refuse revert unless opted in per zerno** — auto-revert of a credential
   rotation silently puts the *leaked* key back in service; the error's `nowLive` field
   and previous-value digest exist so a rotation-undo is unmissable.
 
@@ -341,7 +341,7 @@ Read-modify-write without `ifVersion` loses updates silently: two admins both re
 async function bumpRateLimit(delta: number) {
   for (let attempt = 0; attempt < 3; attempt++) {
     const snap = await cfg.snapshot();
-    const current = snap.get(rateLimit);
+    const current = snap.unwrap(rateLimit);
     const { version } = snap.explain(rateLimit); // the provider version this cache last saw
     try {
       return await cfg.set(rateLimit, String(current + delta), { ifVersion: version });
@@ -354,14 +354,14 @@ async function bumpRateLimit(delta: number) {
 }
 ```
 
-## Multi-knob updates: `setMany()`
+## Multi-zerno updates: `setMany()`
 
-An admin panel's Save button rarely writes one knob. `setMany()` validates the **post-state as a whole** — every schema, variant completeness, cross-knob rules — before a single byte reaches the provider. A plain `set()` validates against its own knob's schema only; that is the documented difference.
+An admin panel's Save button rarely writes one zerno. `setMany()` validates the **post-state as a whole** — every schema, variant completeness, cross-zerno rules — before a single byte reaches the provider. A plain `set()` validates against its own zerno's schema only; that is the documented difference.
 
 ```ts
 await cfg.setMany([
-  { knob: rateLimit, raw: "200", ifVersion: rlVersion },
-  { knob: corsOrigins, raw: "https://app.example.com,https://admin.example.com" },
+  { zerno: rateLimit, raw: "200", ifVersion: rlVersion },
+  { zerno: corsOrigins, raw: "https://app.example.com,https://admin.example.com" },
 ]);
 ```
 
@@ -369,13 +369,13 @@ Atomicity follows the declared capability. Against a provider with `atomicWrites
 
 ## Switching a variant from the database
 
-Discriminant knobs are `freshness: "snapshot"` by rule: pinned at `ready()` and exempt from staleness re-reads. A database flip must never switch your process topology mid-flight.
+Discriminant zernos are `freshness: "snapshot"` by rule: pinned at `ready()` and exempt from staleness re-reads. A database flip must never switch your process topology mid-flight.
 
 `set()` on a discriminant is therefore a **staged write**: it writes for the fleet but does not install locally and does not bump the epoch. The local binding adopts it only through an explicit `refresh()`, which re-reads the discriminant and its full active branch as one coherence-requiring batched read — one consistent cut when the provider's `consistentReads` holds and the branch fits in one batch, the bounded discriminant re-check loop otherwise. Given a payments variant group:
 
 ```ts
 // 1. Stage the target branch's values — legal while the branch is inactive.
-//    Writes validate against the target knob's own branch schema;
+//    Writes validate against the target zerno's own branch schema;
 //    InactiveVariantError is read-side only and never applies to writes.
 await cfg.set(adyenApiKey, "aq_live_9f…");
 await cfg.set(adyenMerchant, "ACME_EU");
@@ -395,26 +395,26 @@ Four different events, four different behaviors — never blurred together:
 
 | Event | Behavior | Error / hook |
 | --- | --- | --- |
-| Re-read returns an **invalid** value | Knob is poisoned: pins still succeed, the knob occupies an error slot | `InvalidLiveValueError` on `get`; `onInvalid` fires once per distinct invalid raw |
+| Re-read returns an **invalid** value | Zerno is poisoned: pins still succeed, the zerno occupies an error slot | `InvalidLiveValueError` on `unwrap`; `onInvalid` fires once per distinct invalid raw |
 | An `{ error }` **slot** answers one key | Per-key unavailable: that key serves its cached value within `maxStalenessMs`, beyond it throws — the other keys in the batch are untouched | `SourceUnavailableError` naming the key; `onSourceError` |
 | Provider **throws** the whole call | Provider-down for every requested key: each serves its cached value within `maxStalenessMs` (that budget is the contract, not inherited state); beyond it, throw | `SourceUnavailableError`; `onSourceError` — never routed through `onInvalid` |
 | **Write** fails | Cache untouched, no epoch bump, core never retries (no loops — the provider or caller retries) | `WriteFailedError` with a scrubbed cause |
 
-The slot-versus-throw split is deliberate: one poisoned row must not DoS every knob on the provider. A single unreadable key degrades exactly that key; only connection-level failure degrades them all. And an `{ error }` slot is final — the provider already retried transients internally, so core adds no retry loop on top. One more rule for secret-class and `holdsSecrets` providers: their errors are **quarantined** — never propagated as error objects or `cause` chains, with `SourceUnavailableError` carrying only `providerId`, `key`, `errorName`, and a `messageDigest` — because a store client's own connection error can embed the provider's credential in its message, which no knob-value scrub can find.
+The slot-versus-throw split is deliberate: one poisoned row must not DoS every zerno on the provider. A single unreadable key degrades exactly that key; only connection-level failure degrades them all. And an `{ error }` slot is final — the provider already retried transients internally, so core adds no retry loop on top. One more rule for secret-class and `holdsSecrets` providers: their errors are **quarantined** — never propagated as error objects or `cause` chains, with `SourceUnavailableError` carrying only `providerId`, `key`, `errorName`, and a `messageDigest` — because a store client's own connection error can embed the provider's credential in its message, which no zerno-value scrub can find.
 
-Because `set()` validates before writing, a poisoned slot rarely comes from your own admin panel — it arrives via raw SQL edits or schema skew (below). Current truth wins: the invalid value poisons exactly that knob.
+Because `set()` validates before writing, a poisoned slot rarely comes from your own admin panel — it arrives via raw SQL edits or schema skew (below). Current truth wins: the invalid value poisons exactly that zerno.
 
 ```ts
 const snap = await cfg.snapshot(); // never throws wholesale
-snap.get(rateLimit);
+snap.unwrap(rateLimit);
 // InvalidLiveValueError: "api.rateLimit" invalid since 2026-07-04T10:12:03Z (incident 01JZK…):
 //   expected positive integer, got "unlimited". Last valid value observed at 10:07:41Z.
-snap.tryGet(rateLimit); // { ok: false, error } — the non-throwing form
+snap.safe(rateLimit); // { ok: false, error } — the non-throwing form
 ```
 
-Every other knob keeps working; blast radius is proportional to actual usage of the broken one. Poisoned state also bypasses staleness memoization — the next read re-reads immediately, so recovery lands within one read of the fix, not one `maxStalenessMs`.
+Every other zerno keeps working; blast radius is proportional to actual usage of the broken one. Poisoned state also bypasses staleness memoization — the next read re-reads immediately, so recovery lands within one read of the fix, not one `maxStalenessMs`.
 
-Where coasting beats throwing, opt in at the bind site (never in the descriptor — the same knob may deserve different policies in different apps):
+Where coasting beats throwing, opt in at the bind site (never in the descriptor — the same zerno may deserve different policies in different apps):
 
 ```ts
 import { keepLastGood } from "komirka";
@@ -432,20 +432,20 @@ const cfg = bind(
 // past the coast budget → CoastBudgetExceededError
 ```
 
-`health()` reports per knob: `"valid" | "invalid-was-valid" | "never-valid" | "coasting"`, plus `lastValidAt`, `lastInvalidAt`, `lastThrownAt`, `throwCount` — wire it into your health endpoint.
+`health()` reports per zerno: `"valid" | "invalid-was-valid" | "never-valid" | "coasting"`, plus `lastValidAt`, `lastInvalidAt`, `lastThrownAt`, `throwCount` — wire it into your health endpoint.
 
 ## Reacting to change: epochs, not events
 
-There are no change events. The epoch is a number you compare — and it also bumps on the invalid transition, which is why epoch consumers reach for `tryGet`:
+There are no change events. The epoch is a number you compare — and it also bumps on the invalid transition, which is why epoch consumers reach for `safe`:
 
 ```ts
-let pool = makePool((await cfg.snapshot()).get(poolSettings));
+let pool = makePool((await cfg.snapshot()).unwrap(poolSettings));
 let seen = cfg.epoch(poolSettings);
 
 app.use(async (req, _res, next) => {
   const now = cfg.epoch(poolSettings);
   if (now !== seen) {
-    const result = (await cfg.snapshot()).tryGet(poolSettings);
+    const result = (await cfg.snapshot()).safe(poolSettings);
     if (result.ok) {
       const old = pool;
       pool = makePool(result.value);
@@ -459,19 +459,19 @@ app.use(async (req, _res, next) => {
 
 ## Rolling deploys and schema skew
 
-`set()` validates against the **calling process's** schema version. During a rolling deploy, a v1 replica can write a value that v2 replicas reject at read time — poisoning that slot on half the fleet. Containment is the story above: error slots keep the blast radius to one knob, `health()` makes the skew visible per replica, and `keepLastGood` is recommended for DB-sourced knobs precisely because admin writes and deploys overlap in real fleets.
+`set()` validates against the **calling process's** schema version. During a rolling deploy, a v1 replica can write a value that v2 replicas reject at read time — poisoning that slot on half the fleet. Containment is the story above: error slots keep the blast radius to one zerno, `health()` makes the skew visible per replica, and `keepLastGood` is recommended for DB-sourced zernos precisely because admin writes and deploys overlap in real fleets.
 
 ## Secrets in the database
 
-`set()` on an `exposure: "secret"` knob is allowed — refusing would push operators to raw SQL with zero validation, which is strictly worse. Redaction is structural, not advisory: `onInvalid` receives `{ rawDigest, length }` and never the raw; core substring-scrubs the raw value out of every validator and provider error message it surfaces (best-effort, and documented as such); `WriteFailedError` carries a scrubbed cause. And `bake` never resolves secret values, so a DB-stored secret cannot reach a client bundle by construction.
+`set()` on an `exposure: "secret"` zerno is allowed — refusing would push operators to raw SQL with zero validation, which is strictly worse. Redaction is structural, not advisory: `onInvalid` receives `{ rawDigest, length }` and never the raw; core substring-scrubs the raw value out of every validator and provider error message it surfaces (best-effort, and documented as such); `WriteFailedError` carries a scrubbed cause. And `bake` never resolves secret values, so a DB-stored secret cannot reach a client bundle by construction.
 
 ## What this is not
 
 Four clauses keep database-backed config from mutating into a remote-config SDK:
 
 1. **Pull-only.** No `watch`, no `subscribe`, no `onChange` — ever. The epoch is a number you compare, not an event you receive.
-2. **Context-free reads.** The moment `get()` takes a per-request or per-user context, it is a feature-flag SDK. We refuse.
-3. **Uniform.** One value per process per knob, never per-caller.
+2. **Context-free reads.** The moment `unwrap()` takes a per-request or per-user context, it is a feature-flag SDK. We refuse.
+3. **Uniform.** One value per process per zerno, never per-caller.
 4. **Writes are operator-plane.** `set()` exists for admin panels, CLIs, and migrations. The litmus test: if `set()` appears in a request handler, config is being used as application state — use a database library.
 
 ## Testing staleness

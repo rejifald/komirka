@@ -1,9 +1,9 @@
 ---
 title: Live config on Kubernetes
-description: The one honest live-reload story — ConfigMap volume mounts, poll-on-read file knobs, per-request pins, epoch-keyed pool rebuilds, keep-last-good, and a liveness probe.
+description: The one honest live-reload story — ConfigMap volume mounts, poll-on-read file zernos, per-request pins, epoch-keyed pool rebuilds, keep-last-good, and a liveness probe.
 ---
 
-The house rule is: **if it can change while the process runs, it's state, not config.** The one declared exception is a re-readable source you opted into with `freshness: "live"` — and on Kubernetes there is exactly one re-readable source you get for free: a volume-mounted file. This page walks the whole path end to end: ConfigMap/Secret mount, live file knobs, per-request pinning, pool rebuilds keyed on `epoch()`, what happens when a rotation goes bad — current truth wins, with `keepLastGood` as the per-knob opt-in — and a `health()` report wired to probes that can't turn one bad push into a crash loop.
+The house rule is: **if it can change while the process runs, it's state, not config.** The one declared exception is a re-readable source you opted into with `freshness: "live"` — and on Kubernetes there is exactly one re-readable source you get for free: a volume-mounted file. This page walks the whole path end to end: ConfigMap/Secret mount, live file zernos, per-request pinning, pool rebuilds keyed on `epoch()`, what happens when a rotation goes bad — current truth wins, with `keepLastGood` as the per-zerno opt-in — and a `health()` report wired to probes that can't turn one bad push into a crash loop.
 
 ## Why env vars cannot do this
 
@@ -24,7 +24,7 @@ Edit the ConfigMap and nothing happens to a running pod. A process's OS environm
 That's why declaring it is a mistake the library points out:
 
 ```ts
-const logLevel = knob({
+const logLevel = zerno({
   key: "LOG_LEVEL",
   schema: z.enum(["debug", "info", "warn", "error"]),
   exposure: "public",
@@ -74,13 +74,13 @@ volumeMounts:
 
 Mount the directory, not individual keys via `subPath`.
 
-## Declare the live knobs
+## Declare the live zernos
 
 ```ts
 import { z } from "zod";
-import { knob, defineKnobs } from "komirka";
+import { zerno, defineZernos } from "komirka";
 
-export const logLevel = knob({
+export const logLevel = zerno({
   key: "LOG_LEVEL",
   schema: z.enum(["debug", "info", "warn", "error"]),
   doc: "Runtime log verbosity; tunable without a rollout",
@@ -89,7 +89,7 @@ export const logLevel = knob({
   freshness: "live",
 });
 
-export const dbHost = knob({
+export const dbHost = zerno({
   key: "DB_HOST",
   schema: z.string().min(1),
   doc: "Postgres host; the platform team rotates it together with DB_PASSWORD",
@@ -98,7 +98,7 @@ export const dbHost = knob({
   freshness: "live",
 });
 
-export const dbPassword = knob({
+export const dbPassword = zerno({
   key: "DB_PASSWORD",
   schema: z.string().min(16),
   doc: "Postgres password; rotated together with DB_HOST",
@@ -107,7 +107,7 @@ export const dbPassword = knob({
   freshness: "live",
 });
 
-export const dbKnobs = defineKnobs([dbHost, dbPassword]);
+export const dbZernos = defineZernos([dbHost, dbPassword]);
 ```
 
 Descriptors stay inert: declaring `freshness: "live"` performs zero I/O and starts no watcher. Nothing happens until you bind.
@@ -120,24 +120,24 @@ import { bind } from "komirka/node";
 export const live = bind([logLevel, dbHost, dbPassword], {
   maxStalenessMs: 2_000, // default is ~1s for file refs
   onInvalid(k, _raw, issues) {
-    // Observation plane: fires once per (knob, distinct invalid raw),
-    // not once per read. By the time it fires the knob is poisoned and
+    // Observation plane: fires once per (zerno, distinct invalid raw),
+    // not once per read. By the time it fires the zerno is poisoned and
     // reads of it throw; the hook and those errors share an incidentId,
     // so this page and the request failures join in your logs.
-    // For secret knobs, _raw is { rawDigest, length } — never the value.
+    // For secret zernos, _raw is { rawDigest, length } — never the value.
     alerting.page("config-invalid", { key: k.key, issueCount: issues.length });
   },
 });
-// Coloring: these entries hold live knobs and nothing async, so bind's
+// Coloring: these entries hold live zernos and nothing async, so bind's
 // result type is LiveBinding — a type view deliberately NOT assignable
 // where a Snapshot is expected.
 ```
 
-Note what the bind call does *not* contain: a source list. The entries are **bare** — each knob already declares its file ref, and under the `komirka/node` entry point bare entries resolve against the runtime's natural defaults (`process.env` and the filesystem). The declared paths *are* the mount paths, so there is nothing to rewire. When a deployment does need different wiring, that's a per-entry combinator — `file(dbHost, "/etc/other-mount/DB_HOST")` patches the declared file ref in place — never a global source list. (Under the core `"komirka"` bind, which supplies no natural defaults, these bare file refs would refuse to bind with `NoWiringError` — that refusal is the browser bundle's structural guarantee, and the reason this page imports `bind` from `komirka/node`.)
+Note what the bind call does *not* contain: a source list. The entries are **bare** — each zerno already declares its file ref, and under the `komirka/node` entry point bare entries resolve against the runtime's natural defaults (`process.env` and the filesystem). The declared paths *are* the mount paths, so there is nothing to rewire. When a deployment does need different wiring, that's a per-entry combinator — `file(dbHost, "/etc/other-mount/DB_HOST")` patches the declared file ref in place — never a global source list. (Under the core `"komirka"` bind, which supplies no natural defaults, these bare file refs would refuse to bind with `NoWiringError` — that refusal is the browser bundle's structural guarantee, and the reason this page imports `bind` from `komirka/node`.)
 
-Binding is still eager over the bound subset: if the volume isn't mounted, boot dies right here with one aggregated `MissingConfigError` naming every missing knob — not three crashes spread over the first hour of traffic.
+Binding is still eager over the bound subset: if the volume isn't mounted, boot dies right here with one aggregated `MissingConfigError` naming every missing zerno — not three crashes spread over the first hour of traffic.
 
-After that, freshness is **poll-on-read**. `live.get(logLevel)` re-reads the raw file only if the last read is older than `maxStalenessMs`, and re-runs the validator only when the raw bytes actually changed (memoize-by-raw — zod runs once per rotation, not once per request). There are no background loops, timers, or `fs.watch` handles in core, ever: a knob nobody reads is never re-read, and an idle process does exactly nothing.
+After that, freshness is **poll-on-read**. `live.unwrap(logLevel)` re-reads the raw file only if the last read is older than `maxStalenessMs`, and re-runs the validator only when the raw bytes actually changed (memoize-by-raw — zod runs once per rotation, not once per request). There are no background loops, timers, or `fs.watch` handles in core, ever: a zerno nobody reads is never re-read, and an idle process does exactly nothing.
 
 ## Pin a Snapshot per request
 
@@ -150,12 +150,12 @@ app.use((req, _res, next) => {
 });
 
 app.get("/orders", (req, res) => {
-  const level = req.cfg.get(logLevel); // same answer for the whole request
+  const level = req.cfg.unwrap(logLevel); // same answer for the whole request
   // ...
 });
 ```
 
-Everything downstream of the middleware sees one coherent world. And because cross-package APIs are typed against `Snapshot` and `Scope` — never `LiveBinding` — the compiler stops you from handing a factory something that can shift under it: pass `req.cfg` or `req.cfg.pick(dbKnobs)`, not `live`.
+Everything downstream of the middleware sees one coherent world. And because cross-package APIs are typed against `Snapshot` and `Scope` — never `LiveBinding` — the compiler stops you from handing a factory something that can shift under it: pass `req.cfg` or `req.cfg.pick(dbZernos)`, not `live`.
 
 ## Rotating pairs without tearing
 
@@ -163,19 +163,19 @@ The platform team rotates `DB_HOST` and `DB_PASSWORD` together, in one update to
 
 ```ts
 // TORN PAIR — two independent reads can land on opposite sides of a re-read:
-const host = live.get(dbHost);          // old host
+const host = live.unwrap(dbHost);          // old host
 // ... an await, or just the staleness window elapsing ...
-const password = live.get(dbPassword);  // new password
+const password = live.unwrap(dbPassword);  // new password
 // Result: new password presented to the old host. Auth failures until the
 // next unlucky alignment resolves itself.
 ```
 
-The fix is the pin you already have. `live.snapshot()` performs a **single coherent pass per source** — one read of the `db-creds` mount serves both knobs:
+The fix is the pin you already have. `live.snapshot()` performs a **single coherent pass per source** — one read of the `db-creds` mount serves both zernos:
 
 ```ts
 const pinned = live.snapshot();          // one pass over /etc/db-creds
-const host = pinned.get(dbHost);         // both values come from that pass:
-const password = pinned.get(dbPassword); // old+old or new+new, never mixed
+const host = pinned.unwrap(dbHost);         // both values come from that pass:
+const password = pinned.unwrap(dbPassword); // old+old or new+new, never mixed
 ```
 
 Kubernetes cooperates: the `..data` symlink swap replaces the whole directory in one step, so a single pass through the mount observes exactly one generation of the pair.
@@ -188,12 +188,12 @@ First, the trap. Live freshness cannot help a value that is consumed once:
 // TRAP — the value is read at construction and captured forever.
 // freshness:"live" changes nothing about what this Pool dials tomorrow.
 const pool = new Pool({
-  host: live.get(dbHost),
-  password: live.get(dbPassword),
+  host: live.unwrap(dbHost),
+  password: live.unwrap(dbPassword),
 });
 ```
 
-Live values only help code that re-reads them. Long-lived objects need a rebuild trigger, and that trigger is `epoch()` — a monotonic per-knob counter that bumps whenever the knob's observable truth changes: a newly validated value, and equally a transition into (or out of) invalidity. One counter, one clock — validity changes arrive through the same number you key rebuilds on:
+Live values only help code that re-reads them. Long-lived objects need a rebuild trigger, and that trigger is `epoch()` — a monotonic per-zerno counter that bumps whenever the zerno's observable truth changes: a newly validated value, and equally a transition into (or out of) invalidity. One counter, one clock — validity changes arrive through the same number you key rebuilds on:
 
 ```ts
 import { Pool } from "pg";
@@ -207,8 +207,8 @@ export function getPool(): Pool {
     const pinned = live.snapshot(); // coherent host+password pair
     void pool?.end();
     pool = new Pool({
-      host: pinned.get(dbHost),
-      password: pinned.get(dbPassword),
+      host: pinned.unwrap(dbHost),
+      password: pinned.unwrap(dbPassword),
     });
     poolEpochs = epochs;
   }
@@ -216,17 +216,17 @@ export function getPool(): Pool {
 }
 ```
 
-A rewrite of identical bytes doesn't bump the epoch, so the pool never churns on noise. A rotation that fails validation, though, *does* bump it — validity changes ride the same clock — and as written, `pinned.get(dbHost)` would throw mid-rebuild on that bump. That throw is the next section's subject; the hardened rebuild there reads through `tryGet` and degrades instead. Note what this is *not*: there is no `watch()`, no `subscribe()`, no change callback, by design. You check the epoch on a read path you already execute. If your process has no such path, it also has no live behavior — which is the honest outcome for a core that runs no timers.
+A rewrite of identical bytes doesn't bump the epoch, so the pool never churns on noise. A rotation that fails validation, though, *does* bump it — validity changes ride the same clock — and as written, `pinned.unwrap(dbHost)` would throw mid-rebuild on that bump. That throw is the next section's subject; the hardened rebuild there reads through `safe` and degrades instead. Note what this is *not*: there is no `watch()`, no `subscribe()`, no change callback, by design. You check the epoch on a read path you already execute. If your process has no such path, it also has no live behavior — which is the honest outcome for a core that runs no timers.
 
 ## When the file goes bad: current truth wins
 
-After boot, an invalid rotation is not papered over. There are no magically inherited values: if someone ships an empty `DB_HOST`, the knob becomes **poisoned**. Pinning still works — `live.snapshot()` never throws wholesale — but the poisoned knob occupies an *error slot* in the snapshot. Every other knob keeps answering; reading the poisoned one throws:
+After boot, an invalid rotation is not papered over. There are no magically inherited values: if someone ships an empty `DB_HOST`, the zerno becomes **poisoned**. Pinning still works — `live.snapshot()` never throws wholesale — but the poisoned zerno occupies an *error slot* in the snapshot. Every other zerno keeps answering; reading the poisoned one throws:
 
 ```ts
 const pinned = live.snapshot();  // never throws wholesale
-pinned.get(logLevel);            // unaffected — every other knob keeps working
+pinned.unwrap(logLevel);            // unaffected — every other zerno keeps working
 
-pinned.get(dbHost);
+pinned.unwrap(dbHost);
 // InvalidLiveValueError: DB_HOST is invalid after previously holding a
 // valid value
 //   issues       — the validator's findings
@@ -235,35 +235,35 @@ pinned.get(dbHost);
 //   incidentId   — the same id the onInvalid hook saw for this raw
 //   ref          — read provenance: the ref that supplied the raw
 //                  (here: file /etc/db-creds/DB_HOST)
-// (the offending raw value is attached only for non-secret knobs)
+// (the offending raw value is attached only for non-secret zernos)
 ```
 
-Blast radius is proportional to actual usage: an invalid knob nobody reads must never 500 the site, and an invalid knob on the hot path fails exactly the reads that depend on it. The trade, stated plainly: the throw default converts a bad config push from silent staleness into a loud partial outage that lasts until the push is fixed — and for knobs where availability beats freshness, you opt into `keepLastGood` per knob (below).
+Blast radius is proportional to actual usage: an invalid zerno nobody reads must never 500 the site, and an invalid zerno on the hot path fails exactly the reads that depend on it. The trade, stated plainly: the throw default converts a bad config push from silent staleness into a loud partial outage that lasts until the push is fixed — and for zernos where availability beats freshness, you opt into `keepLastGood` per zerno (below).
 
-Poisoning is invalid-*after*-valid. A knob that has *never* validated in this process is a different failure with its own error:
+Poisoning is invalid-*after*-valid. A zerno that has *never* validated in this process is a different failure with its own error:
 
 ```ts
 // A half-lazy binding presence-checks eagerly but defers validation to
 // first read. The file exists — but a botched rotation left garbage in it:
 const lazy = bind.lazy([dbHost, dbPassword]);
 
-lazy.get(dbPassword);
+lazy.unwrap(dbPassword);
 // NoValidValueError: DB_PASSWORD has never produced a valid value
 ```
 
 `NoValidValueError` stays reserved for the lazy and unchecked doors; the eager `bind` this page uses still dies at bind time, so a running handler never sees it.
 
-### tryGet, and the hardened pool rebuild
+### safe, and the hardened pool rebuild
 
-`tryGet` is the non-throwing consumption form — it returns `{ ok: true, value }` or `{ ok: false, error }` — and it is the first thing epoch-consumer code should reach for. The epoch bumps on the invalid transition too, so the rebuild pattern is mechanical: *epoch changed → `tryGet` → ok? rebuild with the value : degrade with the error.*
+`safe` is the non-throwing consumption form — it returns `{ ok: true, value }` or `{ ok: false, error }` — and it is the first thing epoch-consumer code should reach for. The epoch bumps on the invalid transition too, so the rebuild pattern is mechanical: *epoch changed → `safe` → ok? rebuild with the value : degrade with the error.*
 
 ```ts
 export function getPool(): Pool {
   const epochs = `${live.epoch(dbHost)}:${live.epoch(dbPassword)}`;
   if (!pool || epochs !== poolEpochs) {
     const pinned = live.snapshot(); // coherent host+password pair
-    const host = pinned.tryGet(dbHost);
-    const password = pinned.tryGet(dbPassword);
+    const host = pinned.safe(dbHost);
+    const password = pinned.safe(dbPassword);
     if (host.ok && password.ok) {
       void pool?.end();
       pool = new Pool({ host: host.value, password: password.value });
@@ -284,7 +284,7 @@ Recovery rides the same clock: when the platform team fixes the Secret, the tran
 
 ### Opting into keep-last-good
 
-Keep-last-good still exists — as a bind-site opt-in, for knobs where availability beats freshness. Log verbosity is the canonical case: nobody should lose requests because the verbosity file has a typo.
+Keep-last-good still exists — as a bind-site opt-in, for zernos where availability beats freshness. Log verbosity is the canonical case: nobody should lose requests because the verbosity file has a typo.
 
 ```ts
 import { keepLastGood } from "komirka";
@@ -299,9 +299,9 @@ export const live = bind([logLevel, dbHost, dbPassword], {
 });
 ```
 
-`maxCoastMs` is required — there is no unbounded coasting. For up to five minutes, reads of a poisoned `logLevel` keep returning the last valid value while `health()` reports the knob as `"coasting"`. Past the budget the knob throws `CoastBudgetExceededError` and the status hardens to `"invalid-was-valid"`: you bought time to fix the push, not permanence.
+`maxCoastMs` is required — there is no unbounded coasting. For up to five minutes, reads of a poisoned `logLevel` keep returning the last valid value while `health()` reports the zerno as `"coasting"`. Past the budget the zerno throws `CoastBudgetExceededError` and the status hardens to `"invalid-was-valid"`: you bought time to fix the push, not permanence.
 
-Note where the opt-in lives: at the bind site, never on the descriptor. Staleness tolerance is a consumer preference, and descriptors are identity. As an identity-class field it would make two teams' differing staleness preferences a descriptor mismatch for the *same* knob; as a cosmetic-class field it would hide real behavior from identity. Both are wrong, so it is neither.
+Note where the opt-in lives: at the bind site, never on the descriptor. Staleness tolerance is a consumer preference, and descriptors are identity. As an identity-class field it would make two teams' differing staleness preferences a descriptor mismatch for the *same* zerno; as a cosmetic-class field it would hide real behavior from identity. Both are wrong, so it is neither.
 
 ### Invalid is not unavailable
 
@@ -309,20 +309,20 @@ An unparseable value and an unreachable source are different failures. When the 
 
 ### Recovery is one read
 
-Poisoning changes the read cadence. Normally a read inside `maxStalenessMs` is served from memory; a poisoned knob bypasses that memoization, so the next read re-reads the source immediately. Fix the file and recovery costs one read, not one poll interval.
+Poisoning changes the read cadence. Normally a read inside `maxStalenessMs` is served from memory; a poisoned zerno bypasses that memoization, so the next read re-reads the source immediately. Fix the file and recovery costs one read, not one poll interval.
 
-The bypass also collapses the file-tearing window. On Kubernetes it barely exists to begin with: the `..data` symlink swap is atomic for a single-file, single-pass read, and multi-file sources are read in one resolved-directory pass. The genuine risk is plain files outside Kubernetes, written non-atomically — a half-written file validates as garbage and poisons the knob, and the poisoned bypass means the very next read sees the completed write.
+The bypass also collapses the file-tearing window. On Kubernetes it barely exists to begin with: the `..data` symlink swap is atomic for a single-file, single-pass read, and multi-file sources are read in one resolved-directory pass. The genuine risk is plain files outside Kubernetes, written non-atomically — a half-written file validates as garbage and poisons the zerno, and the poisoned bypass means the very next read sees the completed write.
 
 The full taxonomy, one line each — and every one names the ref that produced it (read provenance; on this page, always a mounted file path):
 
-- `InvalidLiveValueError` — invalid after previously valid; carries `issues`, `lastValidAt`, `invalidSince`, `incidentId` (the raw value only for non-secret knobs).
+- `InvalidLiveValueError` — invalid after previously valid; carries `issues`, `lastValidAt`, `invalidSince`, `incidentId` (the raw value only for non-secret zernos).
 - `SourceUnavailableError` — source unreachable past the staleness budget; carries `cause` and `staleSince`.
-- `CoastBudgetExceededError` — a `keepLastGood` knob coasted past its `maxCoastMs`.
+- `CoastBudgetExceededError` — a `keepLastGood` zerno coasted past its `maxCoastMs`.
 - `NoValidValueError` — never valid in this process; lazy/unchecked doors only.
 
 ## Wire health() to the right probe
 
-The throw default keeps failure loud at the point of use; `health()` gives the operator the map. It reports one entry per knob — secret values never appear in the report:
+The throw default keeps failure loud at the point of use; `health()` gives the operator the map. It reports one entry per zerno — secret values never appear in the report:
 
 - `status` — `"valid"`, `"invalid-was-valid"`, `"never-valid"`, or `"coasting"`
 - `lastValidAt` / `lastInvalidAt` — the source-observation side: what the binding has seen
@@ -360,7 +360,7 @@ readinessProbe:
   periodSeconds: 15
 ```
 
-The probe contract is strict: **liveness probes never consult knob validity, and readiness reacts to `"never-valid"` at most.** Restarting a pod does not fix a bad ConfigMap — the replacement reads the same bytes, and with eager `bind` it dies at boot — so a liveness probe wired to validity turns one bad push into a fleet-wide crash loop. (With the eager bind on this page, `"never-valid"` can only appear through the lazy doors, which makes the readiness gate cheap insurance.) Route `"invalid-was-valid"` and `"coasting"` to dashboards and alerting, not to the kubelet.
+The probe contract is strict: **liveness probes never consult zerno validity, and readiness reacts to `"never-valid"` at most.** Restarting a pod does not fix a bad ConfigMap — the replacement reads the same bytes, and with eager `bind` it dies at boot — so a liveness probe wired to validity turns one bad push into a fleet-wide crash loop. (With the eager bind on this page, `"never-valid"` can only appear through the lazy doors, which makes the readiness gate cheap insurance.) Route `"invalid-was-valid"` and `"coasting"` to dashboards and alerting, not to the kubelet.
 
 ## What live does not give you
 

@@ -18,12 +18,12 @@ Percentage rollouts, per-user targeting, kill switches keyed on session attribut
 There is also a mechanical reason: core runs no background loops, timers, or watchers, ever. A subscription API implies a push channel, and a push channel implies machinery that keeps a process awake. So there is no `subscribe()`, no `onChange` callback — by design. What exists instead is a monotonic epoch and per-request pinning:
 
 ```ts
-import { knob } from "komirka";
+import { zerno } from "komirka";
 import { bind } from "komirka/node";
 import { z } from "zod";
 
 // In scope: an operational dial that ops flips by updating a mounted file.
-const maintenanceMode = knob({
+const maintenanceMode = zerno({
   key: "MAINTENANCE_MODE",
   schema: z.enum(["on", "off"]),
   exposure: "public",
@@ -36,7 +36,7 @@ const live = bind([maintenanceMode]); // bare entry — the declared file ref re
 
 app.use((req, res, next) => {
   const pinned = live.snapshot(); // per-request pin — the documented pattern
-  if (pinned.get(maintenanceMode) === "on") return res.status(503).end();
+  if (pinned.unwrap(maintenanceMode) === "on") return res.status(503).end();
   next();
 });
 ```
@@ -62,7 +62,7 @@ import { bind } from "komirka/node";
 
 // Works identically whether env came from --env-file, Bun, your PaaS,
 // or dotenv preloaded by your own bootstrap.
-const cfg = bind(appKnobs);
+const cfg = bind(appZernos);
 ```
 
 If you want dotenv semantics that a runtime does not provide, dotenv is a userland provider impl — `{ id: "dotenv", color: "sync", read }` is a few lines you own — or, simpler still, a bootstrap line that populates `process.env` before `bind` runs. Note that the `.env` file format is still a first-class *output*: `komirka bake` generates `.env.example` from your descriptors' `key` and `doc` fields. Core writes the template; it never parses the file.
@@ -72,7 +72,8 @@ If you want dotenv semantics that a runtime does not provide, dotenv is a userla
 Core ships no AWS SSM, Secrets Manager, Vault, or GCP client. Those SDKs are heavy, churny, and platform-specific — any one of them would end the zero-dependency budget and the browser-safe universal entry in a single `import`. Provider impls are plain objects; adapters are community packages:
 
 ```ts
-import { bind, provider } from "komirka/async";
+import { bind } from "komirka/async";
+import { provider } from "komirka";
 import { ssm } from "@acme/komirka-ssm"; // community provider impl — not part of core
 
 const cfg = await bind({
@@ -80,10 +81,10 @@ const cfg = await bind({
   apiKey: provider(apiKey, ssm, "/prod/app/API_KEY"), // async-colored entry
 }).snapshot();
 
-cfg.get(apiKey); // resolved once at the pin — every read after this is sync, forever
+cfg.unwrap(apiKey); // resolved once at the pin — every read after this is sync, forever
 ```
 
-An impl declares `{ id: "ssm", color: "async", resolve }` — the `id` is what the lockfile records (anonymous impls are a bind-time error on bake-covered targets), and an untyped `color` is a compile error.
+An impl declares `{ id: "ssm", color: "async", read }` — the `id` is what the lockfile records (anonymous impls are a bind-time error on bake-covered targets), and an untyped `color` is a compile error.
 
 The async boundary is enforced, not advisory — and it lives in the types. One async link colors the whole binding an `AsyncBinding`, so an async source cannot sneak into the sync door:
 
@@ -106,10 +107,10 @@ Excluded from v1, for three litigated reasons.
 ```ts
 cfg.explain(apiKey);              // provenance with the value redacted
 cfg.toJSON();                     // secrets redacted by construction
-structuredClone(cfg.get(apiKey)); // throws — serialization guard, no box required
+structuredClone(cfg.unwrap(apiKey)); // throws — serialization guard, no box required
 ```
 
-**Rotation cannot be sync-read-safe.** A token that expires mid-process would force `get()` to block, go async, or hand out a stale credential — each of which breaks the contract that all reads are sync once a snapshot is pinned. A credential that rotates every 15 minutes fails the litmus: it is state. Fetch it with your vault's SDK. For config that legitimately re-resolves, rotation is spelled honestly as a deliberate act:
+**Rotation cannot be sync-read-safe.** A token that expires mid-process would force `unwrap()` to block, go async, or hand out a stale credential — each of which breaks the contract that all reads are sync once a snapshot is pinned. A credential that rotates every 15 minutes fails the litmus: it is state. Fetch it with your vault's SDK. For config that legitimately re-resolves, rotation is spelled honestly as a deliberate act:
 
 ```ts
 // Re-resolve at a moment you choose — not on a timer core hides from you:
@@ -118,10 +119,10 @@ const next = await refresh(live); // new pinned Snapshot; all-or-nothing on part
 
 ## Environment-cascade DSL
 
-There is no per-knob environment map, no `NODE_ENV` switch inside descriptors, no cascade file format. Environments are just different sources and different overrides — and ordered `sources` already states precedence in the open, where a cascade DSL would hide it:
+There is no per-zerno environment map, no `NODE_ENV` switch inside descriptors, no cascade file format. Environments are just different sources and different overrides — and ordered `sources` already states precedence in the open, where a cascade DSL would hide it:
 
 ```ts
-const logLevel = knob({
+const logLevel = zerno({
   key: "LOG_LEVEL",
   schema: z.enum(["debug", "info", "warn", "error"]),
   exposure: "public",
@@ -136,7 +137,7 @@ Staging and production run the *same descriptor* against different environment c
 
 No global `provide()`, no ambient binding, no side-effectful registration at import time. Ever. Three reasons:
 
-- **Tree-shaking dies.** A registry entangles every knob with every other; importing one descriptor must cost nothing, because libraries ship their knobs as inert, zero-cost imports.
+- **Tree-shaking dies.** A registry entangles every zerno with every other; importing one descriptor must cost nothing, because libraries ship their zernos as inert, zero-cost imports.
 - **Import order becomes load-bearing.** Registration-at-import is exactly the side-effect bug class the inert-descriptor rule exists to kill.
 - **DI honesty.** With no registry, a dependency structurally *cannot* redirect where your secrets come from at import time. Wiring happens once, at your composition root, in code you review.
 
@@ -147,8 +148,8 @@ import { bind } from "komirka/node";
 
 const cfg = bind([dbUrl]);
 
-cfg.get(dbUrl);    // bound here — fine
-cfg.get(poolSize); // UnboundKnobError — not in this binding, and no registry to fall back to
+cfg.unwrap(dbUrl);    // bound here — fine
+cfg.unwrap(poolSize); // UnboundZernoError — not in this binding, and no registry to fall back to
 ```
 
 "What config exists?" is still answerable — at build time. Enumeration is bake's job, and the manifest is the explicit, PR-reviewable registry:
@@ -157,20 +158,20 @@ cfg.get(poolSize); // UnboundKnobError — not in this binding, and no registry 
 // config.manifest.ts
 export default {
   targets: {
-    server: [...allKnobs],
-    client: [...appPublicKnobs],
+    server: [...allZernos],
+    client: [...appPublicZernos],
   },
 };
 ```
 
-## Derived-knob expression language
+## Derived-zerno expression language
 
-No `derive()` knob, no expression strings in descriptors. Derivation is code, and a derivation DSL re-implements your language badly. It would also break the contract-not-dependency gate: descriptors round-trip as JSON, and closures do not serialize — while expression *strings* would be an eval surface. Compute derived values in the host language:
+No `derive()` zerno, no expression strings in descriptors. Derivation is code, and a derivation DSL re-implements your language badly. It would also break the contract-not-dependency gate: descriptors round-trip as JSON, and closures do not serialize — while expression *strings* would be an eval surface. Compute derived values in the host language:
 
 ```ts
 const cfg = bind([dbHost, dbPort]);
 
-const connectionString = `pg://${cfg.get(dbHost)}:${cfg.get(dbPort)}/app`;
+const connectionString = `pg://${cfg.unwrap(dbHost)}:${cfg.unwrap(dbPort)}/app`;
 ```
 
 For live sources, the recompute-when question already has an answer — the epoch, plus user code:
@@ -183,7 +184,7 @@ function getPool() {
   const now = live.epoch(dbHost);
   if (!pool || now !== seen) {
     const pinned = live.snapshot(); // one coherent pass — host and port cannot tear
-    pool = new Pool({ host: pinned.get(dbHost), port: pinned.get(dbPort) });
+    pool = new Pool({ host: pinned.unwrap(dbHost), port: pinned.unwrap(dbPort) });
     seen = now;
   }
   return pool;
@@ -192,9 +193,9 @@ function getPool() {
 
 ## Reachability-analysis codegen
 
-Bake does not scan your bundle to discover which knobs the client uses. It requires an explicit manifest, because static reachability analysis is unsound in both directions — and for a mechanism guarding a trust boundary, both failure modes are disqualifying:
+Bake does not scan your bundle to discover which zernos the client uses. It requires an explicit manifest, because static reachability analysis is unsound in both directions — and for a mechanism guarding a trust boundary, both failure modes are disqualifying:
 
-- **False negatives.** Dynamic access and conditional imports hide real usage; a knob the analyzer missed is config that is simply absent in production.
+- **False negatives.** Dynamic access and conditional imports hide real usage; a zerno the analyzer missed is config that is simply absent in production.
 - **False positives.** Dead-but-imported code inflates the set, shipping public values the client never needed and silently widening the artifact.
 
 A human-written target list is the auditable artifact: your security review reads the manifest, not an analyzer's opinion. Analysis is demoted to what it is good at — an advisory signal:
@@ -202,7 +203,7 @@ A human-written target list is the auditable artifact: your security review read
 ```bash
 komirka bake --check
 # CI drift gate. The coverage report compares the manifest against
-# client-reachable knobs and flags drift in either direction —
+# client-reachable zernos and flags drift in either direction —
 # a lint on top of the explicit manifest, never a substitute for it.
 ```
 
@@ -216,7 +217,7 @@ komirka bake --check
 | Sealed boxes, TTL, rotation | SDKs take strings; sync reads; secrets-manager scope | Serialization guard, redaction, `refresh()`, a real secrets manager |
 | Environment cascades | Environments are sources plus overrides | Ordered `sources`; same descriptor, different deploys |
 | Runtime registry | Tree-shaking, import-order side effects | Explicit `bind` at the composition root; the bake manifest |
-| Derived-knob expressions | Derivation is code; JSON round-trip | Plain functions; `epoch()`-keyed rebuilds |
+| Derived-zerno expressions | Derivation is code; JSON round-trip | Plain functions; `epoch()`-keyed rebuilds |
 | Bundle-scanning codegen | Unsound in both directions | Explicit manifest plus the `bake --check` coverage report |
 
 Every "no" on this page keeps a "yes" cheap: inert descriptors stay inert, the browser entry stays secret-free by construction, the bundle stays small, and the contract stays a contract instead of a dependency.

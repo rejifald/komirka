@@ -5,7 +5,7 @@ description: Every named error — when it fires, what its message carries, and 
 
 Configuration failures are boring, frequent, and usually fixed by someone who didn't write the code that threw. The error taxonomy is designed for that person. Every error in this library answers three questions in its first line:
 
-1. **Which knob** — the canonical `key`, always.
+1. **Which zerno** — the canonical `key`, always.
 2. **Which layer** — bind, read, scope, live, serialization, or bake.
 3. **What next** — a concrete remediation, in the message itself.
 
@@ -13,47 +13,47 @@ Eleven named errors are detailed on this page; the variants and write errors get
 
 | Error | Layer | Fires when |
 | --- | --- | --- |
-| `MissingConfigError` | bind | eager validation found missing or invalid knobs — aggregated |
+| `MissingConfigError` | bind | eager validation found missing or invalid zernos — aggregated |
 | `AsyncValidatorInSyncBindingError` | any validation site | a validator returned a thenable in a sync binding |
-| `UnboundKnobError` | snapshot read | the knob was never in the bound set |
+| `UnboundZernoError` | snapshot read | the zerno was never in the bound set |
 | `DescriptorMismatchError` | snapshot read | same key, different descriptor identity |
-| `NotInScopeError` | scope read | the knob is not in the group passed to `pick()` |
+| `NotInScopeError` | scope read | the zerno is not in the group passed to `pick()` |
 | `ExposureError` | exposure boundary | a secret value was about to cross into a public context |
-| `InvalidLiveValueError` | live read | a live re-read turned invalid after a valid value — the knob is poisoned |
+| `InvalidLiveValueError` | live read | a live re-read turned invalid after a valid value — the zerno is poisoned |
 | `SourceUnavailableError` | live read | the source is unreachable and the staleness budget is spent |
-| `CoastBudgetExceededError` | live read | a `keepLastGood` knob coasted past its `maxCoastMs` |
-| `NoValidValueError` | live read | the knob has never produced a valid value in this process |
+| `CoastBudgetExceededError` | live read | a `keepLastGood` zerno coasted past its `maxCoastMs` |
+| `NoValidValueError` | live read | the zerno has never produced a valid value in this process |
 | `StaleBakeError` | baked client read | the baked identity hash no longer matches the imported descriptor |
 
-Reads also have a non-throwing door: `tryGet(knob)` returns `{ ok: true, value }` or `{ ok: false, error }` instead of throwing (on a live binding it is the first thing epoch-consumer code should use), `live.health()` reports per-knob status and timestamps, and `cfg.explain(knob)` shows provenance. Use those for probes and diagnostics; the errors below are for code paths that must not proceed.
+Reads also have a non-throwing door: `safe(zerno)` returns `{ ok: true, value }` or `{ ok: false, error }` instead of throwing (on a live binding it is the first thing epoch-consumer code should use), `live.health()` reports per-zerno status and timestamps, and `cfg.explain(zerno)` shows provenance. Use those for probes and diagnostics; the errors below are for code paths that must not proceed.
 
-## Secret knobs: counts and paths, never text
+## Secret zernos: counts and paths, never text
 
-One rule applies across every error surface. Validator libraries echo received values into their messages — a failed `z.string().startsWith("sk_")` happily prints the secret it rejected. For knobs with `exposure: "secret"` (the default), that text is untrusted. Every report — the aggregated bind failure, `tryGet` issues, `live.health()`, `onInvalid` callbacks — carries **issue counts and issue paths only** for secret knobs. Never validator messages, never received values. Public knobs get the full validator output.
+One rule applies across every error surface. Validator libraries echo received values into their messages — a failed `z.string().startsWith("sk_")` happily prints the secret it rejected. For zernos with `exposure: "secret"` (the default), that text is untrusted. Every report — the aggregated bind failure, `safe` issues, `live.health()`, `onInvalid` callbacks — carries **issue counts and issue paths only** for secret zernos. Never validator messages, never received values. Public zernos get the full validator output.
 
 ## MissingConfigError
 
 **Layer: bind.** The eager default of `bind()` validates the entire listed set immediately (a binding with async entries validates at `ready()`/`snapshot()`), and collects *everything* wrong into one aggregated error — so a broken deploy reports every problem in a single boot failure, not one problem per restart. `bind.lazy()` throws it too, but only for raw *presence*: missing variables still die at bind; validation is deferred to first read.
 
 ```ts
-import { knob } from "komirka";
+import { zerno } from "komirka";
 import { bind } from "komirka/node";
 import { z } from "zod";
 
-const dbUrl = knob({
+const dbUrl = zerno({
   key: "DATABASE_URL",
   schema: z.string().url(),
   doc: "Primary Postgres connection string",
 });
 
-const poolSize = knob({
+const poolSize = zerno({
   key: "DB_POOL_SIZE",
   schema: z.coerce.number().int().min(1),
   exposure: "public",
   default: 10,
 });
 
-const stripeKey = knob({
+const stripeKey = zerno({
   key: "STRIPE_SECRET_KEY",
   schema: z.string().startsWith("sk_"),
 });
@@ -61,14 +61,14 @@ const stripeKey = knob({
 const cfg = bind([dbUrl, poolSize, stripeKey]);
 ```
 
-A realistic boot report, with two of three knobs failing:
+A realistic boot report, with two of three zernos failing:
 
 ```text
-MissingConfigError: 2 of 3 knobs failed at bind (entry point: komirka/node)
+MissingConfigError: 2 of 3 zernos failed at bind (entry point: komirka/node)
 
   ✕ DATABASE_URL       missing — no source produced a value
                        tried: env DATABASE_URL
-                       fix: set DATABASE_URL, or give the knob a default or another source
+                       fix: set DATABASE_URL, or give the zerno a default or another source
   ✕ STRIPE_SECRET_KEY  invalid — 1 issue at (root)  [secret: validator text withheld]
                        resolved from: env STRIPE_SECRET_KEY
                        fix: correct the value at its source
@@ -84,7 +84,7 @@ Note the secret rule in action: `DATABASE_URL` is *missing*, so there is nothing
 Why *every* validation site checks, instead of probing once at bind: **async-ness can be input-dependent.** A schema with a conditional async refinement is synchronous for one input and returns a promise for another. No bind-time probe can prove a validator sync, so eager bind, the deferred first read of `bind.lazy`, live re-validation, and cross-package hash-fallback re-validation each check the result — which means this error can legitimately surface long after boot, on the exact input that took the async path.
 
 ```ts
-const apiKey = knob({
+const apiKey = zerno({
   key: "PARTNER_API_KEY",
   schema: z.string().refine(async (v) => looksLikePartnerKey(v)),
 });
@@ -96,15 +96,15 @@ const cfg = bind([apiKey]);
 
 The fix is almost always to make the validator sync: validators must be pure, so anything that genuinely needs I/O (a network check, a lookup) doesn't belong in a validator at all — it belongs in an async *provider* entry — the binding becomes an `AsyncBinding` and the type says so. Resolve it once at the composition root with `const cfg = await bind(entries).snapshot()` (import `bind` from `komirka/async`), and every read is sync forever after.
 
-## UnboundKnobError
+## UnboundZernoError
 
-**Layer: snapshot read.** There is no ambient configuration: values exist only inside explicit bindings, and a read outside one is a named error — never a silent fallback to `process.env`. `get()` has exactly three outcomes: a hit, `UnboundKnobError`, or `DescriptorMismatchError`.
+**Layer: snapshot read.** There is no ambient configuration: values exist only inside explicit bindings, and a read outside one is a named error — never a silent fallback to `process.env`. `unwrap()` has exactly three outcomes: a hit, `UnboundZernoError`, or `DescriptorMismatchError`.
 
 ```ts
 const cfg = bind([dbUrl]);
 
-cfg.get(poolSize);
-// UnboundKnobError: DB_POOL_SIZE is not in this binding's bound set (1 knob: DATABASE_URL).
+cfg.unwrap(poolSize);
+// UnboundZernoError: DB_POOL_SIZE is not in this binding's bound set (1 zerno: DATABASE_URL).
 // Add it to the bind() list at your composition root, or check that you are
 // holding the snapshot you think you are.
 ```
@@ -113,17 +113,17 @@ The message names the key, states the bound set it searched, and points at the c
 
 ## DescriptorMismatchError
 
-**Layer: snapshot read.** The key is bound — but under a *different* descriptor. Identity is content-addressed over the identity subset only (`key`, `exposure`, `sources` in order, `default` presence and value, schema id or `version`); cosmetic fields like `doc` can never trigger this. The classic cause is the dual-package hazard: two hoisted copies of a library each construct their own instance of "the same" knob, and the copies have drifted.
+**Layer: snapshot read.** The key is bound — but under a *different* descriptor. Identity is content-addressed over the identity subset only (`key`, `exposure`, `sources` in order, `default` presence and value, schema id or `version`); cosmetic fields like `doc` can never trigger this. The classic cause is the dual-package hazard: two hoisted copies of a library each construct their own instance of "the same" zerno, and the copies have drifted.
 
 The error carries both canonical descriptors, a field-level diff of the identity subset, and a paste-able resolution:
 
 ```text
 DescriptorMismatchError: SMTP_URL is bound, but under a different descriptor.
 
-  bound      knobv1:xxh128:9f31c2e8…
+  bound      zernov1:xxh128:9f31c2e8…
              { key: "SMTP_URL", exposure: "secret",
                sources: [{ env: "SMTP_URL" }], version: "1" }
-  requested  knobv1:xxh128:57ab90d1…
+  requested  zernov1:xxh128:57ab90d1…
              { key: "SMTP_URL", exposure: "secret",
                sources: [{ env: "SMTP_URL" }, { env: "MAILER_SMTP_URL" }], version: "2" }
 
@@ -132,31 +132,31 @@ DescriptorMismatchError: SMTP_URL is bound, but under a different descriptor.
               → [{ env: "SMTP_URL" }, { env: "MAILER_SMTP_URL" }]
     version   "1" → "2"
 
-  If these are the same logical knob, accept the newer descriptor and alias the old hash:
+  If these are the same logical zerno, accept the newer descriptor and alias the old hash:
 
-    bind(knobs, {
-      unify: [{ accept: smtpUrl, aliases: ["knobv1:xxh128:9f31c2e8…"] }],
+    bind(zernos, {
+      unify: [{ accept: smtpUrl, aliases: ["zernov1:xxh128:9f31c2e8…"] }],
     })
 ```
 
-Two properties keep `unify` safe. The hash is an index, not a security boundary — structural equality of the identity subset is what's authoritative. And hash-fallback resolutions **always re-validate with the caller's schema** (memoized), so accepting an alias can never silently downgrade validation across package copies. Use `identityOf(knob)` when you need to see a hash yourself.
+Two properties keep `unify` safe. The hash is an index, not a security boundary — structural equality of the identity subset is what's authoritative. And hash-fallback resolutions **always re-validate with the caller's schema** (memoized), so accepting an alias can never silently downgrade validation across package copies. Use `identityOf(zerno)` when you need to see a hash yourself.
 
 ## NotInScopeError
 
-**Layer: scope read.** `cfg.pick(group)` produces a `Scope` that is restricted at *runtime*, not just in types: reading any knob outside the picked group throws, and the message names the pick site that created the scope.
+**Layer: scope read.** `cfg.pick(group)` produces a `Scope` that is restricted at *runtime*, not just in types: reading any zerno outside the picked group throws, and the message names the pick site that created the scope.
 
 ```ts
-const root = bind([...appKnobs, ...mailerKnobs]);
-const mailer = createMailer(root.pick(mailerKnobs));
+const root = bind([...appZernos, ...mailerZernos]);
+const mailer = createMailer(root.pick(mailerZernos));
 
-// inside the mailer, someone reaches for an app-level knob:
-scope.get(dbUrl);
+// inside the mailer, someone reaches for an app-level zerno:
+scope.unwrap(dbUrl);
 // NotInScopeError: DATABASE_URL is not in this scope.
-// Scope created by pick(mailerKnobs) at src/composition-root.ts:18 (3 knobs).
-// Add the knob to the picked group — or ask whether this code should own it.
+// Scope created by pick(mailerZernos) at src/composition-root.ts:18 (3 zernos).
+// Add the zerno to the picked group — or ask whether this code should own it.
 ```
 
-The remediation is deliberately a design question: either widen the group at the pick site, or move the knob into the library's declared set. Honest boundary: `pick()` is least-privilege against *mistakes* and for auditability — it is not a sandbox. Hostile in-process code can read `process.env` directly; only provider-resolved, non-ambient values gain real confinement.
+The remediation is deliberately a design question: either widen the group at the pick site, or move the zerno into the library's declared set. Honest boundary: `pick()` is least-privilege against *mistakes* and for auditability — it is not a sandbox. Hostile in-process code can read `process.env` directly; only provider-resolved, non-ambient values gain real confinement.
 
 ## ExposureError
 
@@ -165,7 +165,7 @@ The remediation is deliberately a design question: either widen the group at the
 ```ts
 export async function getServerSideProps() {
   const cfg = bind([stripeKey, theme]);
-  return { props: { theme: cfg.get(theme), key: cfg.get(stripeKey) } };
+  return { props: { theme: cfg.unwrap(theme), key: cfg.unwrap(stripeKey) } };
 }
 // the framework serializes props for hydration:
 // ExposureError: STRIPE_SECRET_KEY reached JSON.stringify — secret values
@@ -173,51 +173,51 @@ export async function getServerSideProps() {
 // exposure to "public" if this value truly is public (identity-changing).
 ```
 
-`cfg.toJSON()` never throws — it redacts secrets by construction; the guard exists for the raw values themselves. Note that changing `exposure` is an identity field: flipping a knob to `"public"` changes its hash and shows up in review and in bake's manifest, which is the point.
+`cfg.toJSON()` never throws — it redacts secrets by construction; the guard exists for the raw values themselves. Note that changing `exposure` is an identity field: flipping a zerno to `"public"` changes its hash and shows up in review and in bake's manifest, which is the point.
 
 ## InvalidLiveValueError
 
-**Layer: live read.** The live default is **current truth wins**: a knob's value is what its source says right now — never a value silently inherited from an earlier read. When a live re-read yields a value that fails validation, the knob becomes *poisoned*, and reads of it throw. The honest trade, stated up front: this default converts a bad config push from silent staleness into a loud partial outage that lasts until the push is fixed — opt into `keepLastGood` per knob where availability beats freshness.
+**Layer: live read.** The live default is **current truth wins**: a zerno's value is what its source says right now — never a value silently inherited from an earlier read. When a live re-read yields a value that fails validation, the zerno becomes *poisoned*, and reads of it throw. The honest trade, stated up front: this default converts a bad config push from silent staleness into a loud partial outage that lasts until the push is fixed — opt into `keepLastGood` per zerno where availability beats freshness.
 
-Poisoning is deliberately narrow. `live.snapshot()` — and any pinned snapshot — never throws wholesale: the invalid knob occupies an *error slot*, and only `get()` on that knob throws. Every other knob keeps working, so the blast radius is proportional to actual usage — one invalid knob nobody reads must never 500 the site.
+Poisoning is deliberately narrow. `live.snapshot()` — and any pinned snapshot — never throws wholesale: the invalid zerno occupies an *error slot*, and only `unwrap()` on that zerno throws. Every other zerno keeps working, so the blast radius is proportional to actual usage — one invalid zerno nobody reads must never 500 the site.
 
 ```ts
-const snap = live.snapshot(); // never throws — poisoned knobs ride along in error slots
+const snap = live.snapshot(); // never throws — poisoned zernos ride along in error slots
 
-snap.get(rateLimit);
+snap.unwrap(rateLimit);
 // InvalidLiveValueError: RATE_LIMIT re-read as invalid after a valid value.
 // 2 issues (paths: burst, windowMs). Last valid 2026-07-04T09:12:31Z,
 // invalid since 2026-07-04T09:14:02Z. incident 01JZK3VQ9M.
 // Fix the value at its source — while poisoned, the next read re-checks immediately.
 ```
 
-The error carries `issues`, `lastValidAt`, `invalidSince`, and an `incidentId`. The raw value is included only for non-secret knobs — the secret rule above applies unchanged, which is why the example shows counts and paths, not the rejected text.
+The error carries `issues`, `lastValidAt`, `invalidSince`, and an `incidentId`. The raw value is included only for non-secret zernos — the secret rule above applies unchanged, which is why the example shows counts and paths, not the rejected text.
 
-**Consumption: `tryGet` and the epoch.** The invalid *transition* bumps the epoch, exactly like an accepted change — there is a single clock, and consumers observe validity changes through the same counter they already watch. The rebuild pattern:
+**Consumption: `safe` and the epoch.** The invalid *transition* bumps the epoch, exactly like an accepted change — there is a single clock, and consumers observe validity changes through the same counter they already watch. The rebuild pattern:
 
 ```ts
-if (live.epoch() !== seen) {
-  seen = live.epoch();
-  const r = live.tryGet(rateLimit);
+if (live.epoch(rateLimit) !== seen) {
+  seen = live.epoch(rateLimit);
+  const r = live.safe(rateLimit);
   if (r.ok) rebuild(r.value);
-  else degrade(r.error); // the same InvalidLiveValueError get() would throw
+  else degrade(r.error); // the same InvalidLiveValueError unwrap() would throw
 }
 ```
 
-`tryGet(knob)` returns `{ ok: true, value }` or `{ ok: false, error }` and is the first thing epoch-consumer code should use.
+`safe(zerno)` returns `{ ok: true, value }` or `{ ok: false, error }` and is the first thing epoch-consumer code should use.
 
-**Observation: `onInvalid`.** The `onInvalid(knob, raw, issues)` bind option fires **once per knob per distinct invalid raw** — it is the observation plane; the throws are the consumption plane. Both carry the same `incidentId`, so logs join and dedupe cleanly. For secret knobs the hook receives `{ rawDigest, length }` in place of the raw — never the rejected text.
+**Observation: `onInvalid`.** The `onInvalid(zerno, raw, issues)` bind option fires **once per zerno per distinct invalid raw** — it is the observation plane; the throws are the consumption plane. Both carry the same `incidentId`, so logs join and dedupe cleanly. For secret zernos the hook receives `{ rawDigest, length }` in place of the raw — never the rejected text.
 
-**Recovery is one read, not one poll.** Poisoned state bypasses the staleness memoization: while a knob is poisoned, the next read re-reads the source immediately. Fix the file or the row, and the very next read recovers — you do not wait out a poll interval. (On Kubernetes, the `..data` symlink swap makes a single-file read atomic in a single pass, and multi-file sources are read in one resolved-dir pass; the genuine tear risk is plain files outside k8s — and the poisoned-state bypass collapses exactly that window.)
+**Recovery is one read, not one poll.** Poisoned state bypasses the staleness memoization: while a zerno is poisoned, the next read re-reads the source immediately. Fix the file or the row, and the very next read recovers — you do not wait out a poll interval. (On Kubernetes, the `..data` symlink swap makes a single-file read atomic in a single pass, and multi-file sources are read in one resolved-dir pass; the genuine tear risk is plain files outside k8s — and the poisoned-state bypass collapses exactly that window.)
 
-**What `health()` shows.** Per knob: a status — `"valid"`, `"invalid-was-valid"`, `"never-valid"`, or `"coasting"` — plus `lastValidAt`, `lastInvalidAt`, `lastThrownAt`, and `throwCount`. Source observation and consumer impact are kept distinct on purpose: "invalid but dormant" and "actively failing requests" are different operator situations, and the triage split lives in `lastThrownAt` and `throwCount`. Probe contract: liveness probes must **never** consult knob validity; readiness may gate on `"never-valid"` at most.
+**What `health()` shows.** Per zerno: a status — `"valid"`, `"invalid-was-valid"`, `"never-valid"`, or `"coasting"` — plus `lastValidAt`, `lastInvalidAt`, `lastThrownAt`, and `throwCount`. Source observation and consumer impact are kept distinct on purpose: "invalid but dormant" and "actively failing requests" are different operator situations, and the triage split lives in `lastThrownAt` and `throwCount`. Probe contract: liveness probes must **never** consult zerno validity; readiness may gate on `"never-valid"` at most.
 
 ## SourceUnavailableError
 
 **Layer: live read.** Invalid is not unavailable. When a source turns *unreadable* — the file is gone, the provider is unreachable — there is no new truth to judge, so reads keep serving the cached value **within `maxStalenessMs`**. That is not inherited state; it is the declared staleness budget the binder signed when configuring the source. Beyond the budget, reads throw `SourceUnavailableError`, which carries `{ cause, staleSince }`, and the `onSourceError` bind option fires. Unavailability is never routed through `onInvalid` — the two hooks report different failures.
 
 ```ts
-live.get(tiers);
+live.unwrap(tiers);
 // SourceUnavailableError: FEATURE_TIERS's source has been unreachable past
 // its staleness budget. /etc/app/tiers.json unreadable since
 // 2026-07-04T09:14:02Z (cause: EACCES); maxStalenessMs 30000 exceeded.
@@ -228,7 +228,7 @@ The remediation is at the source, not in code: restore the file or the provider'
 
 ## CoastBudgetExceededError
 
-**Layer: live read.** Keep-last-good still exists — as a **bind-site opt-in**, for knobs where availability beats freshness:
+**Layer: live read.** Keep-last-good still exists — as a **bind-site opt-in**, for zernos where availability beats freshness:
 
 ```ts
 import { keepLastGood } from "komirka";
@@ -239,10 +239,10 @@ const live = bind([rateLimit, tiers], {
 });
 ```
 
-`maxCoastMs` is required — there is no unbounded coasting. Within the budget, the knob keeps serving its last good value and `health()` reports it as `"coasting"`. Past the budget, `get()` throws `CoastBudgetExceededError` and the status moves from `"coasting"` to `"invalid-was-valid"`.
+`maxCoastMs` is required — there is no unbounded coasting. Within the budget, the zerno keeps serving its last good value and `health()` reports it as `"coasting"`. Past the budget, `unwrap()` throws `CoastBudgetExceededError` and the status moves from `"coasting"` to `"invalid-was-valid"`.
 
 ```ts
-live.get(rateLimit);
+live.unwrap(rateLimit);
 // CoastBudgetExceededError: RATE_LIMIT coasted on its last good value for
 // 300000 ms and the source is still invalid. Last valid 2026-07-04T08:42:10Z,
 // coasting since 2026-07-04T09:14:02Z.
@@ -250,14 +250,14 @@ live.get(rateLimit);
 // win for longer.
 ```
 
-Why a bind option and not a descriptor field: as an identity field, two teams' staleness preferences for the same knob would become a `DescriptorMismatchError`; as a cosmetic field, real runtime behavior would hide outside identity. Neither is acceptable, so the policy lives where policy belongs — at the bind site, chosen by the process that runs it. Reach for `keepLastGood` on the knobs where serving something slightly stale beats serving an error; everywhere else, the throw-by-default of `InvalidLiveValueError` is simply the default — there is no per-knob spelling to opt into it.
+Why a bind option and not a descriptor field: as an identity field, two teams' staleness preferences for the same zerno would become a `DescriptorMismatchError`; as a cosmetic field, real runtime behavior would hide outside identity. Neither is acceptable, so the policy lives where policy belongs — at the bind site, chosen by the process that runs it. Reach for `keepLastGood` on the zernos where serving something slightly stale beats serving an error; everywhere else, the throw-by-default of `InvalidLiveValueError` is simply the default — there is no per-zerno spelling to opt into it.
 
 ## NoValidValueError
 
-**Layer: live read.** Reserved for exactly one situation: the knob has **never** produced a valid value in this process. There is no invalid-after-valid transition to report and no last good to coast on — this is the never-valid case, and only the lazy and unchecked doors can reach it, because an eager `bind()` validates at bind and refuses to hand you a binding at all:
+**Layer: live read.** Reserved for exactly one situation: the zerno has **never** produced a valid value in this process. There is no invalid-after-valid transition to report and no last good to coast on — this is the never-valid case, and only the lazy and unchecked doors can reach it, because an eager `bind()` validates at bind and refuses to hand you a binding at all:
 
 ```ts
-const tiers = knob({
+const tiers = zerno({
   key: "FEATURE_TIERS",
   schema: tierSchema,
   exposure: "public",
@@ -268,27 +268,27 @@ const tiers = knob({
 const live = bind.lazy([tiers]);
 // file exists (presence check passed) but has been malformed since boot:
 
-live.get(tiers);
+live.unwrap(tiers);
 // NoValidValueError: FEATURE_TIERS has never produced a valid value.
 // Last attempt: /etc/app/tiers.json, 3 issues (paths: tiers[0].limit, …).
 // Fix the source, or bind eagerly to fail at boot instead of at read.
 ```
 
-`live.health()` reports the knob as `"never-valid"`, with the last validation error — counts and paths only if the knob is secret. Under the probe contract, this is the only status readiness may gate on; liveness probes never consult knob validity.
+`live.health()` reports the zerno as `"never-valid"`, with the last validation error — counts and paths only if the zerno is secret. Under the probe contract, this is the only status readiness may gate on; liveness probes never consult zerno validity.
 
-**The restart story.** Nothing is inherited: live values are current truth, not process memory. That makes failure *symmetric* across restarts — a running pod and a freshly restarted pod fail on exactly the same values. The running process throws `InvalidLiveValueError` on the poisoned knob; the restarted one dies at eager bind with an aggregated `MissingConfigError`, or throws `NoValidValueError` through a lazy door. A restart can never silently "fix" a bad push by resurrecting a value the source no longer contains, so what you debug on one pod is true of all of them. For knobs where availability beats freshness, opt in at the bind site with `keepLastGood` — see `CoastBudgetExceededError` above.
+**The restart story.** Nothing is inherited: live values are current truth, not process memory. That makes failure *symmetric* across restarts — a running pod and a freshly restarted pod fail on exactly the same values. The running process throws `InvalidLiveValueError` on the poisoned zerno; the restarted one dies at eager bind with an aggregated `MissingConfigError`, or throws `NoValidValueError` through a lazy door. A restart can never silently "fix" a bad push by resurrecting a value the source no longer contains, so what you debug on one pod is true of all of them. For zernos where availability beats freshness, opt in at the bind site with `keepLastGood` — see `CoastBudgetExceededError` above.
 
 ## StaleBakeError
 
-**Layer: baked client read.** The client bake target emits a generated module with an inlined snapshot shim that imports nothing at runtime. The shim carries a per-knob identity hash, and its `get()` verifies the hash of the descriptor you pass against the hash recorded at bake time. If a library was upgraded after baking — its knob's schema `version` bumped, a source added — the identities diverge:
+**Layer: baked client read.** The client bake target emits a generated module with an inlined snapshot shim that imports nothing at runtime. The shim carries a per-zerno identity hash, and its `unwrap()` verifies the hash of the descriptor you pass against the hash recorded at bake time. If a library was upgraded after baking — its zerno's schema `version` bumped, a source added — the identities diverge:
 
 ```ts
-import { widgetTheme } from "@acme/widgets/knobs"; // upgraded to v3: descriptor changed
+import { widgetTheme } from "@acme/widgets/zernos"; // upgraded to v3: descriptor changed
 import { config } from "./config.baked";    // baked against v2
 
-config.get(widgetTheme);
-// StaleBakeError: WIDGET_THEME was baked as knobv1:xxh128:aa04f2…, but the
-// imported descriptor hashes to knobv1:xxh128:d17b9c… — the bake is stale.
+config.unwrap(widgetTheme);
+// StaleBakeError: WIDGET_THEME was baked as zernov1:xxh128:aa04f2…, but the
+// imported descriptor hashes to zernov1:xxh128:d17b9c… — the bake is stale.
 // Re-run `komirka bake`. In CI, `komirka bake --check` fails the build before this ships.
 ```
 
@@ -298,12 +298,12 @@ The remediation chain is mechanical: `komirka bake` regenerates, `komirka bake -
 
 Conditional config and writable sources add their own named errors. They obey the same first-line contract; here they get one line each — full treatment lives on the Conditional config and Database-backed config pages.
 
-- `InactiveVariantError` — subclass of `UnboundKnobError`, refining `get()`'s three-way contract: the knob is declared, but in a variant branch that is not active; carries `group`, `discriminant`, `activeBranch`, and `expectedBranch`.
-- `MissingDiscriminantError` — a variant group's discriminant knob produced no value, so no branch can be selected.
+- `InactiveVariantError` — subclass of `UnboundZernoError`, refining `unwrap()`'s three-way contract: the zerno is declared, but in a variant branch that is not active; carries `group`, `discriminant`, `activeBranch`, and `expectedBranch`.
+- `MissingDiscriminantError` — a variant group's discriminant zerno produced no value, so no branch can be selected.
 - `LiveDiscriminantError` — a discriminant resolved through a live source; branch selection must be stable for the life of the process.
-- `AmbiguousKnobMembershipError` — a knob appears in more than one variant branch or group, so membership cannot be resolved.
+- `AmbiguousZernoMembershipError` — a zerno appears in more than one variant branch or group, so membership cannot be resolved.
 - `VariantsNestingError` — a variant group declared inside another variant's branch; nesting is rejected.
-- `RuleViolationError` — a declared cross-knob rule failed even though every member knob validated individually.
+- `RuleViolationError` — a declared cross-zerno rule failed even though every member zerno validated individually.
 - `VariantsInClientTargetError` — a variant group reached the client bake target; branch selection is server-side.
 - `WriteConflictError` — a compare-and-set write with `ifVersion` found the stored version had moved; re-read and retry.
 - `NotWritableError` — the write would be shadowed by a higher-precedence source, so its effect would never be observable; refused up front.
@@ -314,18 +314,18 @@ Conditional config and writable sources add their own named errors. They obey th
 
 And the call-shape / wiring family (details on the [Binding](/docs/concepts/binding) page):
 
-- `LivenessViolationError` — `.value`/`.values` touched on a binding containing live or async knobs (the type split normally prevents this; the runtime backstop catches type-widened knobs). Pin first.
+- `LivenessViolationError` — `.value`/`.values` touched on a binding containing live or async zernos (the type split normally prevents this; the runtime backstop catches type-widened zernos). Pin first.
 - `ReservedKeyError` — a record-form bind used the key `toJSON`, `then`, or `constructor`, which would shadow the values bag's guards.
-- `UnknownWiringError` — a wiring override (`env(knob, "NAME")`) targets a knob that declares no ref of that kind, or a knob in neither the binding nor any bound variants branch; a typo'd override must never silently no-op.
-- `WiringCollisionError` — wiring *created* a convergence (two knobs onto one effective name) that the declared refs did not have.
-- `WiringExposureError` — a non-secret knob was wired onto a name in the secret-name set (lockfile authority + well-known-secret-suffix denylist); routing credentials through public-exposure knobs would launder them past redaction and into bake's public inlining.
+- `UnknownWiringError` — a wiring override (`env(zerno, "NAME")`) targets a zerno that declares no ref of that kind, or a zerno in neither the binding nor any bound variants branch; a typo'd override must never silently no-op.
+- `WiringCollisionError` — wiring *created* a convergence (two zernos onto one effective name) that the declared refs did not have.
+- `WiringExposureError` — a non-secret zerno was wired onto a name in the secret-name set (lockfile authority + well-known-secret-suffix denylist); routing credentials through public-exposure zernos would launder them past redaction and into bake's public inlining.
 - `WiringSkewError` — a baked artifact's wiring digest disagrees with the composition root's actual wiring (including bind-site transforms); fail-closed on bake-covered production targets.
-- `DuplicateWiringError` — a knob is reachable through two entries in one bind (including a group member wired again as a leaf); there is no precedence hierarchy — specialization goes inside the group combinator.
+- `DuplicateWiringError` — a zerno is reachable through two entries in one bind (including a group member wired again as a leaf); there is no precedence hierarchy — specialization goes inside the group combinator.
 - `NoWiringError` — a bare `env`/`file` ref under a bind entry point with no natural defaults (core `bind`); import the runtime's bind or wire the entry explicitly.
-- `SecretLiteralError` — `literal()` wired to a secret-exposure knob outside the test entry point: a live credential in committed wiring JSON bypasses every name-based guard. Tests use `secretLiteral()` from the testing kit; deployments use env or provider wiring.
-- `ExposureMigrationError` — a library flipped a knob's exposure (identity field) while a deployment still wires it under the old classification; bind compares the lockfile's recorded exposure before identity checks so the flip surfaces by name, with the exact rewiring steps, instead of as a bare descriptor-hash diff. Deliberately a hard error — a grace window would be the laundering window.
+- `SecretLiteralError` — `literal()` wired to a secret-exposure zerno outside the test entry point: a live credential in committed wiring JSON bypasses every name-based guard. Tests use `secretLiteral()` from the testing kit; deployments use env or provider wiring.
+- `ExposureMigrationError` — a library flipped a zerno's exposure (identity field) while a deployment still wires it under the old classification; bind compares the lockfile's recorded exposure before identity checks so the flip surfaces by name, with the exact rewiring steps, instead of as a bare descriptor-hash diff. Deliberately a hard error — a grace window would be the laundering window.
 - `DescriptorError` — a descriptor-level rule violated at construction; the first occupant: variants discriminants must be exposure `"public"` (branch selection is a function of the discriminant's value and leaks through selection metadata that no error scrub sees).
 
 ## Summary
 
-Bind-time errors (`MissingConfigError`, `AsyncValidatorInSyncBindingError`) fail the boot, loudly and completely. Read-time errors (`UnboundKnobError`, `DescriptorMismatchError`, `NotInScopeError`, `AsyncValidatorInSyncBindingError`) refuse to guess — no fallback, no ambient lookup, ever. Boundary errors (`ExposureError`, `StaleBakeError`) are the runtime halves of guarantees that bake starts at build time. Live errors (`InvalidLiveValueError`, `SourceUnavailableError`, `CoastBudgetExceededError`, `NoValidValueError`) keep current truth honest: invalid throws exactly where the knob is used, unavailable coasts only inside a declared staleness budget, coasting itself has a signed budget, and never-valid is named for what it is. The variants and write errors extend the same contract to conditional config and writable sources. In every case: the key, the layer, the next step — in the first line.
+Bind-time errors (`MissingConfigError`, `AsyncValidatorInSyncBindingError`) fail the boot, loudly and completely. Read-time errors (`UnboundZernoError`, `DescriptorMismatchError`, `NotInScopeError`, `AsyncValidatorInSyncBindingError`) refuse to guess — no fallback, no ambient lookup, ever. Boundary errors (`ExposureError`, `StaleBakeError`) are the runtime halves of guarantees that bake starts at build time. Live errors (`InvalidLiveValueError`, `SourceUnavailableError`, `CoastBudgetExceededError`, `NoValidValueError`) keep current truth honest: invalid throws exactly where the zerno is used, unavailable coasts only inside a declared staleness budget, coasting itself has a signed budget, and never-valid is named for what it is. The variants and write errors extend the same contract to conditional config and writable sources. In every case: the key, the layer, the next step — in the first line.
