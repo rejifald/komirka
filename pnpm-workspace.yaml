@@ -1,0 +1,7 @@
+# Settings file for the root library package. pnpm 11 reads its build-script
+# allowlist here (not from package.json's `pnpm` field). This is NOT a
+# multi-package workspace — `site/` has its own pnpm-workspace.yaml + lockfile
+# and is managed independently. esbuild ships a postinstall that resolves its
+# platform binary; tsup and vitest both need it, so allow it to build.
+allowBuilds:
+  esbuild: true

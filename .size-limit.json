@@ -1,0 +1,7 @@
+[
+  {
+    "name": "core (ESM)",
+    "path": "dist/index.js",
+    "limit": "10 kB"
+  }
+]
