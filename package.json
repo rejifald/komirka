@@ -1,0 +1,24 @@
+{
+  "name": "komirka",
+  "version": "0.0.0",
+  "description": "Atomic configuration — every config value is an inert, importable, documented, validated descriptor, bound explicitly per runtime. Design phase: this release reserves the name; see the repository for the full design.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rejifald/komirka.git"
+  },
+  "homepage": "https://github.com/rejifald/komirka#readme",
+  "bugs": "https://github.com/rejifald/komirka/issues",
+  "license": "Apache-2.0",
+  "author": "Oleksandr Zhuravlov",
+  "keywords": [
+    "config",
+    "configuration",
+    "env",
+    "environment",
+    "secrets",
+    "standard-schema",
+    "atomic-config",
+    "typescript"
+  ],
+  "files": []
+}
