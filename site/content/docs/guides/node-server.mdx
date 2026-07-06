@@ -17,7 +17,7 @@ Knob construction is inert — zero I/O, zero validation, zero side effects — 
 
 ```ts
 // src/db/knobs.ts
-import { knob, defineKnobs } from "knobs";
+import { knob, defineKnobs } from "komirka";
 import { z } from "zod";
 
 export const dbUrl = knob({
@@ -40,7 +40,7 @@ export const dbKnobs = defineKnobs([dbUrl, poolSize]);
 
 ```ts
 // src/billing/knobs.ts
-import { knob, defineKnobs } from "knobs";
+import { knob, defineKnobs } from "komirka";
 import { z } from "zod";
 
 export const stripeKey = knob({
@@ -65,7 +65,7 @@ The signature is the contract: `createRepo` can read the database knobs and noth
 ```ts
 // src/db/repo.ts
 import { Pool } from "pg";
-import type { Scope, ConfigOf } from "knobs";
+import type { Scope, ConfigOf } from "komirka";
 import { dbKnobs, dbUrl, poolSize } from "./knobs";
 
 export function createRepo(cfg: Scope<ConfigOf<typeof dbKnobs>>) {
@@ -86,7 +86,7 @@ export function createRepo(cfg: Scope<ConfigOf<typeof dbKnobs>>) {
 
 ```ts
 // src/billing/client.ts
-import type { Scope, ConfigOf } from "knobs";
+import type { Scope, ConfigOf } from "komirka";
 import { billingKnobs } from "./knobs";
 
 export function createBilling(cfg: Scope<ConfigOf<typeof billingKnobs>>) {
@@ -101,8 +101,8 @@ Calling `createRepo` without a bound, picked scope is a compile error — a depe
 ```ts
 // src/main.ts
 import express from "express";
-import { knob } from "knobs";
-import { bind } from "knobs/node";
+import { knob } from "komirka";
+import { bind } from "komirka/node";
 import { z } from "zod";
 import { dbKnobs, dbUrl, poolSize } from "./db/knobs";
 import { billingKnobs, stripeKey, webhookSecret } from "./billing/knobs";
@@ -143,7 +143,7 @@ app.listen(root.get(port));
 Bare entries are the whole story until a deployment disagrees with a name. When the platform injects the Postgres URL under its own variable, rename just that ref — per entry, in place:
 
 ```ts
-import { bind, env } from "knobs/node";
+import { bind, env } from "komirka/node";
 
 const root = bind({
   dbUrl: env(dbUrl, "PG_CONNECTION_STRING"), // patches the env ref in place — other declared fallbacks survive
@@ -173,7 +173,7 @@ For secret knobs the report carries issue counts and paths only — never valida
 Production often keeps secrets in a manager, not in env. Which manager, and under which key, is deployment wiring — so it lives at the composition root, not on the knob. `chain` swaps a knob's declared refs for an ordered list of links, so one binding covers prod and local dev:
 
 ```ts
-// src/config/ssm.ts — providers are plain objects you own; knobs ships no cloud SDK clients.
+// src/config/ssm.ts — providers are plain objects you own; komirka ships no cloud SDK clients.
 import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 
 const client = new SSMClient({});
@@ -190,8 +190,8 @@ export const ssm = {
 
 ```ts
 // src/main.ts
-import { chain } from "knobs";
-import { bind, env, provider } from "knobs/async";
+import { chain } from "komirka";
+import { bind, env, provider } from "komirka/async";
 import { ssm } from "./config/ssm";
 
 const root = await bind({
@@ -207,19 +207,19 @@ const root = await bind({
 
 `chain` is the only full-replacement spelling: it discards the knob's declared refs in favor of the ordered links you give it, and resolution errors list the refs it dropped — a fallback that quietly stopped being consulted still shows up in the failure.
 
-Fetching from SSM is async, and the color is in the types: every link carries its impl's color, and a single async link recolors the whole binding to an `AsyncBinding` — a type only `knobs/async`'s `bind` produces. `await bind(entries).snapshot()` is the async door, and it is async exactly **once**: the pin resolves everything up front and hands back a plain sync-read `Snapshot`.
+Fetching from SSM is async, and the color is in the types: every link carries its impl's color, and a single async link recolors the whole binding to an `AsyncBinding` — a type only `komirka/async`'s `bind` produces. `await bind(entries).snapshot()` is the async door, and it is async exactly **once**: the pin resolves everything up front and hands back a plain sync-read `Snapshot`.
 
-Handing an async-colored provider to `knobs/node`'s `bind` is not a footgun that fires later — it doesn't compile. Likewise a schema that turns out to be async — async-ness can be input-dependent, so every validation site checks — throws `AsyncValidatorInSyncBindingError` rather than silently returning a pending promise.
+Handing an async-colored provider to `komirka/node`'s `bind` is not a footgun that fires later — it doesn't compile. Likewise a schema that turns out to be async — async-ness can be input-dependent, so every validation site checks — throws `AsyncValidatorInSyncBindingError` rather than silently returning a pending promise.
 
 ## .env files
 
-Core never parses files — there is no `.env` reader in `knobs`. The recommended route is to let Node populate the process environment itself:
+Core never parses files — there is no `.env` reader in `komirka`. The recommended route is to let Node populate the process environment itself:
 
 ```bash
 node --env-file=.env dist/main.js
 ```
 
-Bare entries then see those values like any other environment variable — `knobs/node`'s natural defaults read the process environment, not the file. If you need more than `--env-file` offers, dotenv is a userland provider you wire per entry — a provider impl, not a core concern. And because every knob carries a `doc` field, `knobs bake` keeps a `.env.example` generated for you, so the file new teammates copy is never stale.
+Bare entries then see those values like any other environment variable — `komirka/node`'s natural defaults read the process environment, not the file. If you need more than `--env-file` offers, dotenv is a userland provider you wire per entry — a provider impl, not a core concern. And because every knob carries a `doc` field, `komirka bake` keeps a `.env.example` generated for you, so the file new teammates copy is never stale.
 
 ## Boot errors vs runtime errors
 
@@ -259,7 +259,7 @@ Groups are declared near call sites, never as one central module imported at run
 
 ```ts
 // ✗ src/db/repo.ts — module-scope binding inside a leaf module
-import { bind } from "knobs/node";
+import { bind } from "komirka/node";
 import { dbUrl } from "./knobs";
 
 const cfg = bind({ dbUrl });                  // hidden import-time work, and a
@@ -284,11 +284,11 @@ To be honest about the boundary: `pick()` is least-privilege for mistakes and fo
 
 ## Testing the factories
 
-Because factories accept a scope rather than reading the environment, tests never touch `process.env` — a test binding is just `bind` with every entry a `literal`. Literals are input-typed, validation runs at bind, and exposure redaction still applies. All-literal entries need no natural sources, so the core `knobs` import is enough, and the result is a plain `Snapshot`:
+Because factories accept a scope rather than reading the environment, tests never touch `process.env` — a test binding is just `bind` with every entry a `literal`. Literals are input-typed, validation runs at bind, and exposure redaction still applies. All-literal entries need no natural sources, so the core `komirka` import is enough, and the result is a plain `Snapshot`:
 
 ```ts
 // test/repo.spec.ts
-import { bind, literal } from "knobs";
+import { bind, literal } from "komirka";
 import { dbKnobs, dbUrl, poolSize } from "../src/db/knobs";
 import { createRepo } from "../src/db/repo";
 

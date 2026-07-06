@@ -18,8 +18,8 @@ Percentage rollouts, per-user targeting, kill switches keyed on session attribut
 There is also a mechanical reason: core runs no background loops, timers, or watchers, ever. A subscription API implies a push channel, and a push channel implies machinery that keeps a process awake. So there is no `subscribe()`, no `onChange` callback — by design. What exists instead is a monotonic epoch and per-request pinning:
 
 ```ts
-import { knob } from "knobs";
-import { bind } from "knobs/node";
+import { knob } from "komirka";
+import { bind } from "komirka/node";
 import { z } from "zod";
 
 // In scope: an operational dial that ops flips by updating a mounted file.
@@ -58,22 +58,22 @@ bun run server.ts
 `bind` reads whatever the runtime placed in the environment — on the node entry, `process.env` is the natural default for bare entries; how it got there is not core's business:
 
 ```ts
-import { bind } from "knobs/node";
+import { bind } from "komirka/node";
 
 // Works identically whether env came from --env-file, Bun, your PaaS,
 // or dotenv preloaded by your own bootstrap.
 const cfg = bind(appKnobs);
 ```
 
-If you want dotenv semantics that a runtime does not provide, dotenv is a userland provider impl — `{ id: "dotenv", color: "sync", read }` is a few lines you own — or, simpler still, a bootstrap line that populates `process.env` before `bind` runs. Note that the `.env` file format is still a first-class *output*: `knobs bake` generates `.env.example` from your descriptors' `key` and `doc` fields. Core writes the template; it never parses the file.
+If you want dotenv semantics that a runtime does not provide, dotenv is a userland provider impl — `{ id: "dotenv", color: "sync", read }` is a few lines you own — or, simpler still, a bootstrap line that populates `process.env` before `bind` runs. Note that the `.env` file format is still a first-class *output*: `komirka bake` generates `.env.example` from your descriptors' `key` and `doc` fields. Core writes the template; it never parses the file.
 
 ## Secret-manager clients
 
 Core ships no AWS SSM, Secrets Manager, Vault, or GCP client. Those SDKs are heavy, churny, and platform-specific — any one of them would end the zero-dependency budget and the browser-safe universal entry in a single `import`. Provider impls are plain objects; adapters are community packages:
 
 ```ts
-import { bind, provider } from "knobs/async";
-import { ssm } from "@acme/knobs-ssm"; // community provider impl — not part of core
+import { bind, provider } from "komirka/async";
+import { ssm } from "@acme/komirka-ssm"; // community provider impl — not part of core
 
 const cfg = await bind({
   dbUrl,                                              // bare entry: process.env, as usual
@@ -88,10 +88,10 @@ An impl declares `{ id: "ssm", color: "async", resolve }` — the `id` is what t
 The async boundary is enforced, not advisory — and it lives in the types. One async link colors the whole binding an `AsyncBinding`, so an async source cannot sneak into the sync door:
 
 ```ts
-import { bind } from "knobs/node";
+import { bind } from "komirka/node";
 
 bind({ apiKey: provider(apiKey, ssm, "/prod/app/API_KEY") });
-// Compile error — an async-colored entry needs the `knobs/async` bind and an
+// Compile error — an async-colored entry needs the `komirka/async` bind and an
 // awaited pin. There is no spelling that hands an async read a sync face.
 ```
 
@@ -143,7 +143,7 @@ No global `provide()`, no ambient binding, no side-effectful registration at imp
 Reads resolve against an explicit binding — never an ambient lookup:
 
 ```ts
-import { bind } from "knobs/node";
+import { bind } from "komirka/node";
 
 const cfg = bind([dbUrl]);
 
@@ -200,7 +200,7 @@ Bake does not scan your bundle to discover which knobs the client uses. It requi
 A human-written target list is the auditable artifact: your security review reads the manifest, not an analyzer's opinion. Analysis is demoted to what it is good at — an advisory signal:
 
 ```bash
-knobs bake --check
+komirka bake --check
 # CI drift gate. The coverage report compares the manifest against
 # client-reachable knobs and flags drift in either direction —
 # a lint on top of the explicit manifest, never a substitute for it.
@@ -212,7 +212,7 @@ knobs bake --check
 | --- | --- | --- |
 | Feature flags, targeting | State, not config; core runs no loops | A flag SDK alongside; `freshness: "live"` files for ops dials |
 | `.env` parsing | Runtimes load env natively; Bun fights self-loaders | `node --env-file`, Bun's loader, dotenv as a userland provider impl |
-| Vault/SSM clients in core | Zero-dep, browser-safe core | Community provider impls via the `knobs/async` bind |
+| Vault/SSM clients in core | Zero-dep, browser-safe core | Community provider impls via the `komirka/async` bind |
 | Sealed boxes, TTL, rotation | SDKs take strings; sync reads; secrets-manager scope | Serialization guard, redaction, `refresh()`, a real secrets manager |
 | Environment cascades | Environments are sources plus overrides | Ordered `sources`; same descriptor, different deploys |
 | Runtime registry | Tree-shaking, import-order side effects | Explicit `bind` at the composition root; the bake manifest |

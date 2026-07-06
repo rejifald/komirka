@@ -36,8 +36,8 @@ One rule applies across every error surface. Validator libraries echo received v
 **Layer: bind.** The eager default of `bind()` validates the entire listed set immediately (a binding with async entries validates at `ready()`/`snapshot()`), and collects *everything* wrong into one aggregated error — so a broken deploy reports every problem in a single boot failure, not one problem per restart. `bind.lazy()` throws it too, but only for raw *presence*: missing variables still die at bind; validation is deferred to first read.
 
 ```ts
-import { knob } from "knobs";
-import { bind } from "knobs/node";
+import { knob } from "komirka";
+import { bind } from "komirka/node";
 import { z } from "zod";
 
 const dbUrl = knob({
@@ -64,7 +64,7 @@ const cfg = bind([dbUrl, poolSize, stripeKey]);
 A realistic boot report, with two of three knobs failing:
 
 ```text
-MissingConfigError: 2 of 3 knobs failed at bind (entry point: knobs/node)
+MissingConfigError: 2 of 3 knobs failed at bind (entry point: komirka/node)
 
   ✕ DATABASE_URL       missing — no source produced a value
                        tried: env DATABASE_URL
@@ -94,7 +94,7 @@ const cfg = bind([apiKey]);
 // a thenable during bind — sync bindings require sync validators.
 ```
 
-The fix is almost always to make the validator sync: validators must be pure, so anything that genuinely needs I/O (a network check, a lookup) doesn't belong in a validator at all — it belongs in an async *provider* entry — the binding becomes an `AsyncBinding` and the type says so. Resolve it once at the composition root with `const cfg = await bind(entries).snapshot()` (import `bind` from `knobs/async`), and every read is sync forever after.
+The fix is almost always to make the validator sync: validators must be pure, so anything that genuinely needs I/O (a network check, a lookup) doesn't belong in a validator at all — it belongs in an async *provider* entry — the binding becomes an `AsyncBinding` and the type says so. Resolve it once at the composition root with `const cfg = await bind(entries).snapshot()` (import `bind` from `komirka/async`), and every read is sync forever after.
 
 ## UnboundKnobError
 
@@ -231,8 +231,8 @@ The remediation is at the source, not in code: restore the file or the provider'
 **Layer: live read.** Keep-last-good still exists — as a **bind-site opt-in**, for knobs where availability beats freshness:
 
 ```ts
-import { keepLastGood } from "knobs";
-import { bind } from "knobs/node";
+import { keepLastGood } from "komirka";
+import { bind } from "komirka/node";
 
 const live = bind([rateLimit, tiers], {
   invalid: [keepLastGood(rateLimit, { maxCoastMs: 300_000 })],
@@ -289,10 +289,10 @@ import { config } from "./config.baked";    // baked against v2
 config.get(widgetTheme);
 // StaleBakeError: WIDGET_THEME was baked as knobv1:xxh128:aa04f2…, but the
 // imported descriptor hashes to knobv1:xxh128:d17b9c… — the bake is stale.
-// Re-run `knobs bake`. In CI, `knobs bake --check` fails the build before this ships.
+// Re-run `komirka bake`. In CI, `komirka bake --check` fails the build before this ships.
 ```
 
-The remediation chain is mechanical: `knobs bake` regenerates, `knobs bake --check` is the CI drift gate that makes shipping this state impossible, and `knobs bake --watch` keeps dev and HMR in sync so you never meet it locally.
+The remediation chain is mechanical: `komirka bake` regenerates, `komirka bake --check` is the CI drift gate that makes shipping this state impossible, and `komirka bake --watch` keeps dev and HMR in sync so you never meet it locally.
 
 ## Variants and write errors (summary)
 

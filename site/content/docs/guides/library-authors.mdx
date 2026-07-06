@@ -14,11 +14,11 @@ There is no `provide()`, no global registry, no ambient fallback. Your API accep
 
 ## Ship your knobs
 
-Export your descriptors from your package. Because construction is inert, this module is safe to import from anywhere — including browser bundles; the `knobs` core entry supplies no natural sources by construction, so a bare env or file ref bound there is a `NoWiringError`, not a silent read.
+Export your descriptors from your package. Because construction is inert, this module is safe to import from anywhere — including browser bundles; the `komirka` core entry supplies no natural sources by construction, so a bare env or file ref bound there is a `NoWiringError`, not a silent read.
 
 ```ts
 // @acme/mailer — src/knobs.ts
-import { knob, defineKnobs } from "knobs";
+import { knob, defineKnobs } from "komirka";
 import { z } from "zod";
 
 export const smtpUrl = knob({
@@ -54,7 +54,7 @@ Type every config-consuming entry point as a `Scope` of exactly your knobs. `Sco
 
 ```ts
 // @acme/mailer — src/index.ts
-import type { Scope, ConfigOf } from "knobs";
+import type { Scope, ConfigOf } from "komirka";
 import { mailerKnobs, smtpUrl, fromAddress, retryCount } from "./knobs";
 
 export { mailerKnobs, smtpUrl, fromAddress, retryCount };
@@ -78,7 +78,7 @@ The app binds once, at its composition root, then narrows per consumer:
 
 ```ts
 // app — src/config.ts
-import { bind } from "knobs/node";
+import { bind } from "komirka/node";
 import { mailerKnobs } from "@acme/mailer";
 import { appKnobs } from "./knobs";
 
@@ -93,7 +93,7 @@ import { root } from "./config";
 export const mailer = createMailer(root.pick(mailerKnobs));
 ```
 
-Every entry here is bare — no wiring combinators — so your declared refs resolve against the entry point's natural defaults: on `knobs/node`, `process.env` and the filesystem. When a deployment needs a different variable name, that is one wired entry, not a new knob: `env(smtpUrl, "SMTP_CONNECTION_STRING")` patches your declared env ref in place and preserves any declared fallbacks.
+Every entry here is bare — no wiring combinators — so your declared refs resolve against the entry point's natural defaults: on `komirka/node`, `process.env` and the filesystem. When a deployment needs a different variable name, that is one wired entry, not a new knob: `env(smtpUrl, "SMTP_CONNECTION_STRING")` patches your declared env ref in place and preserves any declared fallbacks.
 
 `bind` is eager by default: if `MAILER_SMTP_URL` is unset in production, the app dies at boot with one aggregated `MissingConfigError` listing every missing or invalid knob — not on the first send, hours later. The failure modes are named and layered:
 
@@ -115,7 +115,7 @@ Because the app owns binding, your package works unchanged on runtimes an import
 ```ts
 // app — Cloudflare Worker: env exists per request, not at import time,
 // so the per-request bag is a required bind option
-import { bind } from "knobs/workers";
+import { bind } from "komirka/workers";
 import { createMailer, mailerKnobs } from "@acme/mailer";
 
 export default {
@@ -130,7 +130,7 @@ export default {
 And your users test your library with zero `process.env` mutation:
 
 ```ts
-import { bind, literal } from "knobs";
+import { bind, literal } from "komirka";
 import { createMailer, mailerKnobs, smtpUrl, fromAddress, retryCount } from "@acme/mailer";
 
 const cfg = bind([
@@ -142,7 +142,7 @@ const cfg = bind([
 const mailer = createMailer(cfg.pick(mailerKnobs)); // still validated, fully parallel-safe
 ```
 
-Literal entries are input-typed, validation runs at bind, and exposure redaction still applies. Because every entry is fully wired, the core `knobs` entry suffices — test files need no runtime entry point and mutate no ambient state.
+Literal entries are input-typed, validation runs at bind, and exposure redaction still applies. Because every entry is fully wired, the core `komirka` entry suffices — test files need no runtime entry point and mutate no ambient state.
 
 ## The compatibility contract: what edits break identity
 
@@ -212,10 +212,10 @@ The baked client shim also protects you against version skew. It carries per-kno
 clientCfg.get(retryCount);
 // StaleBakeError: identity of "MAILER_RETRIES" changed since bake.
 //   baked: knobv1:xxh128:41c0...   current: knobv1:xxh128:9f3a...
-//   Re-run `knobs bake`; gate CI with `knobs bake --check`.
+//   Re-run `komirka bake`; gate CI with `komirka bake --check`.
 ```
 
-Recommend `knobs bake --check` in CI to your consumers: it turns upgrade-after-bake skew into a red build instead of a runtime `StaleBakeError`.
+Recommend `komirka bake --check` in CI to your consumers: it turns upgrade-after-bake skew into a red build instead of a runtime `StaleBakeError`.
 
 ## Why there is no global `provide()`
 
@@ -234,7 +234,7 @@ const url = process.env.MAILER_SMTP_URL; // also caught by the client-code AST l
 //    and pins your package to one runtime (the bind entry point you import
 //    *is* the runtime choice).
 export function createMailer() {
-  const cfg = bind(mailerKnobs); // bind from knobs/node — do not do this
+  const cfg = bind(mailerKnobs); // bind from komirka/node — do not do this
 }
 
 // 3. Accepting "no scope" and falling back to something ambient — reintroduces
@@ -255,4 +255,4 @@ Be honest in your own docs about what this buys. `pick()` confines *mistakes*: y
 - Ship renames as declared fallback chains in a release; deployment-specific names are the consumer's job via `env(knob, "NAME")` at their bind site, and deployment wiring never forks identity.
 - Edit `doc` and examples freely; they are cosmetic and never move the identity hash.
 - Document the manifest attestation step for your public knobs, with a paste-able `config.manifest.ts` snippet.
-- Tell consumers to gate CI with `knobs bake --check`; `StaleBakeError` is the runtime backstop, not the plan.
+- Tell consumers to gate CI with `komirka bake --check`; `StaleBakeError` is the runtime backstop, not the plan.

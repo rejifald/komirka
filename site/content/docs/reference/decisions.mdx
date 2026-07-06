@@ -11,7 +11,7 @@ A design document that hides its open questions is marketing. Everything else on
 | 2 | Env-varying public values in build-once SPAs | Bless a runtime-injected JSON mode; shape TBD |
 | 3 | Ship the Node file source in v0.1? | Yes |
 | 4 | Server targets: zero-runtime-dep vs runtime validation | Two-tier: bake what is build-constant, runtime-bind the rest |
-| 5 | Final naming | Undecided; `knob` is provisional |
+| 5 | Final naming | Decided: package is `komirka`; primitive `knob` still open |
 | 6 | v0.1 proof gate | Ship only if the demo clearly wins |
 
 ## 1. Is `default` part of the identity hash?
@@ -61,7 +61,7 @@ This is the predicted number-one GitHub issue, so it gets named before anyone fi
 
 The bake pipeline inlines public literal values into the client artifact at build time. For secrets that is a feature — bake never resolves secret values, which is what preserves build-once-deploy-many for the server side. But *public* values are frozen at bake time, and teams that promote one immutable artifact from staging to production need `API_BASE_URL` to differ per environment without a rebuild.
 
-**Option A — do nothing; document rebuild-per-environment.** Cheapest and honest (`knobs bake` once per environment in the CI matrix). It also angers precisely the teams with the strictest promotion pipelines — the ones most likely to care about this library.
+**Option A — do nothing; document rebuild-per-environment.** Cheapest and honest (`komirka bake` once per environment in the CI matrix). It also angers precisely the teams with the strictest promotion pipelines — the ones most likely to care about this library.
 
 **Option B — a runtime-injected JSON mode (lean).** The deploy environment serves a small public document, conventionally `/config.json`; the client fetches it once at boot through an async provider entry and pins (`await bind(entries).snapshot()`), so every read after boot is sync. Values still validate against the same knob schemas. The browser entry still contains no secret-capable sources, so a secret knob pointed at that document fails with `ExposureError` — the document cannot become a side-channel for secrets.
 
@@ -99,8 +99,8 @@ Open shape questions: does core bless a first-class browser source or only docum
 The argument for shipping is that the file source is what makes `freshness: "live"` real. Live env vars are physically impossible on Node — a running process's OS environment never changes. Files are the one re-readable source with a mainstream deployment story: Kubernetes volume-mounted ConfigMaps update in place via the `..data` symlink swap (`subPath` mounts never update). Without a file source, `LiveBinding`, `epoch()`, `refresh()`, `health()`, and keep-last-good are paper features that no one can run — and a v0.1 that documents machinery it cannot demonstrate fails the honesty bar this project set for itself.
 
 ```ts
-import { knob, bind } from "knobs";
-import { bind } from "knobs/node";
+import { knob, bind } from "komirka";
+import { bind } from "komirka/node";
 
 const rateLimit = knob({
   key: "RATE_LIMIT",
@@ -110,7 +110,7 @@ const rateLimit = knob({
   freshness: "live",
 });
 
-const live = bind(rateLimit); // : LiveBinding — the declared { file } ref resolves via knobs/node
+const live = bind(rateLimit); // : LiveBinding — the declared { file } ref resolves via komirka/node
 
 // per-request pin — the documented pattern
 app.use((req, res, next) => {
@@ -139,7 +139,7 @@ The lean is a two-tier story rather than pretending one mechanism covers both:
 ```ts
 // Tier 2: the library is a real dependency here, and that is the point —
 // secrets validate at runtime, where the value actually lives
-import { bind } from "knobs";
+import { bind } from "komirka";
 import { serverKnobs } from "./config/knobs";
 
 const cfg = bind(serverKnobs);
@@ -267,7 +267,9 @@ parameters carry the tuple inference the call shapes depend on).
 
 ## 11. Final naming
 
-`knob` is a working name, for the package and the descriptor both. The criteria: one noun that works for both the unit and the npm package; available or winnable on npm; greppable (search-unique in a codebase); no reactivity connotation; and ideally paired with a natural word for a group of them.
+Decided for the package: the package is **komirka** (комірка — Ukrainian for a memory/spreadsheet cell), published on npm as a 0.0.0 placeholder; the repo lives at github.com/rejifald/komirka. That closes the package-naming question below.
+
+Still open: the **primitive** is provisionally called `knob`, and renaming it is a separate decision from the package name. The criteria for the primitive: a noun that reads well for the unit; greppable (search-unique in a codebase); no reactivity connotation; and ideally paired with a natural word for a group of them.
 
 One name is rejected rather than parked: **atom**. jotai and recoil own that word, and an atom implies subscription and re-render — exactly the mental model this library refuses. There is no watch or subscribe API, by design; borrowing reactivity vocabulary would promise it.
 
@@ -278,20 +280,20 @@ Parked candidates, grouped by family:
 - **Smallest-unit:** `grain`, `mote`, `filament`, `quark`
 - **Wordplay on "conf":** `confit`, `confetti`
 
-Current lean: none. The docs use `knob` consistently so the eventual rename is a mechanical find-and-replace plus an npm availability check before first publish. Naming does not gate design review, and bikeshedding it before the proof gate passes would be effort spent in the wrong order.
+Current lean: none. The docs use `knob` consistently so an eventual primitive rename is a mechanical find-and-replace. Naming the primitive does not gate design review, and bikeshedding it before the proof gate passes would be effort spent in the wrong order.
 
 ## 12. The v0.1 proof gate
 
 The last open decision is whether to ship at all, and it has a pass/fail procedure attached. Before a v0.1 tag exists, one public demo repository must show a **single knobs file, consumed unchanged** — never forked per runtime — by:
 
-1. **A Node server** — runtime `bind` from `knobs/node` over bare entries, plus one `freshness: "live"` file-ref knob proving poisoning, `keepLastGood`, and `epoch()` against an edited file.
-2. **A Cloudflare Worker** — per-request `bind(entries, { env })` from `knobs/workers`: the case import-time validators structurally cannot handle, demonstrated rather than asserted.
-3. **A Vite client** — a baked target running on the zero-runtime-dep shim, with `knobs bake --check` green in CI.
-4. **A planted leak** — a hand-rolled high-entropy string smuggled into client code, and `knobs bake --check` failing the build via the allowlist scan. The gate is not that the scan exists; it is that it visibly catches the plant.
+1. **A Node server** — runtime `bind` from `komirka/node` over bare entries, plus one `freshness: "live"` file-ref knob proving poisoning, `keepLastGood`, and `epoch()` against an edited file.
+2. **A Cloudflare Worker** — per-request `bind(entries, { env })` from `komirka/workers`: the case import-time validators structurally cannot handle, demonstrated rather than asserted.
+3. **A Vite client** — a baked target running on the zero-runtime-dep shim, with `komirka bake --check` green in CI.
+4. **A planted leak** — a hand-rolled high-entropy string smuggled into client code, and `komirka bake --check` failing the build via the allowlist scan. The gate is not that the scan exists; it is that it visibly catches the plant.
 5. **A vitest suite with zero `process.env` mutation** — every test constructs its own fixture and passes it into factories:
 
 ```ts
-import { bind, literal } from "knobs";
+import { bind, literal } from "komirka";
 
 const cfg = bind([
   literal(apiBase, "https://test.local"),

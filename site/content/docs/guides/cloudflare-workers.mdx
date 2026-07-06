@@ -24,13 +24,13 @@ export const config = z
 
 A Node compatibility flag can mirror plain-text string bindings onto a `process.env` shim, but that mirror is per-isolate, excludes non-string bindings, and evaporates the moment the bag varies per request (Workers for Platforms dispatch, per-tenant remapping). The honest model is the platform's own model: **env is a function argument**, and configuration must be bound where the argument is in hand.
 
-Knobs are built for exactly this split. A knob is an inert descriptor — zero I/O, zero validation, zero side effects at construction — so declaring it at module scope is safe on every runtime, workerd included. Values exist only inside an explicit binding, and you create that binding inside the handler.
+Komirka is built for exactly this split. A knob is an inert descriptor — zero I/O, zero validation, zero side effects at construction — so declaring it at module scope is safe on every runtime, workerd included. Values exist only inside an explicit binding, and you create that binding inside the handler.
 
 ## Declare at module scope, bind per request
 
 ```ts
 // knobs.ts — inert descriptors; importing this file does nothing observable
-import { knob, defineKnobs } from "knobs";
+import { knob, defineKnobs } from "komirka";
 import { z } from "zod";
 
 export const dbUrl = knob({
@@ -53,7 +53,7 @@ export const appKnobs = defineKnobs([dbUrl, poolSize]);
 
 ```ts
 // worker.ts
-import { bind } from "knobs/workers";
+import { bind } from "komirka/workers";
 import { dbUrl, poolSize } from "./knobs";
 
 export default {
@@ -69,7 +69,7 @@ export default {
 };
 ```
 
-The bag is a **required** option, at the type level. `bind` from `knobs/workers` supplies no natural defaults — there is no ambient environment on workerd for a bare entry to fall back to — so the entries resolve against the bag you pass, and omitting `{ env }` is a compile error, not a runtime surprise.
+The bag is a **required** option, at the type level. `bind` from `komirka/workers` supplies no natural defaults — there is no ambient environment on workerd for a bare entry to fall back to — so the entries resolve against the bag you pass, and omitting `{ env }` is a compile error, not a runtime surprise.
 
 The same pattern applies to `scheduled()` and `queue()` handlers — each receives its own `env`, and each gets its own bind.
 
@@ -81,7 +81,7 @@ The classic workaround — capture `env` on the first request so module-scope co
 
 ```ts
 // WRONG: the first request's bag wins forever
-import type { Snapshot } from "knobs";
+import type { Snapshot } from "komirka";
 
 let cached: Snapshot | undefined;
 
@@ -102,7 +102,7 @@ The fix is not cleverer caching. It is binding per request and letting the libra
 Eagerly validating every knob on every request sounds expensive. It isn't, because core keeps a per-process (on workerd: per-isolate) validation cache keyed on the pair **(knob identity hash, raw value)**. Validators are contractually pure, so memoizing by raw input is sound.
 
 ```ts
-import { identityOf } from "knobs";
+import { identityOf } from "komirka";
 
 identityOf(dbUrl); // "knobv1:xxh128:…" — one half of the cache key; the raw string is the other
 ```
@@ -136,14 +136,14 @@ Declare env-sourced knobs with the default `freshness: "snapshot"` on Workers. R
 Some values genuinely change between deployments — a pricing table in KV, a remote-config document. Providers are re-readable, so `freshness: "live"` applies. But two constraints shape the pattern:
 
 1. Core never runs background loops, timers, or watchers — and workerd would not give it execution time between requests anyway.
-2. Provider impls declare a **color** — `"sync"` or `"async"`; leaving it untyped is a compile error. Color propagates through the entries: one async entry makes the whole binding an `AsyncBinding`, and only the async-capable `bind` from `knobs/async` produces one. There is no separate load step — the async read happens where you `await` the binding's `snapshot()`, and every read after that pin is sync.
+2. Provider impls declare a **color** — `"sync"` or `"async"`; leaving it untyped is a compile error. Color propagates through the entries: one async entry makes the whole binding an `AsyncBinding`, and only the async-capable `bind` from `komirka/async` produces one. There is no separate load step — the async read happens where you `await` the binding's `snapshot()`, and every read after that pin is sync.
 
 So freshness rides the request lifecycle, via `ctx.waitUntil`:
 
 ```ts
-import { knob, refresh } from "knobs";
-import { bind, provider } from "knobs/async";
-import type { AsyncBinding } from "knobs";
+import { knob, refresh } from "komirka";
+import { bind, provider } from "komirka/async";
+import type { AsyncBinding } from "komirka";
 
 const pricing = knob({
   key: "PRICING_TABLE",
@@ -195,7 +195,7 @@ The env bag is a bind option and names are per-entry wiring data. That makes per
 // prefixed names in the same deployment:
 //   TENANT_ACME_DATABASE_URL,   TENANT_ACME_DB_POOL_SIZE,
 //   TENANT_ZENITH_DATABASE_URL, TENANT_ZENITH_DB_POOL_SIZE, …
-import { bind, env } from "knobs/workers";
+import { bind, env } from "komirka/workers";
 import { dbUrl, poolSize } from "./knobs";
 
 function tenantEntries(tenant: string) {
@@ -233,7 +233,7 @@ On Workers for Platforms, the renames disappear entirely: each dispatched user W
 Factor handler logic to accept a `Snapshot` (or a `Scope` via `pick()`), keep the env bag confined to the `fetch()` entry point, and unit tests need neither miniflare nor a single `process.env` mutation — a test snapshot is an all-literal bind:
 
 ```ts
-import { bind, literal } from "knobs";
+import { bind, literal } from "komirka";
 import { dbUrl, poolSize } from "./knobs";
 
 const cfg = bind({

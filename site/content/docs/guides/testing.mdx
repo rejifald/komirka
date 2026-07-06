@@ -11,13 +11,13 @@ This library has no ambient anything. Values exist only inside explicit bindings
 
 ## Literal snapshots with `literal()`
 
-`literal(entry, value)` wires a knob to an input-typed literal value, and a `bind` whose entries are all literals produces a pinned, immutable `Snapshot`. Both come from the core `knobs` entry — and core `bind` supplies no natural sources, so an all-literal binding *cannot* touch `process.env`, the filesystem, or anything else ambient. That is a structural guarantee, not a convention. There is no separate testing entry point, either: pinning a value in a test is the same `literal` combinator production wiring uses.
+`literal(entry, value)` wires a knob to an input-typed literal value, and a `bind` whose entries are all literals produces a pinned, immutable `Snapshot`. Both come from the core `komirka` entry — and core `bind` supplies no natural sources, so an all-literal binding *cannot* touch `process.env`, the filesystem, or anything else ambient. That is a structural guarantee, not a convention. There is no separate testing entry point, either: pinning a value in a test is the same `literal` combinator production wiring uses.
 
 Your app's descriptors are inert — zero I/O, zero validation at construction — so tests import the *real* knobs and exercise the *real* schemas. No test-only duplicates to drift out of sync.
 
 ```ts
 // app/config/db.ts — the app's real descriptors; tests import these as-is
-import { knob, defineKnobs } from "knobs";
+import { knob, defineKnobs } from "komirka";
 import { z } from "zod";
 
 export const dbUrl = knob({
@@ -39,7 +39,7 @@ export const dbKnobs = defineKnobs([dbUrl, poolSize]);
 
 ```ts
 import { it, expect } from "vitest";
-import { bind, literal } from "knobs";
+import { bind, literal } from "komirka";
 import { dbUrl, poolSize } from "../app/config/db";
 
 it("reads typed values from a literal snapshot", () => {
@@ -56,7 +56,7 @@ it("reads typed values from a literal snapshot", () => {
 The result is an ordinary `Snapshot` — the binding type is computed from the entries, and all-literal entries yield the plainest one — with the same `get`, `tryGet`, `pick`, and `explain` your production code sees. And it is still validated: `literal` values run the schema at `bind`, so a bad test value fails loudly with the same aggregated error any eager bind produces. A test snapshot can never hold a value the production path would refuse.
 
 ```ts
-import { MissingConfigError } from "knobs";
+import { MissingConfigError } from "komirka";
 
 it("a bad test value fails loudly", () => {
   expect(() => bind({ dbUrl: literal(dbUrl, "not-a-url") })).toThrow(
@@ -73,7 +73,7 @@ Factories take config as a parameter and never reach for the environment themsel
 
 ```ts
 // app/db.ts — config arrives as a parameter, always
-import type { Scope, ConfigOf } from "knobs";
+import type { Scope, ConfigOf } from "komirka";
 import { dbKnobs, dbUrl, poolSize } from "./config/db";
 
 export function createPool(cfg: Scope<ConfigOf<typeof dbKnobs>>) {
@@ -83,7 +83,7 @@ export function createPool(cfg: Scope<ConfigOf<typeof dbKnobs>>) {
 
 ```ts
 // app/main.ts — the only place that touches the real environment
-import { bind } from "knobs/node";
+import { bind } from "komirka/node";
 import { dbKnobs } from "./config/db";
 import { createPool } from "./db";
 
@@ -133,8 +133,8 @@ it.concurrent("large pool behaviour", () => {
 Eager `bind` validates the whole bound set up front and throws one aggregated error naming every missing or invalid knob. Testing the boot-failure path needs no setup at all — absence is the natural state of a test process's environment.
 
 ```ts
-import { MissingConfigError } from "knobs";
-import { bind } from "knobs/node";
+import { MissingConfigError } from "komirka";
+import { bind } from "komirka/node";
 
 it("boot refuses with every problem listed at once", () => {
   try {
@@ -151,14 +151,14 @@ it("boot refuses with every problem listed at once", () => {
 
 ### Present-but-invalid values: `tryGet`
 
-`tryGet` returns `{ ok: true, value }` or `{ ok: false, issues }` instead of throwing. To produce a present-but-invalid raw value without touching `process.env`, declare a file ref on a knob pointed at a temp file, bind it as a bare entry under `knobs/node`, and take the half-lazy door — `bind.lazy` checks presence eagerly but defers validator execution to the first read.
+`tryGet` returns `{ ok: true, value }` or `{ ok: false, issues }` instead of throwing. To produce a present-but-invalid raw value without touching `process.env`, declare a file ref on a knob pointed at a temp file, bind it as a bare entry under `komirka/node`, and take the half-lazy door — `bind.lazy` checks presence eagerly but defers validator execution to the first read.
 
 ```ts
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { knob } from "knobs";
-import { bind } from "knobs/node";
+import { knob } from "komirka";
+import { bind } from "komirka/node";
 import { z } from "zod";
 
 it("surfaces validation issues without throwing", async () => {
@@ -187,7 +187,7 @@ One property worth knowing when you snapshot-test error reports: for secret knob
 Secrets are fail-closed all the way down to serialization. `Snapshot.toJSON` redacts secret values by construction, and a secret value itself throws if code tries to force it through `JSON.stringify` or `structuredClone` — the guard that closes SSR payload leaks. Both behaviors are directly testable.
 
 ```ts
-import { ExposureError } from "knobs";
+import { ExposureError } from "komirka";
 
 it("secrets cannot ride a serialized payload", () => {
   const cfg = bind({
@@ -205,14 +205,14 @@ it("secrets cannot ride a serialized payload", () => {
 
 ## Testing live config
 
-`freshness: "live"` only means anything for re-readable refs — files and providers. That makes live behavior easy to test: point a knob's file ref at a temp file you control and bind it as a bare entry under `knobs/node`. Don't sleep past the poll throttle (`maxStalenessMs`, a `bind` option — roughly one second for files by default) — that's how flaky tests are born. `refresh(live)` forces one coherent re-read pass and returns a new pinned `Snapshot`, so the test is deterministic.
+`freshness: "live"` only means anything for re-readable refs — files and providers. That makes live behavior easy to test: point a knob's file ref at a temp file you control and bind it as a bare entry under `komirka/node`. Don't sleep past the poll throttle (`maxStalenessMs`, a `bind` option — roughly one second for files by default) — that's how flaky tests are born. `refresh(live)` forces one coherent re-read pass and returns a new pinned `Snapshot`, so the test is deterministic.
 
 ```ts
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { knob, refresh } from "knobs";
-import { bind } from "knobs/node";
+import { knob, refresh } from "komirka";
+import { bind } from "komirka/node";
 import { z } from "zod";
 
 async function tempUpstream() {
@@ -246,7 +246,7 @@ There is deliberately no watch or subscribe API — code that must react to chan
 Invalid content after boot poisons the knob — current truth wins, and the epoch bumps on the *transition* so consumers can observe it with `tryGet`:
 
 ```ts
-import { InvalidLiveValueError, keepLastGood } from "knobs";
+import { InvalidLiveValueError, keepLastGood } from "komirka";
 
 it("poisons the knob when the file goes bad", async () => {
   const { file, upstreamUrl } = await tempUpstream();
@@ -282,7 +282,7 @@ it("keepLastGood is the explicit opt-in, bounded by maxCoastMs", async () => {
 A live knob that has *never* held a valid value is a different, named failure. Eager `bind` refuses at boot with `MissingConfigError`; if you took the half-lazy door, the first read is where truth arrives:
 
 ```ts
-import { NoValidValueError } from "knobs";
+import { NoValidValueError } from "komirka";
 
 it("a never-yet-valid live knob throws NoValidValueError", async () => {
   const { file, upstreamUrl } = await tempUpstream();
@@ -298,7 +298,7 @@ it("a never-yet-valid live knob throws NoValidValueError", async () => {
 A library ships its knobs as inert descriptors and types its factory against `Scope<ConfigOf<typeof itsKnobs>>`. Testing it is the same move the app makes at its composition root: build an all-literal binding, `pick`, pass it in. An all-literal `bind` returns a real `Snapshot`, so `pick` works on it directly.
 
 ```ts
-import { bind, literal, defineKnobs, NotInScopeError } from "knobs";
+import { bind, literal, defineKnobs, NotInScopeError } from "komirka";
 import { createMailer, mailerKnobs, smtpUrl, smtpFrom } from "@acme/mailer";
 
 it("wires the mailer from a picked scope", () => {
@@ -334,7 +334,7 @@ Every pattern below exists to work around ambient config state. None of them is 
 vi.stubEnv("DATABASE_URL", "postgres://127.0.0.1:5432/app_test");
 ```
 
-`stubEnv` mutates a process-wide global: it races under `it.concurrent`, leaks into the next test if cleanup is forgotten, and carries untyped, unvalidated strings. Here it is also pointless — nothing reads the environment unless you bound under an entry point whose natural defaults include it (`knobs/node`), and the core `bind` these tests use supplies no natural sources at all.
+`stubEnv` mutates a process-wide global: it races under `it.concurrent`, leaks into the next test if cleanup is forgotten, and carries untyped, unvalidated strings. Here it is also pointless — nothing reads the environment unless you bound under an entry point whose natural defaults include it (`komirka/node`), and the core `bind` these tests use supplies no natural sources at all.
 
 ```ts
 // Anti-pattern: mutating process.env by hand

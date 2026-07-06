@@ -10,7 +10,9 @@
 > Chosen 2026-07-05 after three verified naming rounds (~360 candidates checked against the
 > npm registry and GitHub); `komirka` was free on npm and github.com/komirka at that date.
 > Every previously parked candidate (knob/knobs, panel, bobbin, loom, confit, confetti,
-> grain, mote, weft, dial, setpoint, filament, quark) is taken on npm. Throughout the design
+> grain, mote, weft, dial, setpoint, filament, quark) is taken on npm. The 0.0.0
+> name-reservation placeholder is published on npm and the repo lives at
+> [github.com/rejifald/komirka](https://github.com/rejifald/komirka). Throughout the design
 > docs the primitive is provisionally still called `knob`; renaming it is a separate open
 > decision (§6). We deliberately avoid `atom` — it imports jotai/recoil expectations
 > (reactivity, subscriptions) that this library refuses by design.

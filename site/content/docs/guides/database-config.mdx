@@ -7,12 +7,12 @@ description: Serve knobs from a database — per-request pins with bounded stale
 
 Your configuration lives in a database table. An admin panel edits it. A fleet of replicas reads it. This guide covers that shape end to end.
 
-The tool is the **async binding**: live semantics with async transport plus operator-plane writes. The mental model carries over unchanged — pin with `snapshot()`, compare `epoch()`, inspect `health()` — with two additions: reads that may touch the network are awaited, and `set()` writes back through the binding. You get one from the `knobs/async` entry point: its `bind` accepts async-colored entries, and the coloring rule does the typing — any async entry makes the whole binding an `AsyncBinding`. Only the shared types and error classes sit in core, which stays synchronous.
+The tool is the **async binding**: live semantics with async transport plus operator-plane writes. The mental model carries over unchanged — pin with `snapshot()`, compare `epoch()`, inspect `health()` — with two additions: reads that may touch the network are awaited, and `set()` writes back through the binding. You get one from the `komirka/async` entry point: its `bind` accepts async-colored entries, and the coloring rule does the typing — any async entry makes the whole binding an `AsyncBinding`. Only the shared types and error classes sit in core, which stays synchronous.
 
 ## The provider contract
 
 ```ts
-import type { JsonValue } from "knobs";
+import type { JsonValue } from "komirka";
 
 type ReadSlot =
   | { raw: JsonValue; version?: string }   // present
@@ -67,8 +67,8 @@ Claims this load-bearing do not rest on the honor system: a published `verifyPro
 A Postgres provider is one query per method:
 
 ```ts
-import type { AsyncProvider } from "knobs/async";
-import { WriteConflictError } from "knobs";
+import type { AsyncProvider } from "komirka/async";
+import { WriteConflictError } from "komirka";
 import { sql } from "./db";
 
 export const pgProvider: AsyncProvider = {
@@ -123,8 +123,8 @@ A wrapper like this must not declare `consistentReads` — each key is its own r
 ## Wiring it up
 
 ```ts
-import { knob } from "knobs";
-import { bind, provider } from "knobs/async";
+import { knob } from "komirka";
+import { bind, provider } from "komirka/async";
 import { z } from "zod";
 
 export const rateLimit = knob({
@@ -160,8 +160,8 @@ await cfg.ready();
 Wiring is per entry, so one binding mixes transports freely. A knob that should read Parameter Store but fall back to an env var spells the whole chain out — `chain` is the only full-replacement wiring, and if the knob declared fallback refs of its own, errors will list exactly what the chain dropped:
 
 ```ts
-import { chain } from "knobs";
-import { env } from "knobs/async"; // node combinators are re-exported here
+import { chain } from "komirka";
+import { env } from "komirka/async"; // node combinators are re-exported here
 
 bind({
   rateLimit: provider(rateLimit, pgProvider),
@@ -224,8 +224,8 @@ The pipeline: validate the raw against the knob's schema (an invalid write is re
 **It targets the highest-precedence ref in the knob's wiring.** A write that lands below a shadowing ref would change every replica except the operator's own — the one machine where the change appears to work is the one machine where it hasn't. Forbidden:
 
 ```ts
-import { chain } from "knobs";
-import { file } from "knobs/async";
+import { chain } from "komirka";
+import { file } from "komirka/async";
 
 const logLevel = knob({
   key: "log.level",
@@ -417,7 +417,7 @@ Every other knob keeps working; blast radius is proportional to actual usage of 
 Where coasting beats throwing, opt in at the bind site (never in the descriptor — the same knob may deserve different policies in different apps):
 
 ```ts
-import { keepLastGood } from "knobs";
+import { keepLastGood } from "komirka";
 
 const cfg = bind(
   {
@@ -479,7 +479,7 @@ Four clauses keep database-backed config from mutating into a remote-config SDK:
 The clock is a seam, so staleness tests need no timers:
 
 ```ts
-import { manualClock } from "knobs/testing";
+import { manualClock } from "komirka/testing";
 
 const cfg = bind({ rateLimit: provider(rateLimit, fakeProvider) }, { maxStalenessMs: 5_000, clock });
 await cfg.ready();

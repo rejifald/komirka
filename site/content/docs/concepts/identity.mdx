@@ -42,7 +42,7 @@ The `schema` object itself is not JSON and does not round-trip; `schemaId` stand
 The identity subset is serialized as RFC 8785 (JCS) canonical JSON, prefixed with the literal string `knobv1|`, and hashed with xxh128:
 
 ```ts
-import { knob, identityOf } from "knobs";
+import { knob, identityOf } from "komirka";
 import { z } from "zod";
 
 export const smtpUrl = knob({
@@ -71,7 +71,7 @@ Every read resolves to exactly one of three outcomes:
 The third case is the diamond install making contact:
 
 ```ts
-import { bind } from "knobs/node";
+import { bind } from "komirka/node";
 import { smtpUrl } from "@acme/mailer/knobs"; // v2: schema tightened, version: "2"
 
 const cfg = bind([smtpUrl]); // bare entry: declared refs resolve against process.env
@@ -153,7 +153,7 @@ If both land in **one** binding, each stays independently readable — `get()` i
 
 ```ts
 const cfg = bind([...httpKnobs, ...queueKnobs]);
-// [knobs] dev warning: duplicate key "TIMEOUT_MS" bound under two identities
+// [komirka] dev warning: duplicate key "TIMEOUT_MS" bound under two identities
 //   knobv1:xxh128:0d11… and knobv1:xxh128:77aa…
 ```
 
