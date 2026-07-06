@@ -37,7 +37,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: [20, 22, 24]
+        # pnpm 11 requires Node >= 22.13 (it uses node:sqlite), and Node 20 is EOL
+        # as of April 2026, so 22 is the supported floor.
+        node: [22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
