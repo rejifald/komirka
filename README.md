@@ -1,10 +1,11 @@
-# atomic-config
+# komirka
 
 > **Design phase — no code yet.** Package name: **`komirka`** (комірка — the Ukrainian word
-> for a memory/spreadsheet cell: one small addressed slot holding one value). Chosen
-> 2026-07-05; verified free on npm and github.com/komirka at that date — reserve both before
-> first publish. The primitive is provisionally still called `knob` throughout the docs;
-> renaming it is a separate open decision.
+> for a memory/spreadsheet cell: one small addressed slot holding one value). Published on
+> npm as a 0.0.0 name-reservation placeholder; repo is
+> [github.com/rejifald/komirka](https://github.com/rejifald/komirka). The primitive is
+> provisionally still called `knob` throughout the docs; renaming it is a separate open
+> decision.
 
 Atomic configuration: each config value is an inert, importable, documented, validated
 descriptor — bound explicitly per runtime (Node, Cloudflare Workers, browsers, tests),

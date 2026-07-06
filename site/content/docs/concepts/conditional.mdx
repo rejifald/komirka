@@ -18,7 +18,7 @@ A flat knob list cannot express this. Mark `SMTP_HOST` required and every sendgr
 `variants(discriminant, branches)` takes a knob whose schema enumerates the modes, plus one member map per mode:
 
 ```ts
-import { knob, variants } from "knobs";
+import { knob, variants } from "komirka";
 import { z } from "zod";
 
 const emailService = knob({
@@ -47,10 +47,10 @@ export const email = variants(emailService, {
 });
 ```
 
-A group binds alongside plain knobs — it is just another entry in the bind set. Bare entries resolve their declared refs against the entry point's natural defaults; under `knobs/node` that is `process.env` and the filesystem:
+A group binds alongside plain knobs — it is just another entry in the bind set. Bare entries resolve their declared refs against the entry point's natural defaults; under `komirka/node` that is `process.env` and the filesystem:
 
 ```ts
-import { bind } from "knobs/node";
+import { bind } from "komirka/node";
 
 const appName = knob({ key: "APP_NAME", exposure: "public", default: "mailer" });
 
@@ -62,7 +62,7 @@ const cfg = bind({ email, appName });
 A group is wired as **one entry**, never member-by-member. `env(group, opts)` renames every member's env ref in one stroke:
 
 ```ts
-import { bind, env } from "knobs/node";
+import { bind, env } from "komirka/node";
 
 const cfg = bind({
   appName,
@@ -198,8 +198,8 @@ Condition forms: `"set"`, `{ equals: value }`, `{ in: [...values] }`. `"set"` me
 `variants` and `when` cover the declarative, JSON-serializable tier. For everything else there is `rule` — the code tier:
 
 ```ts
-import { rule } from "knobs";
-import { bind } from "knobs/node";
+import { rule } from "komirka";
+import { bind } from "komirka/node";
 
 const poolBounds = rule(
   [poolMin, poolMax],

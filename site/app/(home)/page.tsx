@@ -4,7 +4,7 @@ export default function HomePage() {
   return (
     <div className="flex flex-col justify-center items-center text-center flex-1 gap-4 px-4">
       <p className="text-sm font-medium text-fd-muted-foreground border border-fd-border rounded-full px-3 py-1">
-        Design phase — no code yet. Working name: <code>knobs</code>
+        Design phase — no code yet. Package: <code>komirka</code>
       </p>
       <h1 className="text-4xl font-bold">Atomic configuration</h1>
       <p className="max-w-xl text-fd-muted-foreground">

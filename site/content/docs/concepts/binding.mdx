@@ -9,8 +9,8 @@ A `Knob<T>` is an inert descriptor. Importing it costs nothing, reads nothing, v
 
 ```ts
 import { z } from "zod";
-import { knob, defineKnobs } from "knobs";
-import { bind } from "knobs/node";
+import { knob, defineKnobs } from "komirka";
+import { bind } from "komirka/node";
 
 export const dbUrl = knob({
   key: "DATABASE_URL",
@@ -158,8 +158,8 @@ exist only on snapshots, so an async entry can never hide a network hop behind a
 read — the type will not let you.
 
 ```ts
-import { chain, provider } from "knobs";
-import { bind, env } from "knobs/async";     // async-capable bind; node combinators re-exported
+import { chain, provider } from "komirka";
+import { bind, env } from "komirka/async";     // async-capable bind; node combinators re-exported
 import { ssm } from "./providers/ssm";       // impl: { id: "aws-ssm", color: "async", read }
 
 const binding = bind({
@@ -216,7 +216,7 @@ For handing a *subset* of a snapshot to a library, `cfg.pick(dbKnobs)` returns a
 The intended shape: one composition root binds, factories receive their slice at construction, and request handlers never touch config at all.
 
 ```ts
-import type { Scope, ConfigOf } from "knobs";
+import type { Scope, ConfigOf } from "komirka";
 
 // a factory declares the exact slice it needs, in its type
 export function createPool(cfg: Scope<ConfigOf<typeof dbKnobs>>) {
@@ -236,7 +236,7 @@ const mailer = createMailer(root.pick(mailerKnobs));
 This is also what makes testing boring, in the good way — construct a literal snapshot per test and pass it in, with zero `process.env` mutation:
 
 ```ts
-import { bind, literal } from "knobs"; // core bind: literal entries only — nothing ambient
+import { bind, literal } from "komirka"; // core bind: literal entries only — nothing ambient
 
 const cfg = bind([literal(dbUrl, "pg://localhost/test"), literal(poolSize, 2)]);
 const pool = createPool(cfg.pick(dbKnobs)); // still validated — a bad literal fails here
@@ -249,7 +249,7 @@ Import-time and module-global config assumes a process-global environment that e
 Explicit binding matches the platform's physics instead:
 
 ```ts
-import { bind } from "knobs/workers";
+import { bind } from "komirka/workers";
 import { appKnobs } from "./config";
 
 export default {
@@ -283,22 +283,22 @@ The *how* is supplied at the binding, per runtime, and the descriptor never chan
 
 ```ts
 // Node server: bare entry — declared refs resolve in order (ssm, then process.env)
-import { bind } from "knobs/async";
+import { bind } from "komirka/async";
 const cfg = await bind(sendgridKey, { providers: { ssm } }).snapshot();
 
 // Cloudflare Worker: the per-request bag is a REQUIRED bind option — never wiring data
-import { bind } from "knobs/workers";
+import { bind } from "komirka/workers";
 const cfg = bind(sendgridKey, { env });
 
 // tests: a literal entry — validated like any source, zero process.env mutation
-import { bind, literal } from "knobs";
+import { bind, literal } from "komirka";
 const cfg = bind(literal(sendgridKey, "SG.test-key"));
 ```
 
-This split is also the browser-safety story, stated precisely: the universal `knobs`
+This split is also the browser-safety story, stated precisely: the universal `komirka`
 entry ships no source *resolvers*, and core `bind` supplies no natural defaults — a bare
 `env`/`file` ref under core bind is `NoWiringError`, and `literal()` entries are the only
-thing that resolves. `env` and `file` live in `knobs/node`, which imports `node:process`
+thing that resolves. `env` and `file` live in `komirka/node`, which imports `node:process`
 and `node:fs`, so bundling them for a browser fails at build rather than shimming to
 empty objects. Capability enters at the bind entry point — never through wiring data.
 
@@ -310,8 +310,8 @@ separate rebind option — and it never forks the knob's identity, because wirin
 deployment reality, not a contract change:
 
 ```ts
-import { bind, env, file } from "knobs/node";
-import { chain, provider } from "knobs";
+import { bind, env, file } from "komirka/node";
+import { chain, provider } from "komirka";
 import { smtpUrl } from "@acme/mailer/knobs";
 
 const cfg = bind({

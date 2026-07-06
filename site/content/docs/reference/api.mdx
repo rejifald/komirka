@@ -3,27 +3,30 @@ title: API reference
 description: The complete provisional API surface — entries, the descriptor, bindings, snapshots, live bindings, identity, testing, and the bake CLI.
 ---
 
-> All names are provisional (see [naming](/docs/reference/decisions)). This page is the
-> canonical contract: every example elsewhere on this site uses only what is defined here.
+> The package is **komirka** (published on npm as a 0.0.0 placeholder; repo
+> [github.com/rejifald/komirka](https://github.com/rejifald/komirka)). The primitive is still
+> provisionally called `knob`; renaming it is a separate open decision (see
+> [naming](/docs/reference/decisions)). This page is the canonical contract: every example
+> elsewhere on this site uses only what is defined here.
 
 ## Entry points
 
 ```ts
-import { knob, defineKnobs, refresh, identityOf } from "knobs";
-import { literal, chain, provider } from "knobs";         // universal wiring combinators (pure data)
-import type { Knob, Snapshot, LiveBinding, AsyncBinding, Scope, ConfigOf } from "knobs";
+import { knob, defineKnobs, refresh, identityOf } from "komirka";
+import { literal, chain, provider } from "komirka";         // universal wiring combinators (pure data)
+import type { Knob, Snapshot, LiveBinding, AsyncBinding, Scope, ConfigOf } from "komirka";
 
 // pick ONE bind per entrypoint — the entry point is what grants capability:
-import { bind, env, file } from "knobs/node";     // natural defaults = process.env + fs
-// import { bind } from "knobs/workers";          // per-request bag REQUIRED at opts: bind(entries, { env })
-// import { bind } from "knobs/async";            // async-capable (providers); re-exports node combinators
-// import { bind } from "knobs";                  // core: no natural defaults — literal() entries only
+import { bind, env, file } from "komirka/node";     // natural defaults = process.env + fs
+// import { bind } from "komirka/workers";          // per-request bag REQUIRED at opts: bind(entries, { env })
+// import { bind } from "komirka/async";            // async-capable (providers); re-exports node combinators
+// import { bind } from "komirka";                  // core: no natural defaults — literal() entries only
 ```
 
-The core entry (`"knobs"`) is universal — it runs in browsers, Workers, Node, Deno, and
+The core entry (`"komirka"`) is universal — it runs in browsers, Workers, Node, Deno, and
 Bun, and it ships **no source resolvers**: core `bind` supplies no natural defaults (a
 bare `env`/`file` ref under it is `NoWiringError`; only `literal()` entries resolve).
-`env`/`file` live in `knobs/node`, which imports `node:process`/`node:fs` so bundling it
+`env`/`file` live in `komirka/node`, which imports `node:process`/`node:fs` so bundling it
 for a browser fails at build. Capability is granted only by the bind entry point — never
 by wiring data, which is pure JSON-representable description.
 
@@ -213,10 +216,10 @@ tagged JSON (`relv1|` content-addressed); nesting is rejected in v1
 (`VariantsNestingError`). A variants group is client-**ineligible** in v1
 (`VariantsInClientTargetError`). Full semantics: [Conditional config](/docs/concepts/conditional).
 
-## Async bindings and writes — `knobs/async`
+## Async bindings and writes — `komirka/async`
 
 ```ts
-import { bind } from "knobs/async";
+import { bind } from "komirka/async";
 
 type ReadSlot =
   | { raw: Json; version?: string; cacheUntil?: number }  // present; cacheUntil = CACHE ceiling:
@@ -324,7 +327,7 @@ Consequences:
 ## Testing
 
 ```ts
-import { bind, literal } from "knobs";   // core bind — the purest test spelling
+import { bind, literal } from "komirka";   // core bind — the purest test spelling
 
 const cfg = bind({ db: literal(dbUrl, "postgres://localhost:5432/test") });
 // input-typed, still validated (a bad test value fails loudly), zero process.env mutation
@@ -346,9 +349,9 @@ export default {
 ```
 
 ```bash
-knobs bake           # generate per-target modules + .env.example + CONFIG.md + manifest.json + leak scan
-knobs bake --check   # CI drift gate
-knobs bake --watch   # dev / HMR (dev output is unscanned — banner says so)
+komirka bake           # generate per-target modules + .env.example + CONFIG.md + manifest.json + leak scan
+komirka bake --check   # CI drift gate
+komirka bake --watch   # dev / HMR (dev output is unscanned — banner says so)
 ```
 
 Per target:

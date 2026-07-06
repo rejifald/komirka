@@ -8,8 +8,8 @@ description: "Why config values are pinned by default, what live actually means 
 Every knob defaults to `freshness: "snapshot"`. When you bind, the value is resolved and validated once; the resulting `Snapshot` returns the same value for the life of the binding, on every call, from every consumer.
 
 ```ts
-import { knob } from "knobs";
-import { bind } from "knobs/node";
+import { knob } from "komirka";
+import { bind } from "komirka/node";
 import { z } from "zod";
 
 const dbUrl = knob({
@@ -36,8 +36,8 @@ So `freshness: "live"` on an env source emits a dev-mode warning and behaves as 
 ## Declaring a live knob
 
 ```ts
-import { knob } from "knobs";
-import { bind } from "knobs/node";
+import { knob } from "komirka";
+import { bind } from "komirka/node";
 import { z } from "zod";
 
 const upstreamUrl = knob({
@@ -59,7 +59,7 @@ const rateLimit = knob({
 const live = bind([upstreamUrl, rateLimit]); // : LiveBinding
 ```
 
-The knobs declare their file refs themselves, so bare entries are all the bind site needs — under `knobs/node`, declared file refs resolve against the filesystem naturally. If any bound knob is live, the bind result type is a `LiveBinding` instead of a `Snapshot`. This is a hard type split, and it is the point.
+The knobs declare their file refs themselves, so bare entries are all the bind site needs — under `komirka/node`, declared file refs resolve against the filesystem naturally. If any bound knob is live, the bind result type is a `LiveBinding` instead of a `Snapshot`. This is a hard type split, and it is the point.
 
 ## LiveBinding is not a Snapshot — deliberately
 
@@ -171,7 +171,7 @@ A source that serves garbage and a source that is down are different failures. I
 Some values genuinely prefer availability over freshness — a rate limit, a retry budget. Keep-last-good still exists, as a **bind-site opt-in** with a mandatory coasting budget:
 
 ```ts
-import { keepLastGood } from "knobs";
+import { keepLastGood } from "komirka";
 
 const live = bind([upstreamUrl, rateLimit], {
   invalid: [keepLastGood(rateLimit, { maxCoastMs: 300_000 })],
@@ -245,7 +245,7 @@ Rebuild-on-epoch is the whole pattern: pools, agents, and SDK clients get recrea
 Files re-read themselves on poll; providers don't. `refresh(live)` re-resolves the binding's sources and returns a **new pinned Snapshot**:
 
 ```ts
-import { refresh } from "knobs";
+import { refresh } from "komirka";
 
 const next = await refresh(live); // : Snapshot — a fresh, coherent generation
 ```
@@ -263,7 +263,7 @@ Since core never schedules anything, *you* decide the cadence: refresh on a depl
 On Cloudflare Workers, the env bag is part of the deployment. It never changes for a running deployment — updating a binding or secret rolls a new deployment, and isolates see the new env from birth. `freshness: "live"` on a Workers env source is therefore a no-op with a dev-mode warning:
 
 ```ts
-import { bind } from "knobs/workers";
+import { bind } from "komirka/workers";
 
 export default {
   async fetch(request: Request, env: Env) {

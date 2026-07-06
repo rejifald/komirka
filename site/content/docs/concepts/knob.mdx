@@ -8,7 +8,7 @@ description: One configuration value as an inert, frozen, JSON-serializable desc
 A knob describes exactly one configuration value: its name, its shape, its trust level, and where it is allowed to come from. It never contains the value itself — values exist only inside explicit bindings.
 
 ```ts
-import { knob } from "knobs";
+import { knob } from "komirka";
 import { z } from "zod";
 
 export const dbUrl = knob({
@@ -46,7 +46,7 @@ type SourceRef =
 **`default`** — the fallback when no source yields a value. JSON only. There is no privileged path for defaults: at bind time a default is validated exactly like a sourced value, so a default that violates its own schema fails loudly instead of lurking until production.
 
 ```ts
-import { bind } from "knobs/node";
+import { bind } from "komirka/node";
 
 const retries = knob({
   key: "RETRY_COUNT",
@@ -80,13 +80,13 @@ This is the property everything else leans on:
 - **Import cost is bytes.** A library can export its knobs from its top-level entry and importing them costs a frozen object, not a config system boot. That's what makes shipping knobs as a library contract viable.
 - **Any runtime.** The same descriptor module loads in Node, browsers, Workers, Deno, Bun — nothing runtime-specific happens until *you* bind through a runtime-specific entry point.
 - **Testability.** Tests construct knobs freely and bind them as `literal()` entries — zero `process.env` mutation, no import-order rituals.
-- **Bake can trust the manifest.** `knobs bake` runs your manifest in a constrained context; because construction is inert, any I/O it observes is a bug in the manifest, not normal operation.
+- **Bake can trust the manifest.** `komirka bake` runs your manifest in a constrained context; because construction is inert, any I/O it observes is a bug in the manifest, not normal operation.
 
 The flip side: since the knob holds no value, reading one requires a binding, and a binding only answers for knobs it was given. There is no ambient fallback — the failure is a named error:
 
 ```ts
-import { knob } from "knobs";
-import { bind } from "knobs/node";
+import { knob } from "komirka";
+import { bind } from "komirka/node";
 
 const cfg = bind([poolSize]);
 
@@ -143,7 +143,7 @@ const poolSize = knob({
 });
 // poolSize : Knob<number>
 
-const cfg = bind([poolSize]); // bind from "knobs/node"
+const cfg = bind([poolSize]); // bind from "komirka/node"
 const n = cfg.get(poolSize); // n : number — no parseInt at call sites
 
 const region = knob({ key: "AWS_REGION", exposure: "public" });
@@ -155,7 +155,7 @@ const region = knob({ key: "AWS_REGION", exposure: "public" });
 Two knobs are the same knob when their *identity subset* matches: `key`, `exposure`, `sources` (order-significant), `default` (presence and value), and the schema identity when available. Everything else — `doc`, examples, deprecation notes, and any unknown fields — is cosmetic and excluded.
 
 ```ts
-import { identityOf } from "knobs";
+import { identityOf } from "komirka";
 
 identityOf(dbUrl);
 // "knobv1:xxh128:9f2c41d0a7be5e13"
@@ -169,7 +169,7 @@ Groups are plain arrays. `defineKnobs` adds one thing: const-tuple inference, so
 
 ```ts
 // src/db/config.ts — right next to the pool it configures
-import { defineKnobs } from "knobs";
+import { defineKnobs } from "komirka";
 
 export const dbKnobs = defineKnobs([dbUrl, poolSize]);
 ```

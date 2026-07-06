@@ -3,7 +3,7 @@ title: Leak scan
 description: The allowlist scan that audits every emitted client asset for secret material — and an honest account of exactly what it cannot see.
 ---
 
-Every `knobs bake` run ends with a leak scan of the client target's emitted artifacts, and `knobs bake --check` fails CI on any unwaived finding. The scan is the **last** layer of bake's defense stack, not the first — it sits behind the required targets declaration, generated-module-only delivery, the no-secret-sources browser entry, the AST lint that bans raw `process.env` / `import.meta.env` reads in client-designated code, and the coverage report. Its job is to catch what slipped past all of those, and it is designed around one hard rule: **it never needs, and never prints, a secret value.**
+Every `komirka bake` run ends with a leak scan of the client target's emitted artifacts, and `komirka bake --check` fails CI on any unwaived finding. The scan is the **last** layer of bake's defense stack, not the first — it sits behind the required targets declaration, generated-module-only delivery, the no-secret-sources browser entry, the AST lint that bans raw `process.env` / `import.meta.env` reads in client-designated code, and the coverage report. Its job is to catch what slipped past all of those, and it is designed around one hard rule: **it never needs, and never prints, a secret value.**
 
 ## Allowlist, not blocklist
 
@@ -17,7 +17,7 @@ The leak scan inverts the model. Bake already knows the complete set of values t
 
 ```ts
 // knobs/api.ts
-import { knob } from "knobs";
+import { knob } from "komirka";
 import { z } from "zod";
 
 export const apiBaseUrl = knob({
@@ -125,7 +125,7 @@ Findings carry the asset location, the nearest knob key, and **scrubbed** contex
 In CI, the same scan runs under the drift gate:
 
 ```bash
-knobs bake --check   # fails on generated-output drift OR any unwaived leak-scan finding
+komirka bake --check   # fails on generated-output drift OR any unwaived leak-scan finding
 ```
 
 ## Waivers
@@ -145,6 +145,6 @@ The scan is defense-in-depth behind the structural layers. It is **never the pri
   // throws ExposureError — the runtime serialization guard, not the leak scan
   ```
 
-- **Dev-server output is never scanned.** `knobs bake --watch` keeps the generated modules fresh during development, but dev servers serve transformed modules from memory; there are no emitted artifacts to audit. Only production build output is covered — do not treat a clean dev session as a clean scan.
+- **Dev-server output is never scanned.** `komirka bake --watch` keeps the generated modules fresh during development, but dev servers serve transformed modules from memory; there are no emitted artifacts to audit. Only production build output is covered — do not treat a clean dev session as a clean scan.
 
 - **Encodings and string-splitting evade it.** Base64 in two halves, char-code arrays, concatenation at runtime — any build-time string scan is trivially defeated by code that *intends* to exfiltrate. The scan targets mistakes, not adversaries. Malicious in-process code is outside its threat model (and outside `pick()`'s, too); the structural layers — deny-by-default client allowlist, no-secret-sources browser entry, generated-module-only delivery, the AST lint — are what make the honest-mistake path hard, and the scan is the net underneath them.

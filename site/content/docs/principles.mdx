@@ -3,18 +3,24 @@ title: Principles
 description: The project constitution — every hard constraint, every pitfall found in adversarial review, and the full security model.
 ---
 
-> **Canonical copy:** this page mirrors [`principles.md`](https://github.com/rejifald/atomic-config/blob/main/principles.md) at the repo root. If they ever disagree, the repo file wins.
+> **Canonical copy:** this page mirrors [`principles.md`](https://github.com/rejifald/komirka/blob/main/principles.md) at the repo root. If they ever disagree, the repo file wins.
 
 > **Status: design phase.** No code exists yet. This document is the constitution for the
 > project: every hard constraint, every pitfall we have identified (many through adversarial
 > design review), and the full security model. Any future feature or PR must be checked
 > against this file first.
 >
-> **Naming is not final.** Throughout the design docs the primitive is provisionally called
-> `knob` and the package `knobs`. Parked candidates: knob/panel, notions, bobbin, loom,
-> confit, confetti, grain, mote, weft, dial, setpoint, filament, quark.
-> We deliberately avoid `atom` — it imports jotai/recoil expectations (reactivity,
-> subscriptions) that this library refuses by design.
+> **Package name: `komirka`** (комірка — diminutive of комора; the standard Ukrainian CS
+> term for a memory cell / spreadsheet cell: one small addressed slot holding one value).
+> Chosen 2026-07-05 after three verified naming rounds (~360 candidates checked against the
+> npm registry and GitHub); `komirka` was free on npm and github.com/komirka at that date.
+> Every previously parked candidate (knob/knobs, panel, bobbin, loom, confit, confetti,
+> grain, mote, weft, dial, setpoint, filament, quark) is taken on npm. The 0.0.0
+> name-reservation placeholder is published on npm and the repo lives at
+> [github.com/rejifald/komirka](https://github.com/rejifald/komirka). Throughout the design
+> docs the primitive is provisionally still called `knob`; renaming it is a separate open
+> decision (§6). We deliberately avoid `atom` — it imports jotai/recoil expectations
+> (reactivity, subscriptions) that this library refuses by design.
 
 ## 1. What this project is
 
@@ -617,7 +623,9 @@ gate.
   must be an explicit flag, never `NODE_ENV` sniffing.
 - Dynamic (non-literal) name/path arguments to combinators on bake-covered targets:
   banned in v1 (lint + bake refusal); revisit if a real case appears.
-- Final naming (see header).
+- ~~Final naming~~ — decided: the package is `komirka` (see header). Still open: whether
+  the primitive stays `knob` (with `$knob` brand and `knobv1|` identity prefix) or takes a
+  cell-flavored name to match the package.
 
 ## 7. Relationship to StitchAPI
 
