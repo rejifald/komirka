@@ -5,11 +5,15 @@
 > design review), and the full security model. Any future feature or PR must be checked
 > against this file first.
 >
-> **Naming is not final.** Throughout the design docs the primitive is provisionally called
-> `knob` and the package `knobs`. Parked candidates: knob/panel, notions, bobbin, loom,
-> confit, confetti, grain, mote, weft, dial, setpoint, filament, quark.
-> We deliberately avoid `atom` — it imports jotai/recoil expectations (reactivity,
-> subscriptions) that this library refuses by design.
+> **Package name: `komirka`** (комірка — diminutive of комора; the standard Ukrainian CS
+> term for a memory cell / spreadsheet cell: one small addressed slot holding one value).
+> Chosen 2026-07-05 after three verified naming rounds (~360 candidates checked against the
+> npm registry and GitHub); `komirka` was free on npm and github.com/komirka at that date.
+> Every previously parked candidate (knob/knobs, panel, bobbin, loom, confit, confetti,
+> grain, mote, weft, dial, setpoint, filament, quark) is taken on npm. Throughout the design
+> docs the primitive is provisionally still called `knob`; renaming it is a separate open
+> decision (§6). We deliberately avoid `atom` — it imports jotai/recoil expectations
+> (reactivity, subscriptions) that this library refuses by design.
 
 ## 1. What this project is
 
@@ -612,7 +616,9 @@ gate.
   must be an explicit flag, never `NODE_ENV` sniffing.
 - Dynamic (non-literal) name/path arguments to combinators on bake-covered targets:
   banned in v1 (lint + bake refusal); revisit if a real case appears.
-- Final naming (see header).
+- ~~Final naming~~ — decided: the package is `komirka` (see header). Still open: whether
+  the primitive stays `knob` (with `$knob` brand and `knobv1|` identity prefix) or takes a
+  cell-flavored name to match the package.
 
 ## 7. Relationship to StitchAPI
 
