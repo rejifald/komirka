@@ -7,11 +7,11 @@ A design document that hides its open questions is marketing. Everything else on
 
 | # | Question | Current lean |
 | --- | --- | --- |
-| 1 | Is `default` part of a knob's identity hash? | Yes — keep it in |
+| 1 | Is `default` part of a zerno's identity hash? | Yes — keep it in |
 | 2 | Env-varying public values in build-once SPAs | Bless a runtime-injected JSON mode; shape TBD |
 | 3 | Ship the Node file source in v0.1? | Yes |
 | 4 | Server targets: zero-runtime-dep vs runtime validation | Two-tier: bake what is build-constant, runtime-bind the rest |
-| 5 | Final naming | Decided: package is `komirka`; primitive `knob` still open |
+| 5 | Final naming | Decided: package `komirka`, primitive `zerno` |
 | 6 | v0.1 proof gate | Ship only if the demo clearly wins |
 
 ## 1. Is `default` part of the identity hash?
@@ -20,13 +20,13 @@ The identity contract on the rest of this site includes `default` — presence a
 
 **Option A — include it (current lean).** A changed default *is* different configuration: two copies of a library that fall back to different values are not running the same contract. Including `default` means a dual-installed package whose newer copy bumped a default trips `DescriptorMismatchError` instead of silently resolving different values depending on which copy your import graph happened to reach.
 
-**Option B — exclude it (treat it like `doc`).** Library authors could bump a default in a patch release without breaking identity across duplicated package copies. The price: the mismatch becomes invisible, and `cfg.get()` quietly returns `3` in one module and `5` in another.
+**Option B — exclude it (treat it like `doc`).** Library authors could bump a default in a patch release without breaking identity across duplicated package copies. The price: the mismatch becomes invisible, and `cfg.unwrap()` quietly returns `3` in one module and `5` in another.
 
 The lean is A: a loud error beats a silent wrong value. The escape hatch already exists and is cheap:
 
 ```ts
 // @acme/mailer v1.4.0
-const retries = knob({
+const retries = zerno({
   key: "MAILER_RETRIES",
   schema: z.coerce.number().int(),
   exposure: "public",
@@ -34,7 +34,7 @@ const retries = knob({
 });
 
 // @acme/mailer v1.5.0 — only the default changed
-const retries = knob({
+const retries = zerno({
   key: "MAILER_RETRIES",
   schema: z.coerce.number().int(),
   exposure: "public",
@@ -46,11 +46,11 @@ With `default` in the hash, an app that binds one copy and reads through the oth
 
 ```text
 DescriptorMismatchError: "MAILER_RETRIES" is bound under a different descriptor.
-  bound:    default: 3   (knobv1:xxh128:9f2a…)
-  reading:  default: 5   (knobv1:xxh128:c41b…)
+  bound:    default: 3   (zernov1:xxh128:9f2a…)
+  reading:  default: 5   (zernov1:xxh128:c41b…)
   diff: default
   To accept the newer descriptor at your composition root:
-    bind(knobs, sources, { unify: [{ accept: retries, aliases: ["knobv1:xxh128:9f2a…"] }] })
+    bind(zernos, { unify: [{ accept: retries, aliases: ["zernov1:xxh128:9f2a…"] }] })
 ```
 
 The residual cost lands on library authors: a default bump is an identity-breaking change and should be released like one. `unify` resolutions always re-validate with the caller's schema, so accepting the newer descriptor never downgrades validation. If real-world friction shows this generating more `unify` boilerplate than it prevents bugs, option B gets a second hearing — but the burden of proof sits on the silent side.
@@ -63,7 +63,7 @@ The bake pipeline inlines public literal values into the client artifact at buil
 
 **Option A — do nothing; document rebuild-per-environment.** Cheapest and honest (`komirka bake` once per environment in the CI matrix). It also angers precisely the teams with the strictest promotion pipelines — the ones most likely to care about this library.
 
-**Option B — a runtime-injected JSON mode (lean).** The deploy environment serves a small public document, conventionally `/config.json`; the client fetches it once at boot through an async provider entry and pins (`await bind(entries).snapshot()`), so every read after boot is sync. Values still validate against the same knob schemas. The browser entry still contains no secret-capable sources, so a secret knob pointed at that document fails with `ExposureError` — the document cannot become a side-channel for secrets.
+**Option B — a runtime-injected JSON mode (lean).** The deploy environment serves a small public document, conventionally `/config.json`; the client fetches it once at boot through an async provider entry and pins (`await bind(entries).snapshot()`), so every read after boot is sync. Values still validate against the same zerno schemas. The browser entry still contains no secret-capable sources, so a secret zerno pointed at that document fails with `ExposureError` — the document cannot become a side-channel for secrets.
 
 **Option C — HTML injection.** The server templates the same JSON into a script tag; saves a request, couples you to a serving layer. Probably a documented variant of B rather than a separate mode.
 
@@ -71,7 +71,7 @@ The undecided part is the shape, not the need. In the current contract the piece
 
 ```ts
 // candidate recipe — sketch, not contract; the blessed shape is TBD
-const apiBase = knob({
+const apiBase = zerno({
   key: "API_BASE_URL",
   schema: z.string().url(),
   exposure: "public",
@@ -99,10 +99,10 @@ Open shape questions: does core bless a first-class browser source or only docum
 The argument for shipping is that the file source is what makes `freshness: "live"` real. Live env vars are physically impossible on Node — a running process's OS environment never changes. Files are the one re-readable source with a mainstream deployment story: Kubernetes volume-mounted ConfigMaps update in place via the `..data` symlink swap (`subPath` mounts never update). Without a file source, `LiveBinding`, `epoch()`, `refresh()`, `health()`, and keep-last-good are paper features that no one can run — and a v0.1 that documents machinery it cannot demonstrate fails the honesty bar this project set for itself.
 
 ```ts
-import { knob, bind } from "komirka";
+import { zerno } from "komirka";
 import { bind } from "komirka/node";
 
-const rateLimit = knob({
+const rateLimit = zerno({
   key: "RATE_LIMIT",
   schema: z.coerce.number().int().positive(),
   exposure: "public",
@@ -119,11 +119,11 @@ app.use((req, res, next) => {
 });
 
 app.get("/healthz", (req, res) => {
-  res.json(live.health()); // staleness + last validation error, per knob
+  res.json(live.health()); // staleness + last validation error, per zerno
 });
 ```
 
-The argument against is scope: poll-on-read throttling (`maxStalenessMs`), single-coherent-pass reads so multi-knob files never tear, keep-last-good plus `onInvalid`, and filesystem quirks across platforms are a real test surface for a first release. The lean stays yes — the file source is the difference between "live is designed" and "live exists."
+The argument against is scope: poll-on-read throttling (`maxStalenessMs`), single-coherent-pass reads so multi-zerno files never tear, keep-last-good plus `onInvalid`, and filesystem quirks across platforms are a real test surface for a first release. The lean stays yes — the file source is the difference between "live is designed" and "live exists."
 
 ## 4. Server bake targets: zero-runtime-dep or runtime validation?
 
@@ -140,9 +140,9 @@ The lean is a two-tier story rather than pretending one mechanism covers both:
 // Tier 2: the library is a real dependency here, and that is the point —
 // secrets validate at runtime, where the value actually lives
 import { bind } from "komirka";
-import { serverKnobs } from "./config/knobs";
+import { serverZernos } from "./config/zernos";
 
-const cfg = bind(serverKnobs);
+const cfg = bind(serverZernos);
 // anything missing or invalid dies here, at boot, in ONE aggregated
 // MissingConfigError listing every offender — not request by request
 ```
@@ -155,7 +155,7 @@ The open sub-question is what the *optional* baked server wiring module checks. 
 groups instead. Nesting semantics (transitive activity propagation, chained
 `InactiveVariantError`, condition algebra) are the hard 20% and nobody has presented the
 real case yet. **But the relation wire format is recursive and tagged from day one** —
-entries are a knob descriptor, a `$when` node, or a `$variants` node — so enabling nesting
+entries are a zerno descriptor, a `$when` node, or a `$variants` node — so enabling nesting
 later is a feature flag, not a format break. Non-negotiable either way: transitive
 inactivity is specced now, so a default can never resurrect a subtree whose ancestor
 branch is inactive.
@@ -175,7 +175,7 @@ exactly which branch the client was frozen to.
 Not in v1. Expired reads block on a per-key single-flight re-read, so `maxStalenessMs`
 stays an honest hard bound — serve-stale-while-revalidating would make the name a lie.
 If demand materializes it arrives as a loudly-named opt-in, never a silent default.
-Related deferral: `cfg.update(knob, fn, { retries })` read-modify-write sugar — it is a
+Related deferral: `cfg.update(zerno, fn, { retries })` read-modify-write sugar — it is a
 five-line userland loop over `get`/`set`/`WriteConflictError`; core adds it only if
 demand proves out.
 
@@ -191,12 +191,12 @@ revert-of-many has an answer for partially superseded batches.
 
 The `.values` view ships with **raw values plus a hardened bag** (null prototype,
 redacting `toJSON`, redacting Node inspect hook — so `JSON.stringify` and `console.log`
-never dump secrets; spread is the documented residual, equivalent to calling `get()` on
-every knob). Two alternatives were considered and are recorded as revisitable:
-`Redacted<T>` brands for secret knobs (safest, but under secret-by-default exposure it
+never dump secrets; spread is the documented residual, equivalent to calling `unwrap()` on
+every zerno). Two alternatives were considered and are recorded as revisitable:
+`Redacted<T>` brands for secret zernos (safest, but under secret-by-default exposure it
 guts the flagship destructure and pressures everyone toward `exposure: "public"` — a
-worse equilibrium), and omitting secret knobs from `.values` entirely (type-level
-omission requires exposure as a type parameter, and a type-widened knob would then
+worse equilibrium), and omitting secret zernos from `.values` entirely (type-level
+omission requires exposure as a type parameter, and a type-widened zerno would then
 silently *vanish* from the record — a stranger confusion than the spread residual).
 The AST lint rule (no `cfg.values` as a function argument or spread in client/library
 code) is the misuse backstop.
@@ -216,7 +216,7 @@ parameters carry the tuple inference the call shapes depend on).
 ## 10. Recently resolved
 
 - **Live-invalid default** — resolved by author decision: **current truth wins** (poisoned
-  slots, `InvalidLiveValueError`, `tryGet`), with `keepLastGood(knob, { maxCoastMs })` as
+  slots, `InvalidLiveValueError`, `safe`), with `keepLastGood(zerno, { maxCoastMs })` as
   the explicit bind-site opt-in. See [Freshness](/docs/concepts/freshness).
 - **`freshness` in the identity hash** — resolved: **yes**. Live-vs-snapshot is
   behaviorally load-bearing; relations reference discriminants by identity, and a live
@@ -240,7 +240,7 @@ parameters carry the tuple inference the call shapes depend on).
   pure cache ceiling (leased/dynamic credentials are a written non-goal),
   `SecretLiteralError` gating `literal()` on secrets outside tests, and public-only
   discriminants. Secret write verification: version equality > `strongRead` digest >
-  honest `"unverified"` outcome (per-knob `requireVerifiedWrites` refuses). Open:
+  honest `"inconclusive"` outcome (per-zerno `requireVerifiedWrites` refuses). Open:
   extending `read()` to version-pinned keys is deferred until conformance data across
   real stores shows the `"superseded"` outcome is insufficient.
 - **Batch-only provider contract** — resolved (author proposal): `read`/`readMany` and
@@ -250,12 +250,12 @@ parameters carry the tuple inference the call shapes depend on).
   old shape carried moved into declared capabilities: `atomicWrites` (gates multi-entry
   writes and `setMany` atomicity; conformance-kit-verified) and `consistentReads` (demoted
   to a round-trip optimization by the discriminant re-check loop). Deferred with
-  prerequisites: same-tick micro-batching of `get()` (only after per-slot errors + limits;
+  prerequisites: same-tick micro-batching of `unwrap()` (only after per-slot errors + limits;
   microtask-drain only; `snapshot()`/`refresh()` always issue dedicated batches).
   Single-key providers get a documented 3-line recipe, deliberately not an exported
   helper (a shipped adapter becomes a shadow second contract form).
 - **Wiring (supersedes the sources argument AND `rebind`)** — resolved: per-entry
-  combinators — `env(knob, "NAME")` renames a declared ref in place preserving fallbacks,
+  combinators — `env(zerno, "NAME")` renames a declared ref in place preserving fallbacks,
   `chain()` is the only full replacement, groups wire as one entry with
   `{ prefix, overrides }`, bare entries resolve declared refs against the bind entry
   point's natural defaults. Combinators are pure JSON data (provider impls declare
@@ -265,28 +265,23 @@ parameters carry the tuple inference the call shapes depend on).
   error message, and the leak scan's name union; library renames use declared fallback
   chains, not deployment wiring. See [Binding](/docs/concepts/binding).
 
-## 11. Final naming
+## 11. Final naming — resolved
 
-Decided for the package: the package is **komirka** (комірка — Ukrainian for a memory/spreadsheet cell), published on npm as a 0.0.0 placeholder; the repo lives at github.com/rejifald/komirka. That closes the package-naming question below.
+Both names are settled.
 
-Still open: the **primitive** is provisionally called `knob`, and renaming it is a separate decision from the package name. The criteria for the primitive: a noun that reads well for the unit; greppable (search-unique in a codebase); no reactivity connotation; and ideally paired with a natural word for a group of them.
+**Package: `komirka`** (комірка — Ukrainian for a memory/spreadsheet cell), published on npm as a 0.0.0 placeholder; the repo lives at github.com/rejifald/komirka.
 
-One name is rejected rather than parked: **atom**. jotai and recoil own that word, and an atom implies subscription and re-render — exactly the mental model this library refuses. There is no watch or subscribe API, by design; borrowing reactivity vocabulary would promise it.
+**Primitive: `zerno`** (зерно — Ukrainian for a grain/seed: one small unit of config). It carries through the whole surface: the group helper `defineZernos`, the type `Zerno<T>`, the `$zerno` structural brand, and the `zernov1:` identity-hash prefix. It reads well as the unit, is search-unique (greppable — the deciding criterion), has no reactivity connotation, and stays on-brand with the package's Ukrainian metaphor: grains kept in a memory-cell.
 
-Parked candidates, grouped by family:
+Why not keep `knob`: a knob is something you *turn*, which quietly promises the runtime tuning/reactivity this library refuses. An inert descriptor you never adjust should not borrow a control-panel verb. **atom** was rejected for the same reason and then some — jotai and recoil own it, and it implies subscription and re-render; there is no watch or subscribe API here, by design.
 
-- **Control-room:** `knob` / `panel` (the current working pair — descriptor / group), `dial`, `setpoint`
-- **Sewing and weaving** (pairs with the Stitch ecosystem): `notions`, `bobbin`, `loom`, `weft`
-- **Smallest-unit:** `grain`, `mote`, `filament`, `quark`
-- **Wordplay on "conf":** `confit`, `confetti`
-
-Current lean: none. The docs use `knob` consistently so an eventual primitive rename is a mechanical find-and-replace. Naming the primitive does not gate design review, and bikeshedding it before the proof gate passes would be effort spent in the wrong order.
+Runner-up and also-rans, kept for the record: **`grain`** was the closest contender (same metaphor, self-documenting in English) and lost only on greppability and brand cohesion. Others considered: `slot` / `cell` (storage), `panel` / `dial` / `setpoint` (control-room), `notions` / `bobbin` / `loom` / `weft` (sewing — pairs with the Stitch ecosystem), `mote` / `filament` / `quark` (smallest-unit), `confit` / `confetti` (wordplay).
 
 ## 12. The v0.1 proof gate
 
-The last open decision is whether to ship at all, and it has a pass/fail procedure attached. Before a v0.1 tag exists, one public demo repository must show a **single knobs file, consumed unchanged** — never forked per runtime — by:
+The last open decision is whether to ship at all, and it has a pass/fail procedure attached. Before a v0.1 tag exists, one public demo repository must show a **single zernos file, consumed unchanged** — never forked per runtime — by:
 
-1. **A Node server** — runtime `bind` from `komirka/node` over bare entries, plus one `freshness: "live"` file-ref knob proving poisoning, `keepLastGood`, and `epoch()` against an edited file.
+1. **A Node server** — runtime `bind` from `komirka/node` over bare entries, plus one `freshness: "live"` file-ref zerno proving poisoning, `keepLastGood`, and `epoch()` against an edited file.
 2. **A Cloudflare Worker** — per-request `bind(entries, { env })` from `komirka/workers`: the case import-time validators structurally cannot handle, demonstrated rather than asserted.
 3. **A Vite client** — a baked target running on the zero-runtime-dep shim, with `komirka bake --check` green in CI.
 4. **A planted leak** — a hand-rolled high-entropy string smuggled into client code, and `komirka bake --check` failing the build via the allowlist scan. The gate is not that the scan exists; it is that it visibly catches the plant.

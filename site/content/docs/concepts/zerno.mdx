@@ -1,0 +1,197 @@
+---
+title: The zerno (descriptor)
+description: One configuration value as an inert, frozen, JSON-serializable descriptor — every field, what construction deliberately does not do, and how to group zernos without building a config monolith.
+---
+
+## One config value, as a value
+
+A zerno describes exactly one configuration value: its name, its shape, its trust level, and where it is allowed to come from. It never contains the value itself — values exist only inside explicit bindings.
+
+```ts
+import { zerno } from "komirka";
+import { z } from "zod";
+
+export const dbUrl = zerno({
+  key: "DATABASE_URL",
+  schema: z.string().url(),
+  doc: "Primary Postgres connection string",
+  exposure: "secret",
+  sources: [{ env: "DATABASE_URL" }],
+});
+// dbUrl : Zerno<string>
+```
+
+`zerno()` returns a frozen descriptor — plain data with a structural `$zerno` brand. Everything else in the library (binding, baking, testing, identity) is defined in terms of this one shape.
+
+## The fields
+
+**`key`** — the canonical name of the value. It names the *value*, not the source: the same key can resolve from an env var in production, a file in Kubernetes, and a literal in tests. `key` is an identity field.
+
+**`schema`** — a BYO [Standard Schema](https://standardschema.dev) validator (zod, valibot, arktype, …). Optional; without one the zerno is `Zerno<string>` and the raw value passes through unvalidated. The zerno's type parameter is inferred from the schema's *output*, so coercing schemas give you real types (see below). Validators must be pure, and validated outputs are contractually immutable (deep-frozen in dev mode).
+
+**`doc`** — human documentation. Purely cosmetic: it never affects identity or resolution. Bake surfaces it in the generated `.env.example` and `CONFIG.md`, so a well-written `doc` is the onboarding experience for whoever deploys your app.
+
+**`exposure`** — `"secret"` or `"public"`. The default is `"secret"`: fail closed, always. Secret zernos redact in `explain()` and `toJSON()`, their values throw on serialization, and reading one through a public/browser context raises `ExposureError`. You opt *into* publicness; you never accidentally opt out of secrecy. Identity field.
+
+**`sources`** — an ordered precedence list of source references. First source that yields a raw value wins. Omitted, it defaults to a single env reference named after `key`. Order is significant and part of identity. Deployment sites can override at bind — `env(zerno, "NAME")` renames a declared ref in place, `chain()` replaces the set — without ever touching identity: the declared list stays the contract.
+
+```ts
+type SourceRef =
+  | { env: string }                     // process / worker environment variable
+  | { file: string }                    // file contents (re-readable — may be live)
+  | { provider: string; key?: string }  // named provider function (SSM, Vault, …)
+  | { literal: Json };                  // fixed value — useful for baked public constants
+```
+
+**`default`** — the fallback when no source yields a value. JSON only. There is no privileged path for defaults: at bind time a default is validated exactly like a sourced value, so a default that violates its own schema fails loudly instead of lurking until production.
+
+```ts
+import { bind } from "komirka/node";
+
+const retries = zerno({
+  key: "RETRY_COUNT",
+  schema: z.coerce.number().int().max(5),
+  exposure: "public",
+  default: 10, // violates max(5) — defaults get no free pass
+});
+
+bind([retries]);
+// MissingConfigError: 1 zerno failed to bind
+//   RETRY_COUNT — invalid (1 issue at <root>)
+```
+
+Both the *presence* and the *value* of `default` are identity fields — a zerno with a default is a different contract than one without.
+
+**`freshness`** — `"snapshot"` (default) or `"live"`. Snapshot means the value is resolved once at bind and pinned. Live is only meaningful for sources that can actually be re-read: files and providers. It is physics, not policy: a running Node process's OS environment never changes, so a live zerno whose only source is `env` earns a dev-mode warning, and on Cloudflare Workers — where env is fixed per deployment — live is a no-op with the same warning. If a value can change while the process runs, it's state, not config; declared live re-readable sources are the one carve-out. `freshness` is an identity field — a live zerno and a snapshot twin are different zernos, which is what lets `variants()` require snapshot-only discriminants.
+
+**`version`** — an optional schema-identity discriminator. Validators are functions and functions don't hash; when the schema vendor provides a fingerprint it is used automatically, and `version` is the explicit fallback: bump it when the schema's meaning changes so the zerno's content address changes with it.
+
+## Construction is inert
+
+Calling `zerno()` does *nothing* observable:
+
+- **No I/O.** It does not read `process.env`, open a file, or touch the network.
+- **No validation.** The schema is stored, not invoked.
+- **No registration.** There is no global registry in core, ever. Enumeration is bake's job, done from the manifest at build time.
+- **No caching.** The zerno object carries no value and never will.
+
+This is the property everything else leans on:
+
+- **Import cost is bytes.** A library can export its zernos from its top-level entry and importing them costs a frozen object, not a config system boot. That's what makes shipping zernos as a library contract viable.
+- **Any runtime.** The same descriptor module loads in Node, browsers, Workers, Deno, Bun — nothing runtime-specific happens until *you* bind through a runtime-specific entry point.
+- **Testability.** Tests construct zernos freely and bind them as `literal()` entries — zero `process.env` mutation, no import-order rituals.
+- **Bake can trust the manifest.** `komirka bake` runs your manifest in a constrained context; because construction is inert, any I/O it observes is a bug in the manifest, not normal operation.
+
+The flip side: since the zerno holds no value, reading one requires a binding, and a binding only answers for zernos it was given. There is no ambient fallback — the failure is a named error:
+
+```ts
+import { zerno } from "komirka";
+import { bind } from "komirka/node";
+
+const cfg = bind([poolSize]);
+
+cfg.unwrap(dbUrl);
+// UnboundZernoError: "DATABASE_URL" is not part of this binding.
+```
+
+(`unwrap()` has exactly three outcomes: a hit, `UnboundZernoError`, or `DescriptorMismatchError` when the same key was bound under a *different* descriptor — see [Identity](./identity) for the third one.)
+
+## Descriptors round-trip as JSON
+
+A zerno is a contract, not a dependency: minus the schema function, the descriptor survives `JSON.stringify` intact. It can sit in a `manifest.json`, cross a `postMessage` boundary, or be diffed in a pull request.
+
+```ts
+JSON.stringify(dbUrl, null, 2);
+```
+
+```json
+{
+  "$zerno": 1,
+  "key": "DATABASE_URL",
+  "doc": "Primary Postgres connection string",
+  "exposure": "secret",
+  "sources": [{ "env": "DATABASE_URL" }],
+  "freshness": "snapshot"
+}
+```
+
+The `schema` is the one field that does not serialize (functions aren't JSON); its identity travels separately as a schema fingerprint or your explicit `version`. Zernos are detected by the structural `$zerno` brand — never `instanceof` — so a descriptor that crossed a serialization boundary, or a duplicate instance from a dual-package lockfile, is still recognized as a zerno.
+
+To keep that guarantee honest, every field must be JSON. A non-JSON value anywhere in the descriptor is a `TypeError` at construction — at the line where the mistake lives, not later at bind:
+
+```ts
+zerno({
+  key: "STARTED_AT",
+  exposure: "public",
+  default: new Date(), // Date is not JSON
+});
+// TypeError: zerno "STARTED_AT": non-JSON value in "default"
+```
+
+The same applies to `Map`s, class instances, and functions in any field. If it can't round-trip, it can't be a descriptor.
+
+## Types come from the schema's output
+
+`Zerno<T>` infers `T` from what the schema *produces*, not what it accepts. Environment variables are strings on the wire; a coercing schema turns the zerno — and every read of it — into the real type:
+
+```ts
+const poolSize = zerno({
+  key: "DB_POOL_SIZE",
+  schema: z.coerce.number().int().min(1).max(100),
+  exposure: "public",
+  default: 10,
+});
+// poolSize : Zerno<number>
+
+const cfg = bind([poolSize]); // bind from "komirka/node"
+const n = cfg.unwrap(poolSize); // n : number — no parseInt at call sites
+
+const region = zerno({ key: "AWS_REGION", exposure: "public" });
+// region : Zerno<string> — no schema, raw string through
+```
+
+## Identity fields vs cosmetic fields
+
+Two zernos are the same zerno when their *identity subset* matches: `key`, `exposure`, `sources` (order-significant), `default` (presence and value), and the schema identity when available. Everything else — `doc`, examples, deprecation notes, and any unknown fields — is cosmetic and excluded.
+
+```ts
+import { identityOf } from "komirka";
+
+identityOf(dbUrl);
+// "zernov1:xxh128:9f2c41d0a7be5e13"
+```
+
+The practical consequence: rewording a `doc` string, or two copies of the same package version in a lockfile, do not fracture identity — but changing precedence order, flipping `exposure`, or adding a `default` does, because each of those changes what the zerno *means*. The full contract (canonical preimage, hash-vs-structural equality, `DescriptorMismatchError`, and the `unify` escape hatch) lives on the [Identity](./identity) page.
+
+## Group zernos where they're read
+
+Groups are plain arrays. `defineZernos` adds one thing: const-tuple inference, so `pick()` can produce a precisely typed scope.
+
+```ts
+// src/db/config.ts — right next to the pool it configures
+import { defineZernos } from "komirka";
+
+export const dbZernos = defineZernos([dbUrl, poolSize]);
+```
+
+```ts
+const db = cfg.pick(dbZernos);
+// Scope<{ DATABASE_URL: string; DB_POOL_SIZE: number }>
+```
+
+Declare groups near their call sites — one group per subsystem or per consuming function. Libraries export their own groups (`mailerZernos`) and type their APIs against the matching `Scope`; the app binds once at its composition root and narrows with `pick()`.
+
+What *not* to do:
+
+```ts
+// ❌ src/config/index.ts — the all-zernos module
+export const ALL_ZERNOS = defineZernos([
+  dbUrl,
+  poolSize,
+  smtpUrl,
+  stripeKey,
+  // ...every zerno in the app
+]);
+```
+
+This is a monolith rebuilt through the import graph. The descriptors themselves are cheap — inert, remember — but the module that imports *every* zerno also imports every schema, and the validator code behind them, into every consumer's bundle. Every module now transitively depends on all of config; bake's coverage report (manifest vs. client-reachable zernos) degrades to "everything is reachable"; and the least-privilege story of `pick()` is defeated one level up, because every file already imports the whole surface. Keep groups small and local, and let bake — not an import — be the one place that sees everything.

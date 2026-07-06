@@ -1,6 +1,6 @@
 ---
 title: Bake
-description: The build-time CLI that turns declared knobs into client artifacts, server wiring, and generated docs — the only channel by which config reaches the browser.
+description: The build-time CLI that turns declared zernos into client artifacts, server wiring, and generated docs — the only channel by which config reaches the browser.
 ---
 
 ## What bake is
@@ -17,14 +17,14 @@ Bake is driven by one file, `config.manifest.ts`:
 
 ```ts
 // config.manifest.ts
-import { appPublicKnobs } from "./src/config/public";
-import { widgetKnobs } from "@acme/widget/knobs";
-import { allKnobs } from "./src/config/all";
+import { appPublicZernos } from "./src/config/public";
+import { widgetZernos } from "@acme/widget/zernos";
+import { allZernos } from "./src/config/all";
 
 export default {
   targets: {
-    client: [...appPublicKnobs, ...widgetKnobs],
-    server: [...allKnobs],
+    client: [...appPublicZernos, ...widgetZernos],
+    server: [...allZernos],
   },
 };
 ```
@@ -39,27 +39,27 @@ runtime code, holds *references* rather than values or behavior, and deleting it
 
 Two rules keep it from growing into a definition blob:
 
-- **Feature modules own their knobs.** Groups live next to the code that uses them
-  (`email.knobs.ts`, `checkout.knobs.ts`); the manifest is **compose-only** — imports and
-  spreads. Defining knobs (or relations) directly inside the manifest draws a bake lint
+- **Feature modules own their zernos.** Groups live next to the code that uses them
+  (`email.zernos.ts`, `checkout.zernos.ts`); the manifest is **compose-only** — imports and
+  spreads. Defining zernos (or relations) directly inside the manifest draws a bake lint
   warning, keyed on the defining module of every constructor call.
 - **The attestation artifact is a committed lockfile, not this file.** Spreads hide
-  deltas: a dependency bump that adds a knob to `widgetKnobs` leaves `config.manifest.ts`
+  deltas: a dependency bump that adds a zerno to `widgetZernos` leaves `config.manifest.ts`
   byte-identical — CODEOWNERS on it would never fire. So bake emits
   `config.manifest.lock.json` — RFC 8785 canonical, sorted by identity hash, with
   per-entry provenance (which manifest export, which module or `package@version`
-  contributed it, and its source refs, so "this knob became DB-mutable" is a visible
+  contributed it, and its source refs, so "this zerno became DB-mutable" is a visible
   transition). That file is committed, CODEOWNERS sits on *it*, and `bake --check` fails
   CI on any drift with the client-target delta rendered human-readably. Every discovery
   or composition mistake becomes a reviewable diff.
 
 ### Targets are an app attestation
 
-The `client` list is **deny-by-default**. A package declaring `exposure: "public"` on a knob is *necessary* — bake refuses to put any secret-exposure knob in a client target — but it is **not sufficient**:
+The `client` list is **deny-by-default**. A package declaring `exposure: "public"` on a zerno is *necessary* — bake refuses to put any secret-exposure zerno in a client target — but it is **not sufficient**:
 
 ```ts
 // Inside @acme/widget — the package's opinion:
-export const widgetTheme = knob({
+export const widgetTheme = zerno({
   key: "WIDGET_THEME",
   schema: z.enum(["light", "dark"]),
   exposure: "public",
@@ -69,17 +69,17 @@ export const widgetTheme = knob({
 // lists it in targets.client. A dependency cannot ship itself.
 ```
 
-Two parties must agree before a value is shipped to an untrusted client: the package that declared the knob public, and the application that listed it in `targets.client`. Env-sourced values crossing into the client artifact go through this allowlist; nothing rides along implicitly.
+Two parties must agree before a value is shipped to an untrusted client: the package that declared the zerno public, and the application that listed it in `targets.client`. Env-sourced values crossing into the client artifact go through this allowlist; nothing rides along implicitly.
 
 One categorical exclusion: a `variants()` group is client-ineligible as a whole in v1 — any member (or its discriminant) in `targets.client` fails the bake with `VariantsInClientTargetError`. Baking would freeze a build-time branch choice that runtime can silently contradict, and mixed-exposure branches would ship torn half-branches. The attested branch-freeze escape hatch is an [open decision](/docs/reference/decisions) for v2.
 
 ### The manifest is side-effect-free — by contract, and detectably
 
-Bake executes `config.manifest.ts` in a constrained context. This is where knob inertness pays off structurally: constructing a knob performs zero I/O, zero validation, zero side effects — so a manifest module has *no legitimate reason* to touch the network, the filesystem, or child processes. Any I/O observed during manifest evaluation is a contract violation, and bake fails the build and reports the offending module.
+Bake executes `config.manifest.ts` in a constrained context. This is where zerno inertness pays off structurally: constructing a zerno performs zero I/O, zero validation, zero side effects — so a manifest module has *no legitimate reason* to touch the network, the filesystem, or child processes. Any I/O observed during manifest evaluation is a contract violation, and bake fails the build and reports the offending module.
 
 This closes the build-time RCE class that haunts eval-your-config-at-build tools: "run this config file" cannot quietly become "run this arbitrary program in CI with CI's credentials," because the legitimate behavior of the file is so narrow that everything else stands out.
 
-One consequence is taken seriously: `bake --check` runs on every PR, which makes the manifest import closure — including knob files inside dependency-bumped third-party packages — *adversary-triggerable* in CI. The constrained context is therefore a security boundary there, not hygiene: no network, no filesystem writes outside the declared output, no reads of CI secret env — and the check job itself runs with **zero credentials** (it needs only the checkout and the committed lockfile).
+One consequence is taken seriously: `bake --check` runs on every PR, which makes the manifest import closure — including zerno files inside dependency-bumped third-party packages — *adversary-triggerable* in CI. The constrained context is therefore a security boundary there, not hygiene: no network, no filesystem writes outside the declared output, no reads of CI secret env — and the check job itself runs with **zero credentials** (it needs only the checkout and the committed lockfile).
 
 ## What bake emits
 
@@ -89,29 +89,29 @@ One `komirka bake` run produces, per the manifest:
 | --- | --- |
 | Client module (per `client` target) | Public literal values + an inlined snapshot shim (~30 lines) |
 | Server wiring module (optional, per `server` target) | Key *names* + dynamic env access — never values |
-| `.env.example` | Every key, its `doc` text, defaults for public knobs, blanks for secrets |
+| `.env.example` | Every key, its `doc` text, defaults for public zernos, blanks for secrets |
 | `CONFIG.md` | Human-readable inventory generated from `doc` fields |
 | `manifest.json` | Machine-readable inventory: keys, exposure, identity hashes, source refs — never values |
 | Leak-scan report | Findings from the allowlist scan over all emitted assets |
 
 ### The client module: literals plus a zero-import shim
 
-The client artifact contains public literal values and an inlined shim of roughly thirty lines. It imports **nothing** at runtime — not even `komirka` — so the baked path is genuinely zero-runtime-dependency. The shim carries the `Scope` brand, so it satisfies the same type that `pick()` produces, and library code typed as `Scope<ConfigOf<typeof widgetKnobs>>` accepts it unchanged:
+The client artifact contains public literal values and an inlined shim of roughly thirty lines. It imports **nothing** at runtime — not even `komirka` — so the baked path is genuinely zero-runtime-dependency. The shim carries the `Scope` brand, so it satisfies the same type that `pick()` produces, and library code typed as `Scope<ConfigOf<typeof widgetZernos>>` accepts it unchanged:
 
 ```ts
 // Client code. Path and export shape shown are illustrative of the generated output.
 import { config } from "./config.baked";
 import { apiBaseUrl } from "./src/config/public";
 
-const url = config.get(apiBaseUrl); // sync, typed, hash-verified
+const url = config.unwrap(apiBaseUrl); // sync, typed, hash-verified
 ```
 
-Every entry in the shim carries the knob's identity hash, and `get()` verifies it on read. Upgrade `@acme/widget` to a version that changed a knob's schema, forget to re-bake, and the read fails loudly instead of returning a value validated against yesterday's contract:
+Every entry in the shim carries the zerno's identity hash, and `unwrap()` verifies it on read. Upgrade `@acme/widget` to a version that changed a zerno's schema, forget to re-bake, and the read fails loudly instead of returning a value validated against yesterday's contract:
 
 ```ts
-config.get(widgetTheme);
-// StaleBakeError: WIDGET_THEME was baked from knobv1:xxh128:9f2e…
-// but the imported descriptor is knobv1:xxh128:c41a….
+config.unwrap(widgetTheme);
+// StaleBakeError: WIDGET_THEME was baked from zernov1:xxh128:9f2e…
+// but the imported descriptor is zernov1:xxh128:c41a….
 // Re-run `komirka bake` (or `komirka bake --check` in CI would have caught this).
 ```
 
@@ -131,7 +131,7 @@ Why is static `process.env.KEY` forbidden? Because webpack's DefinePlugin, esbui
 
 ### Generated docs
 
-`.env.example` and `CONFIG.md` are rendered from each knob's `doc` field — cosmetic metadata finally earning its keep:
+`.env.example` and `CONFIG.md` are rendered from each zerno's `doc` field — cosmetic metadata finally earning its keep:
 
 ```bash
 # .env.example — generated by `komirka bake`; do not edit by hand.
@@ -149,16 +149,16 @@ Bake reads **public values** and **secret key names**. It never resolves a secre
 
 1. **Secrets stay out of CI.** Your build machine needs no production credentials to produce a complete, correct build. There is nothing for a compromised CI runner or a leaked build log to exfiltrate via bake.
 2. **Build once, deploy many.** The artifact is environment-agnostic with respect to secrets; the same build promotes from staging to production because secret values were never captured at build time.
-3. **Secrets validate at runtime, where the value lives.** The server calls `bind()` or `load()` at boot; a missing or malformed secret surfaces there as an aggregated `MissingConfigError` — with the usual rule that for secret knobs the report carries issue counts and paths only, never validator messages or values.
+3. **Secrets validate at runtime, where the value lives.** The server calls `bind()` at boot; a missing or malformed secret surfaces there as an aggregated `MissingConfigError` — with the usual rule that for secret zernos the report carries issue counts and paths only, never validator messages or values.
 
 ## CI drift gate and dev loop
 
-`bake --check` re-derives everything and diffs against the committed artifacts — the CI gate that makes "someone changed a knob and forgot to re-bake" a red build instead of a production `StaleBakeError`:
+`bake --check` re-derives everything and diffs against the committed artifacts — the CI gate that makes "someone changed a zerno and forgot to re-bake" a red build instead of a production `StaleBakeError`:
 
 ```bash
 $ komirka bake --check
 ✖ drift: config.baked is stale
-    WIDGET_THEME   baked knobv1:xxh128:9f2e…   manifest knobv1:xxh128:c41a…
+    WIDGET_THEME   baked zernov1:xxh128:9f2e…   manifest zernov1:xxh128:c41a…
 ✖ drift: .env.example missing key SMTP_PASSWORD
   run `komirka bake` and commit the result
 $ echo $?
@@ -172,7 +172,7 @@ $ echo $?
 Baking is not mandatory because builds are virtuous; it is mandatory exactly where the artifact crosses to an **untrusted runtime**:
 
 - **Declared client targets must bake.** Skipping bake with a `client` target declared fails the build: the generated module is the only way client code can read config, so its absence is an unresolvable import — and the required targets declaration turns that into a diagnosable "you declared an untrusted target and didn't bake it" instead of a mystery.
-- **Trusted servers may runtime-bind.** A server is free to skip baked wiring entirely and call `bind(allKnobs)` from `komirka/node` at boot. The trust boundary is different: the process already holds the secrets.
+- **Trusted servers may runtime-bind.** A server is free to skip baked wiring entirely and call `bind(allZernos)` from `komirka/node` at boot. The trust boundary is different: the process already holds the secrets.
 
 ## The defense stack
 
@@ -184,8 +184,8 @@ No single mechanism below is claimed sufficient. Each layer is listed with what 
 | Generated-module-only delivery | One road into the bundle; no runtime env reads on the client path | A developer hand-writing `process.env.X` in client code anyway (next layer's job) |
 | No-secret-sources browser entry | The universal `komirka` entry contains no secret-capable sources, by construction | Values inlined by other means, e.g. a misconfigured define pass |
 | AST lint | Bans raw `process.env` / `import.meta.env` reads in client-designated code | Only what it parses — computed or obfuscated access, and generated code it never sees |
-| Coverage report | Diffs manifest vs client-reachable knobs; flags knobs read by client code but absent from the target | Config that never became a knob at all |
-| Allowlist leak scan | Flags any high-entropy string in emitted assets — including sourcemaps and decompressed `.gz`/`.br` — that is not a registered public value; catches hand-rolled non-knob secrets and accidental define-inlining; needs zero secret material in CI; findings never print values | Low-entropy values ("8080" is unscannable — bake warns explicitly and structural controls carry it); SSR request-time payloads, which are out of build-time scope and are closed instead by the runtime serialization guard on `Snapshot` |
+| Coverage report | Diffs manifest vs client-reachable zernos; flags zernos read by client code but absent from the target | Config that never became a zerno at all |
+| Allowlist leak scan | Flags any high-entropy string in emitted assets — including sourcemaps and decompressed `.gz`/`.br` — that is not a registered public value; catches hand-rolled non-zerno secrets and accidental define-inlining; needs zero secret material in CI; findings never print values | Low-entropy values ("8080" is unscannable — bake warns explicitly and structural controls carry it); SSR request-time payloads, which are out of build-time scope and are closed instead by the runtime serialization guard on `Snapshot` |
 
 Waivers for scan findings exist, but they are explicit and audited — a suppression is a reviewed artifact, not a comment.
 
@@ -193,4 +193,4 @@ Waivers for scan findings exist, but they are explicit and audited — a suppres
 
 - It is not a bundler, and it does not wrap yours.
 - It does not fetch secrets, talk to secret managers, or hold credentials — providers are runtime concerns.
-- It is not a runtime registry: after bake, the client artifact is inert data plus a thirty-line shim, and the server is ordinary `bind()`/`load()` calls.
+- It is not a runtime registry: after bake, the client artifact is inert data plus a thirty-line shim, and the server is ordinary `bind()` calls.

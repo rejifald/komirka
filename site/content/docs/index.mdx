@@ -7,8 +7,8 @@ description: Atomic configuration — each config value is an inert, documented,
 > pages read like real library docs because that is the fastest way to evaluate a design.
 > The package is **komirka** (published on npm as a `0.0.0` placeholder; repo
 > [github.com/rejifald/komirka](https://github.com/rejifald/komirka)). The primitive is
-> still provisionally called `knob`; renaming it is a separate
-> [open decision](/docs/reference/decisions).
+> **`zerno`** — Ukrainian for a grain, one small unit of config (see the
+> [naming decision](/docs/reference/decisions)).
 
 ## The problem
 
@@ -26,24 +26,24 @@ entrypoint reads one of them. The consequences are familiar:
 
 ## The idea
 
-Make configuration **atomic**. Each config value is one `knob`: an inert, frozen,
+Make configuration **atomic**. Each config value is one `zerno`: an inert, frozen,
 JSON-serializable descriptor carrying its name, its validator, its documentation, its
 trust level, and where its value may come from. Descriptors do nothing at import. Values
 exist only inside **bindings** you create explicitly, per runtime:
 
 ```ts
 // config/db.ts — inert descriptors; importing this file costs bytes, not behavior
-import { knob } from "komirka";
+import { zerno } from "komirka";
 import { z } from "zod";
 
-export const dbUrl = knob({
+export const dbUrl = zerno({
   key: "DATABASE_URL",
   schema: z.string().url(),
   doc: "Primary Postgres connection string",
   // exposure defaults to "secret" — fail closed
 });
 
-export const poolSize = knob({
+export const poolSize = zerno({
   key: "DB_POOL_SIZE",
   schema: z.coerce.number().int().min(1).max(100),
   default: 10,
@@ -105,7 +105,7 @@ has zero runtime dependencies of its own.
 
 ## Where to start
 
-- [The knob](/docs/concepts/knob) — the descriptor, field by field.
+- [The zerno](/docs/concepts/zerno) — the descriptor, field by field.
 - [Binding and snapshots](/docs/concepts/binding) — where values live.
 - [Principles](/docs/principles) — every constraint, pitfall, and security concern, in one
   place. This is the project's constitution.

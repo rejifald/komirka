@@ -24,23 +24,23 @@ export const config = z
 
 A Node compatibility flag can mirror plain-text string bindings onto a `process.env` shim, but that mirror is per-isolate, excludes non-string bindings, and evaporates the moment the bag varies per request (Workers for Platforms dispatch, per-tenant remapping). The honest model is the platform's own model: **env is a function argument**, and configuration must be bound where the argument is in hand.
 
-Komirka is built for exactly this split. A knob is an inert descriptor — zero I/O, zero validation, zero side effects at construction — so declaring it at module scope is safe on every runtime, workerd included. Values exist only inside an explicit binding, and you create that binding inside the handler.
+Komirka is built for exactly this split. A zerno is an inert descriptor — zero I/O, zero validation, zero side effects at construction — so declaring it at module scope is safe on every runtime, workerd included. Values exist only inside an explicit binding, and you create that binding inside the handler.
 
 ## Declare at module scope, bind per request
 
 ```ts
-// knobs.ts — inert descriptors; importing this file does nothing observable
-import { knob, defineKnobs } from "komirka";
+// zernos.ts — inert descriptors; importing this file does nothing observable
+import { zerno, defineZernos } from "komirka";
 import { z } from "zod";
 
-export const dbUrl = knob({
+export const dbUrl = zerno({
   key: "DATABASE_URL",
   schema: z.string().url(),
   doc: "Primary Postgres connection string",
   // exposure defaults to "secret" — fail closed
 });
 
-export const poolSize = knob({
+export const poolSize = zerno({
   key: "DB_POOL_SIZE",
   schema: z.coerce.number().int().min(1),
   exposure: "public",
@@ -48,22 +48,22 @@ export const poolSize = knob({
   doc: "Upper bound on pooled connections per isolate",
 });
 
-export const appKnobs = defineKnobs([dbUrl, poolSize]);
+export const appZernos = defineZernos([dbUrl, poolSize]);
 ```
 
 ```ts
 // worker.ts
 import { bind } from "komirka/workers";
-import { dbUrl, poolSize } from "./knobs";
+import { dbUrl, poolSize } from "./zernos";
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    // Eager bind: every listed knob is resolved and validated NOW.
+    // Eager bind: every listed zerno is resolved and validated NOW.
     // Anything missing or invalid throws ONE aggregated MissingConfigError
     // for this request — before your handler touches a single value.
     const cfg = bind({ dbUrl, poolSize }, { env });
 
-    const db = connect(cfg.get(dbUrl), { max: cfg.get(poolSize) });
+    const db = connect(cfg.unwrap(dbUrl), { max: cfg.unwrap(poolSize) });
     return handle(request, db);
   },
 };
@@ -73,7 +73,7 @@ The bag is a **required** option, at the type level. `bind` from `komirka/worker
 
 The same pattern applies to `scheduled()` and `queue()` handlers — each receives its own `env`, and each gets its own bind.
 
-There is no ambient fallback to reach for. A knob is not a value; reading one outside an explicit binding is a named `UnboundKnobError`, never a silent `undefined`. That is what makes the per-request discipline stick: the library gives you no way to accidentally do it wrong at module scope.
+There is no ambient fallback to reach for. A zerno is not a value; reading one outside an explicit binding is a named `UnboundZernoError`, never a silent `undefined`. That is what makes the per-request discipline stick: the library gives you no way to accidentally do it wrong at module scope.
 
 ## The stash anti-pattern: caching the first request's env
 
@@ -95,28 +95,28 @@ export default {
 
 In any deployment where the bag can differ between requests — dispatch namespaces, per-tenant remapping, preview sessions — this serves request 1's tenant to everyone after it. Tenant A's `DATABASE_URL` answers tenant B's traffic: cross-tenant bleed, with secrets. It also quietly converts eager validation into "validated once, for possibly the wrong bag". And it is invisible in single-tenant dev, which is why it survives review.
 
-The fix is not cleverer caching. It is binding per request and letting the library make that cheap. And note that the surface area for this bug is exactly the one line above: a per-request bag can never be captured inside wiring data — combinators like `env(knob, name)` are pure data, and capability enters only at `bind`.
+The fix is not cleverer caching. It is binding per request and letting the library make that cheap. And note that the surface area for this bug is exactly the one line above: a per-request bag can never be captured inside wiring data — combinators like `env(zerno, name)` are pure data, and capability enters only at `bind`.
 
 ## Per-request eager bind is close to free
 
-Eagerly validating every knob on every request sounds expensive. It isn't, because core keeps a per-process (on workerd: per-isolate) validation cache keyed on the pair **(knob identity hash, raw value)**. Validators are contractually pure, so memoizing by raw input is sound.
+Eagerly validating every zerno on every request sounds expensive. It isn't, because core keeps a per-process (on workerd: per-isolate) validation cache keyed on the pair **(zerno identity hash, raw value)**. Validators are contractually pure, so memoizing by raw input is sound.
 
 ```ts
 import { identityOf } from "komirka";
 
-identityOf(dbUrl); // "knobv1:xxh128:…" — one half of the cache key; the raw string is the other
+identityOf(dbUrl); // "zernov1:xxh128:…" — one half of the cache key; the raw string is the other
 ```
 
-Request N re-runs a validator only for knobs whose raw value differs from something already proven. On a stable deployment the env bag never changes between requests, so every bind after the first is hash lookups and string comparisons — zero schema executions, no zod on the hot path. You get import-time economics with per-request correctness.
+Request N re-runs a validator only for zernos whose raw value differs from something already proven. On a stable deployment the env bag never changes between requests, so every bind after the first is hash lookups and string comparisons — zero schema executions, no zod on the hot path. You get import-time economics with per-request correctness.
 
-Because the key is the content-addressed identity hash, the cache is also robust in the ways that matter: duplicated knob instances from dual-package installs share entries, and different raw values (different tenants) occupy separate entries instead of thrashing one slot.
+Because the key is the content-addressed identity hash, the cache is also robust in the ways that matter: duplicated zerno instances from dual-package installs share entries, and different raw values (different tenants) occupy separate entries instead of thrashing one slot.
 
 ## live on workerd env is a no-op
 
 `freshness: "live"` exists for sources that can be re-read while the process runs — files, providers. A Worker's env is not one of them: on workerd the bag is fixed per deployment, and changing a variable or secret creates a *new* deployment whose isolates replace the old ones. There is nothing to poll; the "update" is a restart.
 
 ```ts
-const logLevel = knob({
+const logLevel = zerno({
   key: "LOG_LEVEL",
   schema: z.enum(["debug", "info", "warn", "error"]),
   exposure: "public",
@@ -129,7 +129,7 @@ const live = bind([logLevel], { env });
 // snapshot() pins the same values — live over workerd env is pure overhead.
 ```
 
-Declare env-sourced knobs with the default `freshness: "snapshot"` on Workers. Reserve `live` for the one place it is meaningful here: provider-backed values.
+Declare env-sourced zernos with the default `freshness: "snapshot"` on Workers. Reserve `live` for the one place it is meaningful here: provider-backed values.
 
 ## Provider-backed values: refresh() rides ctx.waitUntil
 
@@ -141,11 +141,11 @@ Some values genuinely change between deployments — a pricing table in KV, a re
 So freshness rides the request lifecycle, via `ctx.waitUntil`:
 
 ```ts
-import { knob, refresh } from "komirka";
+import { zerno, refresh } from "komirka";
 import { bind, provider } from "komirka/async";
 import type { AsyncBinding } from "komirka";
 
-const pricing = knob({
+const pricing = zerno({
   key: "PRICING_TABLE",
   schema: PricingSchema,
   exposure: "public",
@@ -160,8 +160,11 @@ function pricingKvProvider(kv: KVNamespace) {
   return {
     id: "pricing-kv",
     color: "async" as const,
-    async read(key: string) {
-      return kv.get(key, "json");
+    async read(keys: readonly string[]) {
+      return Promise.all(keys.map(async (k) => {
+        const raw = await kv.get(k, "json");
+        return raw == null ? { absent: true } : { raw };
+      }));
     },
   };
 }
@@ -170,19 +173,19 @@ let live: AsyncBinding | undefined;
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
-    // provider(entry, impl) supplies the impl for the knob's declared
+    // provider(entry, impl) supplies the impl for the zerno's declared
     // provider ref; the impl's async color makes this an AsyncBinding.
     live ??= bind({ pricing: provider(pricing, pricingKvProvider(env.PRICING_KV)) });
 
     const cfg = await live.snapshot(); // pin: this request sees one coherent view, no torn reads
     ctx.waitUntil(refresh(live));      // fetch a newer table for LATER requests
 
-    return quote(request, cfg.get(pricing));
+    return quote(request, cfg.unwrap(pricing));
   },
 };
 ```
 
-The current request is always served from the last pinned snapshot — the first `snapshot()` is where the provider read actually happens; `refresh()` produces a new pinned snapshot for requests that come after. Refresh is single-flight coalesced in core, so a burst of concurrent requests each calling `waitUntil(refresh(live))` triggers one provider read, not a stampede. On failure it is all-or-nothing by default (opt in to `partial: "keep-old"` if you prefer), and a refresh that returns invalid data throws — the caller keeps the previous pinned snapshot, so a bad deploy of the pricing document fails the refresh loudly (with `onInvalid` fired once for the bad raw) instead of crashing the edge; requests keep serving the old snapshot they already hold. `live.health()` reports per-knob staleness and the last validation error if you expose a liveness probe.
+The current request is always served from the last pinned snapshot — the first `snapshot()` is where the provider read actually happens; `refresh()` produces a new pinned snapshot for requests that come after. Refresh is single-flight coalesced in core, so a burst of concurrent requests each calling `waitUntil(refresh(live))` triggers one provider read, not a stampede. On failure it is all-or-nothing by default (opt in to `partial: "keep-old"` if you prefer), and a refresh that returns invalid data throws — the caller keeps the previous pinned snapshot, so a bad deploy of the pricing document fails the refresh loudly (with `onInvalid` fired once for the bad raw) instead of crashing the edge; requests keep serving the old snapshot they already hold. `live.health()` reports per-zerno staleness and the last validation error if you expose a liveness probe.
 
 One boundary, stated plainly: caching `live` at module scope is safe here *only* because nothing inside it is per-request — the KV namespace handle the impl closed over is fixed for the isolate's deployment. The per-request thing, the env bag's values under dispatch, must never be captured this way. Provider handles: cacheable. Tenant env: never.
 
@@ -196,7 +199,7 @@ The env bag is a bind option and names are per-entry wiring data. That makes per
 //   TENANT_ACME_DATABASE_URL,   TENANT_ACME_DB_POOL_SIZE,
 //   TENANT_ZENITH_DATABASE_URL, TENANT_ZENITH_DB_POOL_SIZE, …
 import { bind, env } from "komirka/workers";
-import { dbUrl, poolSize } from "./knobs";
+import { dbUrl, poolSize } from "./zernos";
 
 function tenantEntries(tenant: string) {
   const prefix = `TENANT_${tenant.toUpperCase()}_`;
@@ -216,13 +219,13 @@ export default {
     const cfg = bind(tenantEntries(tenant), { env });
 
     // A misconfigured tenant fails HERE — one MissingConfigError naming every
-    // missing or invalid knob — and only that tenant's requests fail.
+    // missing or invalid zerno — and only that tenant's requests fail.
     return handle(request, cfg);
   },
 };
 ```
 
-`env(dbUrl, name)` is a per-kind ref rename: it patches the knob's declared env ref in place and preserves any other declared fallbacks. It is deployment wiring, not a new knob — identity is untouched, so the contract, the lockfile entry, and the validation cache are shared across every tenant.
+`env(dbUrl, name)` is a per-kind ref rename: it patches the zerno's declared env ref in place and preserves any other declared fallbacks. It is deployment wiring, not a new zerno — identity is untouched, so the contract, the lockfile entry, and the validation cache are shared across every tenant.
 
 Because binding is per request, the blast radius is per request: tenant ZENITH missing its pool size returns errors for ZENITH and nobody else — and the error speaks the effective name it looked for, `TENANT_ZENITH_DB_POOL_SIZE`, first. The validation cache keys on (identity, raw), so each tenant's values occupy their own entries — tenants do not evict each other, and the steady state stays validator-free even with hundreds of tenants. When you need to see what actually resolved, `cfg.explain(dbUrl)` reports which ref supplied the value and the effective name it read; the secret value itself is redacted.
 
@@ -234,7 +237,7 @@ Factor handler logic to accept a `Snapshot` (or a `Scope` via `pick()`), keep th
 
 ```ts
 import { bind, literal } from "komirka";
-import { dbUrl, poolSize } from "./knobs";
+import { dbUrl, poolSize } from "./zernos";
 
 const cfg = bind({
   dbUrl: literal(dbUrl, "postgres://user:pw@localhost:5432/test"),

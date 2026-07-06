@@ -11,17 +11,17 @@ An email subsystem that runs in one of three modes is the canonical case:
 - `smtp` — requires `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`.
 - `sendgrid` — requires `SENDGRID_API_KEY`.
 
-A flat knob list cannot express this. Mark `SMTP_HOST` required and every sendgrid deploy fails at bind for a variable it will never read. Mark it optional and a misconfigured smtp deploy boots cleanly and fails on the first send. The conditionality belongs in the descriptor graph, so `bind` can enforce exactly the set this deployment actually needs — and nothing else.
+A flat zerno list cannot express this. Mark `SMTP_HOST` required and every sendgrid deploy fails at bind for a variable it will never read. Mark it optional and a misconfigured smtp deploy boots cleanly and fails on the first send. The conditionality belongs in the descriptor graph, so `bind` can enforce exactly the set this deployment actually needs — and nothing else.
 
 ## Declaring a variants group
 
-`variants(discriminant, branches)` takes a knob whose schema enumerates the modes, plus one member map per mode:
+`variants(discriminant, branches)` takes a zerno whose schema enumerates the modes, plus one member map per mode:
 
 ```ts
-import { knob, variants } from "komirka";
+import { zerno, variants } from "komirka";
 import { z } from "zod";
 
-const emailService = knob({
+const emailService = zerno({
   key: "EMAIL_SERVICE_TYPE",
   schema: z.enum(["console", "smtp", "sendgrid"]),
   exposure: "public",
@@ -31,28 +31,28 @@ const emailService = knob({
 export const email = variants(emailService, {
   console: {},
   smtp: {
-    host: knob({ key: "SMTP_HOST", doc: "SMTP relay host" }),
-    port: knob({
+    host: zerno({ key: "SMTP_HOST", doc: "SMTP relay host" }),
+    port: zerno({
       key: "SMTP_PORT",
       schema: z.coerce.number().int().min(1).max(65535),
       default: 587,
       exposure: "public",
     }),
-    user: knob({ key: "SMTP_USER" }),
-    password: knob({ key: "SMTP_PASSWORD" }), // secret by default
+    user: zerno({ key: "SMTP_USER" }),
+    password: zerno({ key: "SMTP_PASSWORD" }), // secret by default
   },
   sendgrid: {
-    apiKey: knob({ key: "SENDGRID_API_KEY" }),
+    apiKey: zerno({ key: "SENDGRID_API_KEY" }),
   },
 });
 ```
 
-A group binds alongside plain knobs — it is just another entry in the bind set. Bare entries resolve their declared refs against the entry point's natural defaults; under `komirka/node` that is `process.env` and the filesystem:
+A group binds alongside plain zernos — it is just another entry in the bind set. Bare entries resolve their declared refs against the entry point's natural defaults; under `komirka/node` that is `process.env` and the filesystem:
 
 ```ts
 import { bind } from "komirka/node";
 
-const appName = knob({ key: "APP_NAME", exposure: "public", default: "mailer" });
+const appName = zerno({ key: "APP_NAME", exposure: "public", default: "mailer" });
 
 const cfg = bind({ email, appName });
 ```
@@ -72,20 +72,20 @@ const cfg = bind({
 
 The discriminant is a member for wiring purposes, so the prefix applies to it too: this deployment selects a branch from `MAILER_EMAIL_SERVICE_TYPE`, and the smtp branch reads `MAILER_SMTP_HOST`, `MAILER_SMTP_PORT`, and so on. Two laws govern the shape:
 
-- **One entry per knob, ever.** A member wired again elsewhere in the same bind — directly, or through another entry — is a `DuplicateWiringError` at bind time (groups are flattened for the check). Spelling the password out as its own entry next to the group is exactly this error, which is why specialization lives *inside* the group entry, via `overrides`.
+- **One entry per zerno, ever.** A member wired again elsewhere in the same bind — directly, or through another entry — is a `DuplicateWiringError` at bind time (groups are flattened for the check). Spelling the password out as its own entry next to the group is exactly this error, which is why specialization lives *inside* the group entry, via `overrides`.
 - **Overrides are exempt from the prefix.** `overrides: { password: "SECRET_PW" }` means the password reads exactly `SECRET_PW`, not `MAILER_SECRET_PW`. Per-member overrides are absolute — no transform touches them.
 
 None of this forks identity: the wired group hashes to the same `relv1|…` id it had bare. Wiring is deployment data, and `match()`, scopes, and every error below keep working against the same group object.
 
 ## Discriminant-first resolution
 
-`bind` resolves and validates the discriminant **first**, in every bind mode — including `bind.unchecked` — and then requires and validates only the members of the active branch. Deploy with `EMAIL_SERVICE_TYPE=sendgrid` and none of the `SMTP_*` variables need to exist. If active-branch members are missing, they join the usual single aggregated `MissingConfigError` alongside any missing plain knobs.
+`bind` resolves and validates the discriminant **first**, in every bind mode — including `bind.unchecked` — and then requires and validates only the members of the active branch. Deploy with `EMAIL_SERVICE_TYPE=sendgrid` and none of the `SMTP_*` variables need to exist. If active-branch members are missing, they join the usual single aggregated `MissingConfigError` alongside any missing plain zernos.
 
 A discriminant whose refs produced nothing and that declares no default cannot select a branch, so bind fails immediately:
 
 ```
 MissingDiscriminantError: cannot select a branch of variants(EMAIL_SERVICE_TYPE):
-no ref produced a value for EMAIL_SERVICE_TYPE and the knob declares no default.
+no ref produced a value for EMAIL_SERVICE_TYPE and the zerno declares no default.
 ```
 
 ## Reading a group: match()
@@ -118,7 +118,7 @@ const snap = live.snapshot();
 const mail = snap.match(email);
 ```
 
-Pinning re-runs any registered rules, so cross-knob invariants hold at every pin.
+Pinning re-runs any registered rules, so cross-zerno invariants hold at every pin.
 
 ## Discriminants are public — always
 
@@ -131,7 +131,7 @@ every one of those channels.
 
 ## Discriminants are snapshots — always
 
-A discriminant (and any `when()` condition knob) must be `freshness: "snapshot"`. A live discriminant would switch topology mid-process: half of a request wired for smtp, the other half reading sendgrid. This is enforced twice — at `variants()` construction, and again at bind against the descriptor actually being bound — and both throw `LiveDiscriminantError`.
+A discriminant (and any `when()` condition zerno) must be `freshness: "snapshot"`. A live discriminant would switch topology mid-process: half of a request wired for smtp, the other half reading sendgrid. This is enforced twice — at `variants()` construction, and again at bind against the descriptor actually being bound — and both throw `LiveDiscriminantError`.
 
 The double check is why freshness is part of the identity hash: a `freshness: "live"` twin of a snapshot discriminant hashes to a different identity, so it cannot slip past the construction-time check by being identity-equal at bind time.
 
@@ -141,21 +141,21 @@ Branches may reuse the **same key** with different schema or default. This is ho
 
 ```ts
 // inside the smtp branch
-timeoutMs: knob({ key: "EMAIL_TIMEOUT_MS", schema: z.coerce.number().int().positive(), default: 5_000, exposure: "public" }),
+timeoutMs: zerno({ key: "EMAIL_TIMEOUT_MS", schema: z.coerce.number().int().positive(), default: 5_000, exposure: "public" }),
 // inside the sendgrid branch
-timeoutMs: knob({ key: "EMAIL_TIMEOUT_MS", schema: z.coerce.number().int().positive(), default: 10_000, exposure: "public" }),
+timeoutMs: zerno({ key: "EMAIL_TIMEOUT_MS", schema: z.coerce.number().int().positive(), default: 10_000, exposure: "public" }),
 ```
 
 This is legal because sibling branches never co-bind — exactly one is active, so the two descriptors can never conflict at runtime. Their identities differ (`default` is an identity field), and that is expected, not a smell.
 
 ## Lookup precedence and errors
 
-`get()` against a binding that contains groups follows a normative precedence:
+`unwrap()` against a binding that contains groups follows a normative precedence:
 
 1. **Exact identity match** → hit.
-2. **Identity is a member of an inactive branch** of a bound group → `InactiveVariantError`. This is a subclass of `UnboundKnobError` carrying `group`, `discriminant`, `activeBranch`, and `expectedBranch` — the three-way `get()` contract is refined, not broken: the knob genuinely is not in the bound set, but you get told *why*.
-3. **Key collision against a direct or active-branch knob** with a different identity → `DescriptorMismatchError`, with the usual unify snippet. This is never produced against a sibling-branch descriptor — that error's advice is "unify these two descriptors," which is exactly wrong for intentionally-different branch twins.
-4. Otherwise → `UnboundKnobError`.
+2. **Identity is a member of an inactive branch** of a bound group → `InactiveVariantError`. This is a subclass of `UnboundZernoError` carrying `group`, `discriminant`, `activeBranch`, and `expectedBranch` — the three-way `unwrap()` contract is refined, not broken: the zerno genuinely is not in the bound set, but you get told *why*.
+3. **Key collision against a direct or active-branch zerno** with a different identity → `DescriptorMismatchError`, with the usual unify snippet. This is never produced against a sibling-branch descriptor — that error's advice is "unify these two descriptors," which is exactly wrong for intentionally-different branch twins.
+4. Otherwise → `UnboundZernoError`.
 
 A realistic case — smtp-only code reached on a sendgrid deploy:
 
@@ -175,51 +175,65 @@ match(email).type before reaching into branch values.
 
 Two membership conflicts are caught at bind time, not read time:
 
-- A branch knob that is **also bound as its own entry** in the same bind → `DuplicateWiringError` — one entry per knob, groups flattened. The two claims contradict anyway: always-required versus branch-conditional.
+- A branch zerno that is **also bound as its own entry** in the same bind → `DuplicateWiringError` — one entry per zerno, groups flattened. The two claims contradict anyway: always-required versus branch-conditional.
 - **Cross-group collisions** are still real. Two groups' active branches can both claim `SMTP_PORT` with different descriptors; the bind-time conflict pass over the *active* set throws `DescriptorMismatchError` with variant context. `bake` goes further and checks the full cross-product of branch combinations statically, so combinations you never happened to deploy are caught too.
 
 ## when(): presence-conditional requirements
 
-When the condition is "this other knob is set" rather than a mode switch, use `when(cond, members)`. The condition is plain JSON, so it round-trips:
+When the condition is "this other zerno is set" rather than a mode switch, use `when(cond, members)`. The condition is plain JSON, so it round-trips:
 
 ```ts
-const proxyUrl = knob({ key: "OUTBOUND_PROXY_URL", exposure: "public", default: "" });
+const proxyUrl = zerno({ key: "OUTBOUND_PROXY_URL", exposure: "public", default: "" });
 
-export const proxyAuth = when({ knob: proxyUrl, is: "set" }, {
-  user: knob({ key: "PROXY_USER" }),
-  password: knob({ key: "PROXY_PASSWORD" }),
+export const proxyAuth = when({ zerno: proxyUrl, is: "set" }, {
+  user: zerno({ key: "PROXY_USER" }),
+  password: zerno({ key: "PROXY_PASSWORD" }),
 });
 ```
 
-Condition forms: `"set"`, `{ equals: value }`, `{ in: [...values] }`. `"set"` means **a wired ref produced a non-empty raw value**. Defaults do not count — otherwise any defaulted knob would be eternally "set" and the condition dead — and the empty string counts as unset. Condition knobs must be snapshot-fresh, same as discriminants.
+Condition forms: `"set"`, `{ equals: value }`, `{ in: [...values] }`. `"set"` means **a wired ref produced a non-empty raw value**. Defaults do not count — otherwise any defaulted zerno would be eternally "set" and the condition dead — and the empty string counts as unset. Condition zernos must be snapshot-fresh, same as discriminants.
 
-## rule(): arbitrary cross-knob checks
+## rule(): arbitrary cross-zerno checks
 
 `variants` and `when` cover the declarative, JSON-serializable tier. For everything else there is `rule` — the code tier:
 
 ```ts
-import { rule } from "komirka";
+import { zerno, rule } from "komirka";
 import { bind } from "komirka/node";
+import { z } from "zod";
 
+// Both bounds are OPTIONAL — a deploy may set neither, one, or both.
+const poolMin = zerno({ key: "POOL_MIN", schema: z.coerce.number().int().optional(), exposure: "public" });
+const poolMax = zerno({ key: "POOL_MAX", schema: z.coerce.number().int().optional(), exposure: "public" });
+
+// Deps arrive positionally, aligned to the deps array. An absent optional dep is
+// `undefined`, so the rule guards before comparing — it never assumes both resolved.
+// It returns Issue[] (empty/nothing = pass); each Issue carries a path and a specific
+// message, so RuleViolationError can report exactly what failed and why.
 const poolBounds = rule(
   [poolMin, poolMax],
-  (min, max) => min <= max || `POOL_MIN (${min}) must not exceed POOL_MAX (${max})`,
+  ([min, max]) => {
+    if (min === undefined || max === undefined) return; // nothing to compare — not a violation
+    if (min > max) {
+      return [{ path: ["POOL_MIN"], message: `POOL_MIN (${min}) must not exceed POOL_MAX (${max})` }];
+    }
+  },
   { id: "pool-bounds", description: "connection pool min must not exceed max" },
 );
 
 const cfg = bind([poolMin, poolMax, poolBounds]);
 ```
 
-Rules run at bind and at every `snapshot()` / pin — **never** at `get()`, so reads stay cheap and predictable. A rule's presence promotes its deps to eager even under `bind.lazy`, and all deps must live in the same bind set. Failure throws `RuleViolationError` naming the rule id. In JSON export a rule appears as `{"$rule": 1, "on": [ids], "id": ..., "description": ...}` — the function is honestly absent: a rule's check does not survive serialization, and the export never pretends otherwise.
+Rules run at bind and at every `snapshot()` / pin — **never** at `unwrap()`, so reads stay cheap and predictable. Two contract points the example leans on: deps arrive **positionally**, and an *optional* dep with no value arrives as `undefined` — a rule over optional zernos guards instead of assuming resolution (a *required* dep can never be absent here, because bind fails first). And it returns `Issue[]`, not a bare boolean — returning issues is deliberate: each carries a path and a distinct message, so `RuleViolationError` reports exactly which invariant broke and why, and secret-touching rules still redact to counts and paths. A rule's presence promotes its deps to eager even under `bind.lazy`, and all deps must live in the same bind set. In JSON export a rule appears as `{"$rule": 1, "on": [ids], "id": ..., "description": ...}` — the function is honestly absent: a rule's check does not survive serialization, and the export never pretends otherwise.
 
 ## Nesting, and the relation wire format
 
-Nesting `variants()` or `when()` inside a branch is rejected in v1 with `VariantsNestingError` — compose two flat groups instead. The wire format, however, is recursive and tagged from day one: an entry is a knob descriptor, a `$when` relation, or a `$variants` relation, and each relation is content-addressed as `"relv1|" + RFC 8785 canonical JSON → xxh128`. The email group round-trips as (descriptor bodies abbreviated):
+Nesting `variants()` or `when()` inside a branch is rejected in v1 with `VariantsNestingError` — compose two flat groups instead. The wire format, however, is recursive and tagged from day one: an entry is a zerno descriptor, a `$when` relation, or a `$variants` relation, and each relation is content-addressed as `"relv1|" + RFC 8785 canonical JSON → xxh128`. The email group round-trips as (descriptor bodies abbreviated):
 
 ```json
 {
   "$variants": 1,
-  "on": "knobv1|8c72d1f0b6349aa1",
+  "on": "zernov1|8c72d1f0b6349aa1",
   "branches": {
     "console": {},
     "smtp": {
@@ -240,7 +254,7 @@ Enabling nesting later is a flag flip, not a format break, and the semantics are
 
 ## Scopes
 
-`pick([email])` grants the whole group — discriminant plus all branches — and `scope.match(email)` works inside the scope. Picking an individual branch knob is also legal for leaf `get()` calls; be aware such a read may throw `InactiveVariantError`, which leaks one bit of branch state to the scoped consumer. That trade is deliberate and documented — the alternative is a lying `UnboundKnobError`.
+`pick([email])` grants the whole group — discriminant plus all branches — and `scope.match(email)` works inside the scope. Picking an individual branch zerno is also legal for leaf `unwrap()` calls; be aware such a read may throw `InactiveVariantError`, which leaks one bit of branch state to the scoped consumer. That trade is deliberate and documented — the alternative is a lying `UnboundZernoError`.
 
 ## Bake and client targets
 
