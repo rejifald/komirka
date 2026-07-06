@@ -38,3 +38,11 @@ dependencies; descriptors round-trip as JSON.
 - v0.1 proof gate: a demo repo where one zernos file is consumed unchanged by a Node
   server, a Cloudflare Worker, a Vite client (with bake failing the build on a planted
   secret leak), and a vitest suite with zero `process.env` mutation.
+
+## Related projects
+
+- **[yakir](https://github.com/rejifald/yakir)** — drift prevention: keeps *one fact
+  represented across many artifacts* (code, docs, generated files) in sync. Complementary and
+  deliberately distinct — komirka is config (one authoritative slot a runtime reads); yakir is
+  consistency across representations (no single source). See
+  [principles §8](./principles.md#8-relationship-to-yakir-drift-prevention).

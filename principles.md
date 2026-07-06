@@ -628,3 +628,22 @@ shared machinery where proven: the ADR-0004 validator-fingerprint ladder, xxh128
 size-budget CI gates, codegen/export discipline. StitchAPI consumes this package as a
 devDependency via bake. This project stays standalone: it must be adoptable by teams that
 have never heard of StitchAPI.
+
+## 8. Relationship to yakir (drift prevention)
+
+[yakir](https://github.com/rejifald/yakir) and komirka share a low-level instinct —
+content-addressed fingerprints plus a committed lockfile — but solve orthogonal problems, and
+the boundary is worth stating so neither grows into the other:
+
+- **komirka is config: one authoritative slot, read by a runtime.** A zerno has a single
+  representation; its value flows *into* a running program at bind/read time. The lockfile
+  attests config *descriptors* (identity, exposure) for the bake and client-delivery pipeline.
+  It is an executable artifact.
+- **yakir is consistency across representations: one fact, many copies, no source.** The same
+  fact is deliberately mirrored across heterogeneous artifacts (code, docs, generated files) —
+  often as different *derivations* of one value — and a change at *any* site is a drift signal
+  to reconcile. Nothing is bound or read at runtime; it is not config.
+
+The only sound sharing is the primitive (canonical fingerprinting / RFC 8785), never the
+lockfile *semantics*: komirka's lock records *what config exists and how it may be exposed*;
+yakir's lock is the *baseline of each representation* so it can tell which copy moved.
