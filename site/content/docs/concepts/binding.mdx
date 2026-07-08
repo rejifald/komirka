@@ -352,7 +352,10 @@ validation):
   past redaction and into bake's public inlining. Backed by a well-known-secret-suffix
   denylist (`*_SECRET`, `*_TOKEN`, `*_PASSWORD`, `*_PRIVATE_KEY`, `*_API_KEY`) with an
   explicit per-name allowlist, and by the committed lockfile as the app-wide
-  effective-name → exposure authority.
+  effective-name → exposure authority. The same denylist gates the other end of the
+  pipeline: bake refuses a client-target zerno whose declared key or effective source name
+  hits the set even at `exposure: "public"` (`SecretNameInClientTargetError`) — see
+  [bake](/docs/bake/overview).
 - **Combinators are pure data.** A `WiredEntry` is JSON-representable — zerno identity ref,
   ref kind, name/path/key strings, provider impl *ids* (impls declare `{ id, color }`;
   anonymous impls are an error on bake-covered targets). That inertness is what lets the

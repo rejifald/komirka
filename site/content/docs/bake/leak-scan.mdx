@@ -3,7 +3,7 @@ title: Leak scan
 description: The allowlist scan that audits every emitted client asset for secret material — and an honest account of exactly what it cannot see.
 ---
 
-Every `komirka bake` run ends with a leak scan of the client target's emitted artifacts, and `komirka bake --check` fails CI on any unwaived finding. The scan is the **last** layer of bake's defense stack, not the first — it sits behind the required targets declaration, generated-module-only delivery, the no-secret-sources browser entry, the AST lint that bans raw `process.env` / `import.meta.env` reads in client-designated code, and the coverage report. Its job is to catch what slipped past all of those, and it is designed around one hard rule: **it never needs, and never prints, a secret value.**
+Every `komirka bake` run ends with a leak scan of the client target's emitted artifacts, and `komirka bake --check` fails CI on any unwaived finding. The scan is the **last** layer of bake's defense stack, not the first — it sits behind the required targets declaration, the secret-name bake gate, generated-module-only delivery, the no-secret-sources browser entry, the AST lint that bans raw `process.env` / `import.meta.env` reads in client-designated code, and the coverage report. Its job is to catch what slipped past all of those, and it is designed around one hard rule: **it never needs, and never prints, a secret value.**
 
 ## Allowlist, not blocklist
 

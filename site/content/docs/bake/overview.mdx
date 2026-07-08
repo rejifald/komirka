@@ -73,6 +73,24 @@ Two parties must agree before a value is shipped to an untrusted client: the pac
 
 One categorical exclusion: a `variants()` group is client-ineligible as a whole in v1 — any member (or its discriminant) in `targets.client` fails the bake with `VariantsInClientTargetError`. Baking would freeze a build-time branch choice that runtime can silently contradict, and mixed-exposure branches would ship torn half-branches. The attested branch-freeze escape hatch is an [open decision](/docs/reference/decisions) for v2.
 
+A second backstop guards the *name*, not just the exposure flag. A zerno whose declared `key` — or any effective source name in its client-reachable wiring closure — matches the well-known-secret-suffix denylist (`*_SECRET`, `*_TOKEN`, `*_PASSWORD`, `*_PRIVATE_KEY`, `*_API_KEY`) fails the bake with `SecretNameInClientTargetError`, **even when it is declared `exposure: "public"`**. The match is whole-token, anywhere in the `_`-delimited name — the same discipline the [leak scan](/docs/bake/leak-scan) uses so `PORT` never matches `viewport` — so `STRIPE_SECRET_KEY` trips on its `SECRET` token while `CACHE_KEY` and `API_BASE_URL` stay clean (bare `*_KEY` is deliberately *not* in the set; it is too noisy). This is defense-in-depth *behind* exposure, never in front of it: the flag is still the mechanism — komirka does not do [secrecy-by-naming-convention](/docs/concepts/secrets) — but a value that is public *and* named like a credential is almost always a misclassification or an attempt to launder a secret into the public allowlist, so the safe default is to refuse and make a human say otherwise.
+
+The escape is not a flag. A public value legitimately named like a secret — a publishable token, a public key — is allowed through one name at a time, in the manifest's client attestation, and the exception lands in the committed lockfile so it is reviewed like every other client-target delta:
+
+```ts
+// config.manifest.ts — shape illustrative
+export default {
+  targets: {
+    client: [apiBaseUrl, mapboxToken],
+    server: allZernos,
+  },
+  // Each entry is a reviewed, greppable "yes, this public value is named like a
+  // secret" — recorded in config.manifest.lock.json under CODEOWNERS, never a
+  // global --force that would switch the gate off wholesale.
+  allowClientSecretNames: ["PUBLIC_MAPBOX_TOKEN"],
+};
+```
+
 ### The manifest is side-effect-free — by contract, and detectably
 
 Bake executes `config.manifest.ts` in a constrained context. This is where zerno inertness pays off structurally: constructing a zerno performs zero I/O, zero validation, zero side effects — so a manifest module has *no legitimate reason* to touch the network, the filesystem, or child processes. Any I/O observed during manifest evaluation is a contract violation, and bake fails the build and reports the offending module.
@@ -181,6 +199,7 @@ No single mechanism below is claimed sufficient. Each layer is listed with what 
 | Layer | What it does | What it alone cannot catch |
 | --- | --- | --- |
 | Required targets declaration | Makes client exposure an explicit app-level attestation; absence fails the build | Says nothing about what code does — only that the attestation exists |
+| Secret-name bake gate | Refuses a client-target zerno whose declared key or effective source name matches the secret-suffix denylist even at `exposure: "public"` (`SecretNameInClientTargetError`); escapable only per-name in the manifest | A secret *not* named like one — names are a heuristic; `exposure` remains the real gate, and low-suffix names ("8080"-style) are the leak scan's and structural layers' job |
 | Generated-module-only delivery | One road into the bundle; no runtime env reads on the client path | A developer hand-writing `process.env.X` in client code anyway (next layer's job) |
 | No-secret-sources browser entry | The universal `komirka` entry contains no secret-capable sources, by construction | Values inlined by other means, e.g. a misconfigured define pass |
 | AST lint | Bans raw `process.env` / `import.meta.env` reads in client-designated code | Only what it parses — computed or obfuscated access, and generated code it never sees |
