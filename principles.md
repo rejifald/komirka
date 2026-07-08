@@ -591,35 +591,14 @@ gate.
 
 ## 6. Open decisions
 
-- `default` in the identity hash: currently **yes** (a changed default is a different
-  config; loud acknowledgeable error beats silent wrong value).
-- Env-varying public values for build-once-promote-many SPAs: runtime-injected JSON
-  document (`/config.json`, SSR script tag) as a fourth delivery mode — shape TBD.
-- Whether v0.1 ships the node file source (leaning yes — it is what makes `live` real).
-- Server-target zero-runtime-dep vs runtime validation: they are mutually exclusive for
-  runtime-varying values (validators don't serialize). Two-tier story: baked constants =
-  zero-dep; runtime values = tiny runtime core. Say it plainly.
-- Nested `variants()`/`when()`: rejected in v1 (`VariantsNestingError`, compose two flat
-  groups) — but the recursive tagged wire format ships from day one so enabling nesting is
-  a flag, not a format break.
-- Client escape hatch for variants: v1 = whole-group ineligible; v2 design = *attested
-  branch-freeze* (`{ group, frozenBranch }` in the manifest, frozen discriminant value
-  recorded in the lockfile so the attestation diff shows it).
-- Stale-while-revalidate for async reads: not in v1 (expired reads block on a single-flight
-  re-read so `maxStalenessMs` stays honest); only ever as a loudly-named opt-in.
-- `cfg.update(zerno, fn, { retries })` read-modify-write helper: deferred — it is a
-  five-line userland loop over `get`/`set`/`WriteConflictError`.
-- Provider impl ergonomics: required `{ id, color }` object contract (default) vs an
-  id-keyed bind-opts provider table as the only form — revisit if impl authoring friction
-  shows up.
-- Server-side wiring-digest verification default: fail-closed in production on every
-  target (recommended for client-covered targets) vs opt-in `attest` — and the mechanism
-  must be an explicit flag, never `NODE_ENV` sniffing.
-- Dynamic (non-literal) name/path arguments to combinators on bake-covered targets:
-  banned in v1 (lint + bake refusal); revisit if a real case appears.
-- ~~Final naming~~ — decided: the package is `komirka` (see header). Still open: whether
-  the primitive stays `zerno` (with `$zerno` brand and `zernov1|` identity prefix) or takes a
-  cell-flavored name to match the package.
+The live list of open design questions — their options and current leans — lives in the
+design site's **[Open decisions](site/content/docs/reference/decisions.mdx)** registry, which
+doubles as the index of decisions that have graduated to a full record under
+**[`docs/adr/`](docs/adr/)**. That registry is the single source of truth.
+
+This section used to mirror the list; the mirror is retired to avoid the drift a registry
+exists to prevent. The hard constraints above (P1–P21) are the contract; what is still open,
+and what an ADR has since settled, is tracked in the registry.
 
 ## 7. Relationship to StitchAPI
 

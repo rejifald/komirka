@@ -1,9 +1,11 @@
 ---
 title: Open decisions
-description: The honest undecided list — every open design question, its options, and the current lean.
+description: The honest undecided list — every open design question, its options and current lean, plus pointers to the ADRs that have settled the rest.
 ---
 
 A design document that hides its open questions is marketing. Everything else on this site reads as contract; this page is the delta between contract and certainty. Each entry states the question, the options on the table, and the current lean. A lean is not a promise — if you have production experience that bears on any of these, that is exactly the feedback this phase exists to collect.
+
+Once a question is settled with a full decision record, its entry graduates to a one-line pointer to an [ADR](https://github.com/rejifald/komirka/tree/main/docs/adr) (see §10 for the first) — the ADR carries the context, options, and consequences; this page stays the map of decided-with-a-record versus still-open. This registry is the single source of truth: `principles.md` §6 now points here instead of keeping a second copy of the list.
 
 | # | Question | Current lean |
 | --- | --- | --- |
@@ -215,6 +217,7 @@ parameters carry the tuple inference the call shapes depend on).
 
 ## 10. Recently resolved
 
+- **Zerno inheritance & derivation** — resolved in **[ADR 0001](https://github.com/rejifald/komirka/blob/main/docs/adr/0001-zerno-inheritance.md)**: a declared, identity-bearing `inherit(target, base, ops?)` relation (not a source ref, not deployment wiring); data-only transforms (never a function); layered validation (the base's own declaration, then the target's); loud-by-default with a bind-site `useDefault` opt-in; single-base and transitive, multiple inheritance deferred. The ADR is the full record — this registry only points to it. Deferred spin-off: a `latch` freshness mode ([#14](https://github.com/rejifald/komirka/issues/14)).
 - **Live-invalid default** — resolved by author decision: **current truth wins** (poisoned
   slots, `InvalidLiveValueError`, `safe`), with `keepLastGood(zerno, { maxCoastMs })` as
   the explicit bind-site opt-in. See [Freshness](/docs/concepts/freshness).
