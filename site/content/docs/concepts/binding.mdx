@@ -200,13 +200,14 @@ cfg.toJSON();       // full dump — secrets redacted by construction
 }
 ```
 
-`toJSON()` is safe to log because redaction is structural, not best-effort. And the guard goes one level deeper: secret *values* themselves refuse serialization, so an SSR payload cannot smuggle one out by accident:
+`toJSON()` is safe to log because redaction is structural, not best-effort. And the guard goes one level deeper: `unwrap()` of a secret returns a `Secret<T>` (assignable to `T`, so no ceremony) that itself refuses serialization, so an SSR payload cannot smuggle one out by accident:
 
 ```ts
 const page = { props: { db: cfg.unwrap(dbUrl) } };
 JSON.stringify(page);
 // ExposureError: secret value DATABASE_URL cannot be serialized
-// (serialization guard — same trap fires for structuredClone)
+// (structuredClone/postMessage throw DataCloneError too; call .reveal() when you
+//  genuinely need the raw string — see the Secrets page and ADR 0002)
 ```
 
 For handing a *subset* of a snapshot to a library, `cfg.pick(dbZernos)` returns a runtime-restricted `Scope` — reading a non-member throws `NotInScopeError`, and the root snapshot is deliberately not assignable where a `Scope` is expected. The library DI page covers this pattern in full.

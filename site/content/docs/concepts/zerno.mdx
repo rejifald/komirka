@@ -31,7 +31,7 @@ export const dbUrl = zerno({
 
 **`doc`** — human documentation. Purely cosmetic: it never affects identity or resolution. Bake surfaces it in the generated `.env.example` and `CONFIG.md`, so a well-written `doc` is the onboarding experience for whoever deploys your app.
 
-**`exposure`** — `"secret"` or `"public"`. The default is `"secret"`: fail closed, always. Secret zernos redact in `explain()` and `toJSON()`, their values throw on serialization, and reading one through a public/browser context raises `ExposureError`. You opt *into* publicness; you never accidentally opt out of secrecy. Identity field.
+**`exposure`** — `"secret"` or `"public"`. The default is `"secret"`: fail closed, always. Secret zernos redact in `explain()` and `toJSON()`; `unwrap()` returns a `Secret<T>` (assignable to `T`, so usable anywhere a `T` is) that refuses `JSON.stringify`/`structuredClone`; and reading one through a public/browser context raises `ExposureError`. You opt *into* publicness; you never accidentally opt out of secrecy. Identity field. See [Secrets](/docs/concepts/secrets) and [ADR 0002](https://github.com/rejifald/komirka/blob/main/docs/adr/0002-secret-value-representation.md).
 
 **`sources`** — an ordered precedence list of source references. First source that yields a raw value wins. Omitted, it defaults to a single env reference named after `key`. Order is significant and part of identity. Deployment sites can override at bind — `env(zerno, "NAME")` renames a declared ref in place, `chain()` replaces the set — without ever touching identity: the declared list stays the contract.
 

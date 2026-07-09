@@ -494,8 +494,10 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
   that does I/O is detectable); bake runs it in a constrained context and treats it as
   sensitive build input.
 - **Stale bake artifacts.** A library upgraded after baking silently serves stale-shaped
-  values. *Rule:* baked modules embed per-zerno identity hashes; the generated shim verifies
-  on `unwrap()` and throws `StaleBakeError` on skew.
+  values. *Rule:* staleness is caught at **build time** by `bake --check` (the load-bearing
+  gate — client code imports schema-free handles, not the upgraded descriptor, so there is no
+  runtime descriptor to compare in prod); the runtime `StaleBakeError` is a **dev-only**
+  check, stripped from production builds (ADR 0003).
 - **Registry side effects.** Any runtime "all zernos" registry breaks tree-shaking and
   reintroduces import-order magic. *Rule:* enumeration happens only at bake time, from the
   explicit manifest. There is no runtime registry, period.
