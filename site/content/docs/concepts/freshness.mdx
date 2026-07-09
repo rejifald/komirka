@@ -164,7 +164,7 @@ For secret tesserae the hook receives `{ rawDigest, length }` instead of the raw
 
 ### Invalid is not unavailable
 
-A source that serves garbage and a source that is down are different failures. If the file is unreadable or the provider is unreachable, the binding serves the cached value **within `maxStalenessMs`** — that is not inherited state, it's the staleness budget the binder signed at the bind site. Past the budget, reads throw `SourceUnavailableError` (`{ cause, staleSince }`) and the `onSourceError` hook fires. Unavailability is never routed through `onInvalid`.
+A source that serves garbage and a source that is down are different failures. If the file is unreadable or the provider is unreachable, the binding serves the cached value **within `maxStalenessMs`** — that is not inherited state, it's the staleness budget the binder signed at the bind site. Past the budget, reads throw `SourceUnavailableError` (`{ cause, staleSince }`) and the `onSourceError` hook fires. Unavailability is never routed through `onInvalid`. A provider that is not down but merely *slow* is unavailable too: a blocking re-read is bounded by the `readTimeoutMs` deadline (default `maxStalenessMs`) and a breach throws `SourceUnavailableError` rather than block the caller unbounded, while at boot `ready()` — which has no cache to serve — meets an outage with bounded retry then fail-fast ([ADR 0005](https://github.com/rejifald/tessellum/blob/main/docs/adr/0005-async-read-deadline-and-boot-outage.md)).
 
 ### Opting into keep-last-good
 

@@ -411,9 +411,13 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
   branch values leaves the *database itself* saying smtp-with-no-host — every replica
   poisons on next read. *Rule:* `setMany()` validates the post-state as a whole and is
   atomic only on providers declaring `atomicWrites` (one transaction, all-or-nothing
-  including a mid-batch CAS miss); without it, refuse by default —
+  including a mid-batch CAS miss) — and only up to that provider's `maxWriteBatch`, since an
+  atomic write is one `write()` call and core never chunks it: a larger atomic `setMany` is
+  refused up front with `AtomicBatchTooLargeError`, because a chunked atomic write is several
+  transactions — the tear itself (ADR 0006). Without `atomicWrites`, refuse by default —
   `{ allowNonAtomic: true }` makes *core* sequence single-entry writes in dependency order
-  (branch values first, discriminant last), stopping at first failure. Core never hands a
+  (branch values first, discriminant last), stopping at first failure, and is also the escape
+  for an atomic-but-oversized batch. Core never hands a
   multi-entry batch to a non-atomic provider: dependency ordering is core's knowledge,
   never an unstated provider loop-order obligation. Read-side branch gating never applies
   to writes (staging inactive-branch values is the *safe* order).
@@ -424,7 +428,11 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
 - **Hot-tessera expiry is a thundering herd.** 500 concurrent requests one ms after staleness
   expiry = 500 provider reads. *Rule:* per-key single-flight; expired reads block on the
   one in-flight read so `maxStalenessMs` stays an honest hard bound (stale-while-revalidate
-  only ever as a loudly-named opt-in).
+  only ever as a loudly-named opt-in) — and the block itself is bounded by `readTimeoutMs`
+  (default `maxStalenessMs`), so a *slow* provider throws `SourceUnavailableError` instead of
+  wedging the request unbounded; `ready()` is cacheless at boot, so a store outage there is
+  bounded retry then fail-fast (`readyTimeoutMs`). `maxStalenessMs` bounds staleness,
+  `readTimeoutMs` bounds the wait (ADR 0005).
 - **Batch contracts carry the safety signals shape used to carry.** Provider contracts are
   batch-only (`read(keys[])` / `write(entries[])` — "assume plural"), which deletes the
   single/plural drift class but also deletes two shape-inferred signals; they return as
@@ -613,7 +621,8 @@ gate.
   branch-freeze* (`{ group, frozenBranch }` in the manifest, frozen discriminant value
   recorded in the lockfile so the attestation diff shows it).
 - Stale-while-revalidate for async reads: not in v1 (expired reads block on a single-flight
-  re-read so `maxStalenessMs` stays honest); only ever as a loudly-named opt-in.
+  re-read, bounded by `readTimeoutMs`, so `maxStalenessMs` stays honest); only ever as a
+  loudly-named opt-in.
 - `cfg.update(tessera, fn, { retries })` read-modify-write helper: deferred — it is a
   five-line userland loop over `get`/`set`/`WriteConflictError`.
 - Provider impl ergonomics: required `{ id, color }` object contract (default) vs an

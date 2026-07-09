@@ -15,3 +15,6 @@ the registry links to each one as its question gets settled.
 | [0001](./0001-tessera-inheritance.md) | Tessera inheritance and derivation (value fallback and transform across descriptors) | Accepted |
 | [0002](./0002-secret-value-representation.md) | Secret value representation (the `Secret` wrapper) | Accepted |
 | [0003](./0003-client-read-api-and-bake-staleness.md) | Client read API and bake staleness (baked handles) | Accepted |
+| [0004](./0004-async-snapshot-coherence.md) | Async snapshot cross-key coherence (coherence groups) | Accepted |
+| [0005](./0005-async-read-deadline-and-boot-outage.md) | Async re-read deadline and boot-outage policy (`readTimeoutMs` / `readyTimeoutMs`) | Accepted |
+| [0006](./0006-atomic-setmany-vs-write-batch.md) | Atomic `setMany` vs. `maxWriteBatch` (an atomic write cannot span chunks) | Accepted |

@@ -173,6 +173,8 @@ cfg.unwrap(sgKey);                               // string — sync forever afte
 
 `await binding.snapshot()` is the old "resolve once, read sync forever" story; a
 long-lived `AsyncBinding` uses `await binding.ready()` as the eager startup line instead.
+If the store is unreachable at boot, `ready()` has no cache to fall back on, so it retries
+with backoff and then fails fast past `readyTimeoutMs` ([ADR 0005](https://github.com/rejifald/tessellum/blob/main/docs/adr/0005-async-read-deadline-and-boot-outage.md)).
 Provider impls must declare `{ id, color }` — the `id` is what the lockfile records, and
 an impl with no declared color is a compile error, never a silently-sync guess.
 
