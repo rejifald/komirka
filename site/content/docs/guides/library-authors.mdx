@@ -48,9 +48,27 @@ export const mailerTesserae = defineTesserae([smtpUrl, fromAddress, retryCount])
 
 Two notes on schemas. First, `T` is inferred from the schema *output*, so `z.coerce.number()` yields a `Tessera<number>` even though the raw source is a string. Second, for `exposure: "secret"` tesserae your validator's error text is treated as untrusted (validators echo received values): reports carry issue counts and paths only, never messages or values. Write schemas accordingly — do not encode guidance in error messages for secret tesserae; put it in `doc`.
 
+## Declare tessellum a peer dependency
+
+Your package will be installed alongside an app that also depends on tessellum. Declare it a `peerDependency` (with a `devDependency` for your own build and tests), never a plain `dependency`:
+
+```jsonc
+// your package.json
+{
+  "peerDependencies": { "tessellum": "^1.0.0" },
+  "devDependencies":  { "tessellum": "^1.0.0" }
+}
+```
+
+A plain `dependency` bundles your own private copy of tessellum into every consumer — that is the dual-package hazard, manufactured on purpose, plus dead bundle weight. A peer-dep lets the consumer's package manager dedupe to one copy and keeps your descriptors and theirs on the same physical types.
+
+State the boundary honestly, though: **a peer-dep makes duplication rare; it does not prevent it.** pnpm's isolated store, incompatible version ranges across the graph, CJS/ESM dual-load, and monorepos can all still land two copies. When they do, correctness does not depend on the manifest — it is held by content-addressed identity (two copies of the same descriptor resolve interchangeably), by caller-schema revalidation (validation never silently downgrades across copies), and by `DescriptorMismatchError` on genuine drift. The peer-dep is the ergonomic default; identity is the guarantee. Use a wide `^` range so you are not the one forcing a second copy.
+
 ## Type your API against a picked scope
 
 Type every config-consuming entry point as a `Scope` of exactly your tesserae. `Scope` is a branded type that only `pick()` produces — the root `Snapshot` is deliberately not assignable to it, so callers cannot hand you their entire configuration.
+
+That brand holds its identity even when a consumer's dependency graph ends up with two copies of tessellum: the `Scope`/`ConfigOf` brand is *structural* (a well-known string key), not a `unique symbol`, so a `Scope` produced by one copy's `pick()` is accepted by a signature typed against another copy's `Scope`. (A `unique symbol` brand would be a different type per install and silently fail to line up — the exact diamond-install case this design exists to survive; see [Identity across installs](/docs/concepts/identity) and ADR 0007.) The trade is that a structural brand is forgeable by hand — fine, because this is mistake-prevention, not a sandbox (see below).
 
 ```ts
 // @acme/mailer — src/index.ts
@@ -247,10 +265,63 @@ Accept the scope. Never reach ambient. If your factory needs a value, it is in y
 
 Be honest in your own docs about what this buys. `pick()` confines *mistakes*: your library cannot accidentally read the app's `DATABASE_URL`, misuse is a `NotInScopeError` or a compile error, and the app can audit exactly which tesserae each dependency was granted. It is not a security boundary — hostile in-process code can read `process.env` directly, and no scope stops it. Only provider-resolved, non-ambient values gain real confinement. Claim the least-privilege benefit; do not claim a sandbox.
 
+## Serving consumers who don't use tessellum
+
+Typing your API `Scope<ConfigOf<...>>` asks every consumer to adopt tessellum — install it, bind at their composition root, and `pick()`. For a tessellum-native library that is the right default, and it earns the strongest guarantees: pinned reads, lazy validation, the `Secret<T>` wrapper, and the least-privilege gate. But the "adoptable by teams that have never heard of tessellum" promise needs an **escape** for libraries that must not force that choice downstream.
+
+Expose a core factory over **plain resolved values**, and ship the tessellum bridge as a *separate, optional-peer* entry point. Public values cross as bare values; secret values cross as `Secret<T>`:
+
+```ts
+// @acme/mailer — core entry: needs NOTHING from tessellum at runtime
+import type { Secret } from "tessellum"; // type-only; erased at build
+
+export interface MailerConfig {
+  fromAddress: string;               // public → bare
+  retryCount: number;                // public → bare
+  smtpUrl: Secret<string> | string;  // secret → Secret<T>, or a bare string if the caller opts out
+}
+
+export function createMailer(cfg: MailerConfig) { /* … */ }
+```
+
+```ts
+// @acme/mailer/tessellum — a SEPARATE entry point; the only file here that imports the runtime
+import { createMailer } from "./index";
+import { mailerTesserae, smtpUrl, fromAddress, retryCount } from "./tesserae";
+import type { Scope, ConfigOf } from "tessellum";
+
+export const mailerFromScope = (cfg: Scope<ConfigOf<typeof mailerTesserae>>) =>
+  createMailer({
+    smtpUrl: cfg.unwrap(smtpUrl),         // Secret<string> — passed straight through, no .reveal()
+    fromAddress: cfg.unwrap(fromAddress),
+    retryCount: cfg.unwrap(retryCount),
+  });
+```
+
+Mark the runtime optional in your manifest, so a non-tessellum consumer installs nothing extra:
+
+```jsonc
+{ "peerDependencies": { "tessellum": "^1.0.0" },
+  "peerDependenciesMeta": { "tessellum": { "optional": true } } }
+```
+
+A consumer who uses tessellum calls `mailerFromScope(root.pick(mailerTesserae))`; one who does not calls `createMailer({ … })` with plain values and never touches tessellum.
+
+**Secrets stay protected across the boundary.** Because `Secret<T>` is assignable to `T`, the adapter passes `cfg.unwrap(smtpUrl)` straight into the `smtpUrl` field with no `.reveal()`. The value that flows is the runtime Proxy, and its guards are behavior, not type: it still throws on `JSON.stringify`, is non-cloneable, and redacts in logs, even sitting in a field typed `string`. Those guards are install-independent, so the protection survives even between two copies of tessellum.
+
+Be honest about the two edges:
+
+- The field is typed `Secret<string> | string`, so a non-tessellum consumer *may* pass a bare string. That path has no wrapper and no protection; a consumer who opts out of tessellum owns the exposure of any secret they pass bare. The escape does not make secrets *more* exposed — it declines to add protection a plain caller never asked for.
+- A plain object is not a pinned `Snapshot` and carries no lazy validation: the adapter resolves eagerly at the call, and a hand-built object is validated only by your own schema, whenever the caller assembled it. If you need pinning, staleness budgets, or the least-privilege gate, keep the `Scope<...>` signature — that is what it is for.
+
+One tempting non-answer: typing the parameter as a structural reader interface like `{ unwrap(handle): … }`. It removes only the *nominal* `Scope` type — the consumer must still bind through tessellum to produce anything with `unwrap`, so it does not help a "never heard of it" consumer, and it silently accepts a raw `Snapshot`, weakening the least-privilege gate. The plain-object escape is the one that actually decouples (ADR 0007).
+
 ## Release checklist
 
+- Declare `tessellum` a `peerDependency` (with a `devDependency` for your build), never a plain `dependency` — dedupe to one copy; a plain dependency manufactures the dual-package hazard and bundles dead weight. Use a wide `^` range so you are not the one forcing a second copy.
 - Export inert descriptors and a `defineTesserae` group; never call `bind()` inside the package.
-- Type every config-consuming entry point as `Scope<ConfigOf<typeof yourTesserae>>`, with the parameter required.
+- Type every config-consuming entry point as `Scope<ConfigOf<typeof yourTesserae>>`, with the parameter required. The brand is structural, so this identity holds across duplicate installs.
+- If you must serve consumers who don't use tessellum, add a plain-object factory plus a *separate*, optional-peer `…/tessellum` adapter; cross public values bare and secret values as `Secret<T>`, and state the pinning and lazy validation you give up.
 - Treat `key`, `sources`, `exposure`, `default`, `freshness`, and schema identity as public API; changing any is a breaking change — bump `version` on schema meaning changes.
 - Ship renames as declared fallback chains in a release; deployment-specific names are the consumer's job via `env(tessera, "NAME")` at their bind site, and deployment wiring never forks identity.
 - Edit `doc` and examples freely; they are cosmetic and never move the identity hash.

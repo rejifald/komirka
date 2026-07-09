@@ -164,7 +164,10 @@ interface Snapshot {
 - `pick()` **runtime-restricts**: the returned `Scope` contains only the picked entries;
   reading anything else throws `NotInScopeError`. The `Scope` type is brand-gated — only
   `pick()` produces it, and the root `Snapshot` is deliberately not assignable to it, so
-  library signatures force the narrowing.
+  library signatures force the narrowing. The brand is **structural** (a well-known string
+  key), never a `unique symbol`: a `Scope` therefore keeps its identity across duplicate
+  installs — including a baked shim's scope, which a library's signature accepts even when it
+  carries its own copy of tessellum (ADR 0007 / ADR 0003).
 - A **secret**-exposure tessera's `T` is `Secret<V>` (`V` = the schema output): assignable to
   `V`, so usable anywhere a `V` is, but it throws `ExposureError` on `JSON.stringify` and is
   non-cloneable (`structuredClone`/`postMessage` throw `DataCloneError`) — closing the
@@ -379,6 +382,12 @@ Consequences:
   schema**, so validation can never silently downgrade across package copies.
 - The same key under a *different* descriptor is `DescriptorMismatchError`, carrying both
   canonical descriptors, a field-level diff, and a paste-able `unify` snippet.
+- The **type-level** companion holds too: the `Scope`/`ConfigOf` brand is structural (a string
+  key), so branded identity survives duplicate installs — a `unique symbol` brand would not.
+  Ship tesserae behind a `tessellum` **peer-dependency** to dedupe; content-addressed identity
+  is the floor when a copy slips through anyway. See
+  [Identity across installs](/docs/concepts/identity) and the
+  [library-authors guide](/docs/guides/library-authors) (ADR 0007).
 
 ## Testing
 
