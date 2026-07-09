@@ -141,7 +141,10 @@ footguns statically without taxing the ordinary coercing read.
 - Proxy trap overhead per property access — negligible for construction-time reads; avoid
   reading a secret in a hot loop.
 - The exposure→brand conditional typing, and `Secret<T>`-assignable-to-`T`, are TypeScript
-  claims that must be proven in the #6 type-view spike.
+  claims — **validated** by a standalone `tsc --strict` type-spike (#18); to be re-committed as
+  an enforced `*.test-d.ts` alongside the real types. (The spike also flagged that a bare
+  `Zerno` in a *constraint* position defaults to `snapshot` and must be written
+  `Zerno<any, any>`.)
 
 **Implementation notes**
 
