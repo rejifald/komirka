@@ -12,9 +12,9 @@ description: The complete provisional API surface — entries, the descriptor, b
 ## Entry points
 
 ```ts
-import { tessera, defineTesserae, refresh, identityOf, keepLastGood } from "tessellum";
+import { tessera, defineTesserae, refresh, identityOf, keepLastGood, isSecret } from "tessellum";
 import { literal, chain, provider } from "tessellum";         // universal wiring combinators (pure data)
-import type { Tessera, Snapshot, LiveBinding, AsyncBinding, Scope, ConfigOf } from "tessellum";
+import type { Tessera, Secret, Snapshot, LiveBinding, AsyncBinding, Scope, ConfigOf } from "tessellum";
 
 // pick ONE bind per entrypoint — the entry point is what grants capability:
 import { bind, env, file } from "tessellum/node";     // natural defaults = process.env + fs
@@ -160,9 +160,14 @@ interface Snapshot {
   reading anything else throws `NotInScopeError`. The `Scope` type is brand-gated — only
   `pick()` produces it, and the root `Snapshot` is deliberately not assignable to it, so
   library signatures force the narrowing.
-- Secret **values** throw on `JSON.stringify`/`structuredClone` (the serialization guard,
-  surfaced as `ExposureError`) — this closes the request-time SSR payload class that no
-  build-time scan can see.
+- A **secret**-exposure tessera's `T` is `Secret<V>` (`V` = the schema output): assignable to
+  `V`, so usable anywhere a `V` is, but it throws `ExposureError` on `JSON.stringify` and is
+  non-cloneable (`structuredClone`/`postMessage` throw `DataCloneError`) — closing the
+  request-time SSR/RSC payload class no build-time scan can see. Coercion works everywhere;
+  call `.reveal(): V` at a boundary that *typechecks* its input (`crypto`,
+  `z.string().parse`), and `isSecret(v)` to detect one. `tessera()` brands the type when
+  `exposure` is secret (the default); public tesserae are plain `V`. Full contract:
+  [ADR 0002](https://github.com/rejifald/tessellum/blob/main/docs/adr/0002-secret-value-representation.md).
 
 ## `LiveBinding` — poll-on-read freshness
 
