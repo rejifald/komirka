@@ -5,7 +5,7 @@ description: Every named error — when it fires, what its message carries, and 
 
 Configuration failures are boring, frequent, and usually fixed by someone who didn't write the code that threw. The error taxonomy is designed for that person. Every error in this library answers three questions in its first line:
 
-1. **Which zerno** — the canonical `key`, always.
+1. **Which tessera** — the canonical `key`, always.
 2. **Which layer** — bind, read, scope, live, serialization, or bake.
 3. **What next** — a concrete remediation, in the message itself.
 
@@ -13,47 +13,47 @@ Eleven named errors are detailed on this page; the variants and write errors get
 
 | Error | Layer | Fires when |
 | --- | --- | --- |
-| `MissingConfigError` | bind | eager validation found missing or invalid zernos — aggregated |
+| `MissingConfigError` | bind | eager validation found missing or invalid tesserae — aggregated |
 | `AsyncValidatorInSyncBindingError` | any validation site | a validator returned a thenable in a sync binding |
-| `UnboundZernoError` | snapshot read | the zerno was never in the bound set |
+| `UnboundTesseraError` | snapshot read | the tessera was never in the bound set |
 | `DescriptorMismatchError` | snapshot read | same key, different descriptor identity |
-| `NotInScopeError` | scope read | the zerno is not in the group passed to `pick()` |
+| `NotInScopeError` | scope read | the tessera is not in the group passed to `pick()` |
 | `ExposureError` | exposure boundary | a secret value was about to cross into a public context |
-| `InvalidLiveValueError` | live read | a live re-read turned invalid after a valid value — the zerno is poisoned |
+| `InvalidLiveValueError` | live read | a live re-read turned invalid after a valid value — the tessera is poisoned |
 | `SourceUnavailableError` | live read | the source is unreachable and the staleness budget is spent |
-| `CoastBudgetExceededError` | live read | a `keepLastGood` zerno coasted past its `maxCoastMs` |
-| `NoValidValueError` | live read | the zerno has never produced a valid value in this process |
+| `CoastBudgetExceededError` | live read | a `keepLastGood` tessera coasted past its `maxCoastMs` |
+| `NoValidValueError` | live read | the tessera has never produced a valid value in this process |
 | `StaleBakeError` | baked client read | the baked identity hash no longer matches the imported descriptor |
 
-Reads also have a non-throwing door: `safe(zerno)` returns `{ ok: true, value }` or `{ ok: false, error }` instead of throwing (on a live binding it is the first thing epoch-consumer code should use), `live.health()` reports per-zerno status and timestamps, and `cfg.explain(zerno)` shows provenance. Use those for probes and diagnostics; the errors below are for code paths that must not proceed.
+Reads also have a non-throwing door: `safe(tessera)` returns `{ ok: true, value }` or `{ ok: false, error }` instead of throwing (on a live binding it is the first thing epoch-consumer code should use), `live.health()` reports per-tessera status and timestamps, and `cfg.explain(tessera)` shows provenance. Use those for probes and diagnostics; the errors below are for code paths that must not proceed.
 
-## Secret zernos: counts and paths, never text
+## Secret tesserae: counts and paths, never text
 
-One rule applies across every error surface. Validator libraries echo received values into their messages — a failed `z.string().startsWith("sk_")` happily prints the secret it rejected. For zernos with `exposure: "secret"` (the default), that text is untrusted. Every report — the aggregated bind failure, `safe` issues, `live.health()`, `onInvalid` callbacks — carries **issue counts and issue paths only** for secret zernos. Never validator messages, never received values. Public zernos get the full validator output.
+One rule applies across every error surface. Validator libraries echo received values into their messages — a failed `z.string().startsWith("sk_")` happily prints the secret it rejected. For tesserae with `exposure: "secret"` (the default), that text is untrusted. Every report — the aggregated bind failure, `safe` issues, `live.health()`, `onInvalid` callbacks — carries **issue counts and issue paths only** for secret tesserae. Never validator messages, never received values. Public tesserae get the full validator output.
 
 ## MissingConfigError
 
 **Layer: bind.** The eager default of `bind()` validates the entire listed set immediately (a binding with async entries validates at `ready()`/`snapshot()`), and collects *everything* wrong into one aggregated error — so a broken deploy reports every problem in a single boot failure, not one problem per restart. `bind.lazy()` throws it too, but only for raw *presence*: missing variables still die at bind; validation is deferred to first read.
 
 ```ts
-import { zerno } from "komirka";
-import { bind } from "komirka/node";
+import { tessera } from "tessellum";
+import { bind } from "tessellum/node";
 import { z } from "zod";
 
-const dbUrl = zerno({
+const dbUrl = tessera({
   key: "DATABASE_URL",
   schema: z.string().url(),
   doc: "Primary Postgres connection string",
 });
 
-const poolSize = zerno({
+const poolSize = tessera({
   key: "DB_POOL_SIZE",
   schema: z.coerce.number().int().min(1),
   exposure: "public",
   default: 10,
 });
 
-const stripeKey = zerno({
+const stripeKey = tessera({
   key: "STRIPE_SECRET_KEY",
   schema: z.string().startsWith("sk_"),
 });
@@ -61,14 +61,14 @@ const stripeKey = zerno({
 const cfg = bind([dbUrl, poolSize, stripeKey]);
 ```
 
-A realistic boot report, with two of three zernos failing:
+A realistic boot report, with two of three tesserae failing:
 
 ```text
-MissingConfigError: 2 of 3 zernos failed at bind (entry point: komirka/node)
+MissingConfigError: 2 of 3 tesserae failed at bind (entry point: tessellum/node)
 
   ✕ DATABASE_URL       missing — no source produced a value
                        tried: env DATABASE_URL
-                       fix: set DATABASE_URL, or give the zerno a default or another source
+                       fix: set DATABASE_URL, or give the tessera a default or another source
   ✕ STRIPE_SECRET_KEY  invalid — 1 issue at (root)  [secret: validator text withheld]
                        resolved from: env STRIPE_SECRET_KEY
                        fix: correct the value at its source
@@ -84,7 +84,7 @@ Note the secret rule in action: `DATABASE_URL` is *missing*, so there is nothing
 Why *every* validation site checks, instead of probing once at bind: **async-ness can be input-dependent.** A schema with a conditional async refinement is synchronous for one input and returns a promise for another. No bind-time probe can prove a validator sync, so eager bind, the deferred first read of `bind.lazy`, live re-validation, and cross-package hash-fallback re-validation each check the result — which means this error can legitimately surface long after boot, on the exact input that took the async path.
 
 ```ts
-const apiKey = zerno({
+const apiKey = tessera({
   key: "PARTNER_API_KEY",
   schema: z.string().refine(async (v) => looksLikePartnerKey(v)),
 });
@@ -94,17 +94,17 @@ const cfg = bind([apiKey]);
 // a thenable during bind — sync bindings require sync validators.
 ```
 
-The fix is almost always to make the validator sync: validators must be pure, so anything that genuinely needs I/O (a network check, a lookup) doesn't belong in a validator at all — it belongs in an async *provider* entry — the binding becomes an `AsyncBinding` and the type says so. Resolve it once at the composition root with `const cfg = await bind(entries).snapshot()` (import `bind` from `komirka/async`), and every read is sync forever after.
+The fix is almost always to make the validator sync: validators must be pure, so anything that genuinely needs I/O (a network check, a lookup) doesn't belong in a validator at all — it belongs in an async *provider* entry — the binding becomes an `AsyncBinding` and the type says so. Resolve it once at the composition root with `const cfg = await bind(entries).snapshot()` (import `bind` from `tessellum/async`), and every read is sync forever after.
 
-## UnboundZernoError
+## UnboundTesseraError
 
-**Layer: snapshot read.** There is no ambient configuration: values exist only inside explicit bindings, and a read outside one is a named error — never a silent fallback to `process.env`. `unwrap()` has exactly three outcomes: a hit, `UnboundZernoError`, or `DescriptorMismatchError`.
+**Layer: snapshot read.** There is no ambient configuration: values exist only inside explicit bindings, and a read outside one is a named error — never a silent fallback to `process.env`. `unwrap()` has exactly three outcomes: a hit, `UnboundTesseraError`, or `DescriptorMismatchError`.
 
 ```ts
 const cfg = bind([dbUrl]);
 
 cfg.unwrap(poolSize);
-// UnboundZernoError: DB_POOL_SIZE is not in this binding's bound set (1 zerno: DATABASE_URL).
+// UnboundTesseraError: DB_POOL_SIZE is not in this binding's bound set (1 tessera: DATABASE_URL).
 // Add it to the bind() list at your composition root, or check that you are
 // holding the snapshot you think you are.
 ```
@@ -113,17 +113,17 @@ The message names the key, states the bound set it searched, and points at the c
 
 ## DescriptorMismatchError
 
-**Layer: snapshot read.** The key is bound — but under a *different* descriptor. Identity is content-addressed over the identity subset only (`key`, `exposure`, `sources` in order, `default` presence and value, schema id or `version`); cosmetic fields like `doc` can never trigger this. The classic cause is the dual-package hazard: two hoisted copies of a library each construct their own instance of "the same" zerno, and the copies have drifted.
+**Layer: snapshot read.** The key is bound — but under a *different* descriptor. Identity is content-addressed over the identity subset only (`key`, `exposure`, `sources` in order, `default` presence and value, schema id or `version`); cosmetic fields like `doc` can never trigger this. The classic cause is the dual-package hazard: two hoisted copies of a library each construct their own instance of "the same" tessera, and the copies have drifted.
 
 The error carries both canonical descriptors, a field-level diff of the identity subset, and a paste-able resolution:
 
 ```text
 DescriptorMismatchError: SMTP_URL is bound, but under a different descriptor.
 
-  bound      zernov1:xxh128:9f31c2e8…
+  bound      tesserav1:xxh128:9f31c2e8…
              { key: "SMTP_URL", exposure: "secret",
                sources: [{ env: "SMTP_URL" }], version: "1" }
-  requested  zernov1:xxh128:57ab90d1…
+  requested  tesserav1:xxh128:57ab90d1…
              { key: "SMTP_URL", exposure: "secret",
                sources: [{ env: "SMTP_URL" }, { env: "MAILER_SMTP_URL" }], version: "2" }
 
@@ -132,31 +132,31 @@ DescriptorMismatchError: SMTP_URL is bound, but under a different descriptor.
               → [{ env: "SMTP_URL" }, { env: "MAILER_SMTP_URL" }]
     version   "1" → "2"
 
-  If these are the same logical zerno, accept the newer descriptor and alias the old hash:
+  If these are the same logical tessera, accept the newer descriptor and alias the old hash:
 
-    bind(zernos, {
-      unify: [{ accept: smtpUrl, aliases: ["zernov1:xxh128:9f31c2e8…"] }],
+    bind(tesserae, {
+      unify: [{ accept: smtpUrl, aliases: ["tesserav1:xxh128:9f31c2e8…"] }],
     })
 ```
 
-Two properties keep `unify` safe. The hash is an index, not a security boundary — structural equality of the identity subset is what's authoritative. And hash-fallback resolutions **always re-validate with the caller's schema** (memoized), so accepting an alias can never silently downgrade validation across package copies. Use `identityOf(zerno)` when you need to see a hash yourself.
+Two properties keep `unify` safe. The hash is an index, not a security boundary — structural equality of the identity subset is what's authoritative. And hash-fallback resolutions **always re-validate with the caller's schema** (memoized), so accepting an alias can never silently downgrade validation across package copies. Use `identityOf(tessera)` when you need to see a hash yourself.
 
 ## NotInScopeError
 
-**Layer: scope read.** `cfg.pick(group)` produces a `Scope` that is restricted at *runtime*, not just in types: reading any zerno outside the picked group throws, and the message names the pick site that created the scope.
+**Layer: scope read.** `cfg.pick(group)` produces a `Scope` that is restricted at *runtime*, not just in types: reading any tessera outside the picked group throws, and the message names the pick site that created the scope.
 
 ```ts
-const root = bind([...appZernos, ...mailerZernos]);
-const mailer = createMailer(root.pick(mailerZernos));
+const root = bind([...appTesserae, ...mailerTesserae]);
+const mailer = createMailer(root.pick(mailerTesserae));
 
-// inside the mailer, someone reaches for an app-level zerno:
+// inside the mailer, someone reaches for an app-level tessera:
 scope.unwrap(dbUrl);
 // NotInScopeError: DATABASE_URL is not in this scope.
-// Scope created by pick(mailerZernos) at src/composition-root.ts:18 (3 zernos).
-// Add the zerno to the picked group — or ask whether this code should own it.
+// Scope created by pick(mailerTesserae) at src/composition-root.ts:18 (3 tesserae).
+// Add the tessera to the picked group — or ask whether this code should own it.
 ```
 
-The remediation is deliberately a design question: either widen the group at the pick site, or move the zerno into the library's declared set. Honest boundary: `pick()` is least-privilege against *mistakes* and for auditability — it is not a sandbox. Hostile in-process code can read `process.env` directly; only provider-resolved, non-ambient values gain real confinement.
+The remediation is deliberately a design question: either widen the group at the pick site, or move the tessera into the library's declared set. Honest boundary: `pick()` is least-privilege against *mistakes* and for auditability — it is not a sandbox. Hostile in-process code can read `process.env` directly; only provider-resolved, non-ambient values gain real confinement.
 
 ## ExposureError
 
@@ -173,16 +173,16 @@ export async function getServerSideProps() {
 // exposure to "public" if this value truly is public (identity-changing).
 ```
 
-`cfg.toJSON()` never throws — it redacts secrets by construction; the guard exists for the raw values themselves. Note that changing `exposure` is an identity field: flipping a zerno to `"public"` changes its hash and shows up in review and in bake's manifest, which is the point.
+`cfg.toJSON()` never throws — it redacts secrets by construction; the guard exists for the raw values themselves. Note that changing `exposure` is an identity field: flipping a tessera to `"public"` changes its hash and shows up in review and in bake's manifest, which is the point.
 
 ## InvalidLiveValueError
 
-**Layer: live read.** The live default is **current truth wins**: a zerno's value is what its source says right now — never a value silently inherited from an earlier read. When a live re-read yields a value that fails validation, the zerno becomes *poisoned*, and reads of it throw. The honest trade, stated up front: this default converts a bad config push from silent staleness into a loud partial outage that lasts until the push is fixed — opt into `keepLastGood` per zerno where availability beats freshness.
+**Layer: live read.** The live default is **current truth wins**: a tessera's value is what its source says right now — never a value silently inherited from an earlier read. When a live re-read yields a value that fails validation, the tessera becomes *poisoned*, and reads of it throw. The honest trade, stated up front: this default converts a bad config push from silent staleness into a loud partial outage that lasts until the push is fixed — opt into `keepLastGood` per tessera where availability beats freshness.
 
-Poisoning is deliberately narrow. `live.snapshot()` — and any pinned snapshot — never throws wholesale: the invalid zerno occupies an *error slot*, and only `unwrap()` on that zerno throws. Every other zerno keeps working, so the blast radius is proportional to actual usage — one invalid zerno nobody reads must never 500 the site.
+Poisoning is deliberately narrow. `live.snapshot()` — and any pinned snapshot — never throws wholesale: the invalid tessera occupies an *error slot*, and only `unwrap()` on that tessera throws. Every other tessera keeps working, so the blast radius is proportional to actual usage — one invalid tessera nobody reads must never 500 the site.
 
 ```ts
-const snap = live.snapshot(); // never throws — poisoned zernos ride along in error slots
+const snap = live.snapshot(); // never throws — poisoned tesserae ride along in error slots
 
 snap.unwrap(rateLimit);
 // InvalidLiveValueError: RATE_LIMIT re-read as invalid after a valid value.
@@ -191,7 +191,7 @@ snap.unwrap(rateLimit);
 // Fix the value at its source — while poisoned, the next read re-checks immediately.
 ```
 
-The error carries `issues`, `lastValidAt`, `invalidSince`, and an `incidentId`. The raw value is included only for non-secret zernos — the secret rule above applies unchanged, which is why the example shows counts and paths, not the rejected text.
+The error carries `issues`, `lastValidAt`, `invalidSince`, and an `incidentId`. The raw value is included only for non-secret tesserae — the secret rule above applies unchanged, which is why the example shows counts and paths, not the rejected text.
 
 **Consumption: `safe` and the epoch.** The invalid *transition* bumps the epoch, exactly like an accepted change — there is a single clock, and consumers observe validity changes through the same counter they already watch. The rebuild pattern:
 
@@ -204,13 +204,13 @@ if (live.epoch(rateLimit) !== seen) {
 }
 ```
 
-`safe(zerno)` returns `{ ok: true, value }` or `{ ok: false, error }` and is the first thing epoch-consumer code should use.
+`safe(tessera)` returns `{ ok: true, value }` or `{ ok: false, error }` and is the first thing epoch-consumer code should use.
 
-**Observation: `onInvalid`.** The `onInvalid(zerno, raw, issues)` bind option fires **once per zerno per distinct invalid raw** — it is the observation plane; the throws are the consumption plane. Both carry the same `incidentId`, so logs join and dedupe cleanly. For secret zernos the hook receives `{ rawDigest, length }` in place of the raw — never the rejected text.
+**Observation: `onInvalid`.** The `onInvalid(tessera, raw, issues)` bind option fires **once per tessera per distinct invalid raw** — it is the observation plane; the throws are the consumption plane. Both carry the same `incidentId`, so logs join and dedupe cleanly. For secret tesserae the hook receives `{ rawDigest, length }` in place of the raw — never the rejected text.
 
-**Recovery is one read, not one poll.** Poisoned state bypasses the staleness memoization: while a zerno is poisoned, the next read re-reads the source immediately. Fix the file or the row, and the very next read recovers — you do not wait out a poll interval. (On Kubernetes, the `..data` symlink swap makes a single-file read atomic in a single pass, and multi-file sources are read in one resolved-dir pass; the genuine tear risk is plain files outside k8s — and the poisoned-state bypass collapses exactly that window.)
+**Recovery is one read, not one poll.** Poisoned state bypasses the staleness memoization: while a tessera is poisoned, the next read re-reads the source immediately. Fix the file or the row, and the very next read recovers — you do not wait out a poll interval. (On Kubernetes, the `..data` symlink swap makes a single-file read atomic in a single pass, and multi-file sources are read in one resolved-dir pass; the genuine tear risk is plain files outside k8s — and the poisoned-state bypass collapses exactly that window.)
 
-**What `health()` shows.** Per zerno: a status — `"valid"`, `"invalid-was-valid"`, `"never-valid"`, or `"coasting"` — plus `lastValidAt`, `lastInvalidAt`, `lastThrownAt`, and `throwCount`. Source observation and consumer impact are kept distinct on purpose: "invalid but dormant" and "actively failing requests" are different operator situations, and the triage split lives in `lastThrownAt` and `throwCount`. Probe contract: liveness probes must **never** consult zerno validity; readiness may gate on `"never-valid"` at most.
+**What `health()` shows.** Per tessera: a status — `"valid"`, `"invalid-was-valid"`, `"never-valid"`, or `"coasting"` — plus `lastValidAt`, `lastInvalidAt`, `lastThrownAt`, and `throwCount`. Source observation and consumer impact are kept distinct on purpose: "invalid but dormant" and "actively failing requests" are different operator situations, and the triage split lives in `lastThrownAt` and `throwCount`. Probe contract: liveness probes must **never** consult tessera validity; readiness may gate on `"never-valid"` at most.
 
 ## SourceUnavailableError
 
@@ -228,18 +228,18 @@ The remediation is at the source, not in code: restore the file or the provider'
 
 ## CoastBudgetExceededError
 
-**Layer: live read.** Keep-last-good still exists — as a **bind-site opt-in**, for zernos where availability beats freshness:
+**Layer: live read.** Keep-last-good still exists — as a **bind-site opt-in**, for tesserae where availability beats freshness:
 
 ```ts
-import { keepLastGood } from "komirka";
-import { bind } from "komirka/node";
+import { keepLastGood } from "tessellum";
+import { bind } from "tessellum/node";
 
 const live = bind([rateLimit, tiers], {
   invalid: [keepLastGood(rateLimit, { maxCoastMs: 300_000 })],
 });
 ```
 
-`maxCoastMs` is required — there is no unbounded coasting. Within the budget, the zerno keeps serving its last good value and `health()` reports it as `"coasting"`. Past the budget, `unwrap()` throws `CoastBudgetExceededError` and the status moves from `"coasting"` to `"invalid-was-valid"`.
+`maxCoastMs` is required — there is no unbounded coasting. Within the budget, the tessera keeps serving its last good value and `health()` reports it as `"coasting"`. Past the budget, `unwrap()` throws `CoastBudgetExceededError` and the status moves from `"coasting"` to `"invalid-was-valid"`.
 
 ```ts
 live.unwrap(rateLimit);
@@ -250,14 +250,14 @@ live.unwrap(rateLimit);
 // win for longer.
 ```
 
-Why a bind option and not a descriptor field: as an identity field, two teams' staleness preferences for the same zerno would become a `DescriptorMismatchError`; as a cosmetic field, real runtime behavior would hide outside identity. Neither is acceptable, so the policy lives where policy belongs — at the bind site, chosen by the process that runs it. Reach for `keepLastGood` on the zernos where serving something slightly stale beats serving an error; everywhere else, the throw-by-default of `InvalidLiveValueError` is simply the default — there is no per-zerno spelling to opt into it.
+Why a bind option and not a descriptor field: as an identity field, two teams' staleness preferences for the same tessera would become a `DescriptorMismatchError`; as a cosmetic field, real runtime behavior would hide outside identity. Neither is acceptable, so the policy lives where policy belongs — at the bind site, chosen by the process that runs it. Reach for `keepLastGood` on the tesserae where serving something slightly stale beats serving an error; everywhere else, the throw-by-default of `InvalidLiveValueError` is simply the default — there is no per-tessera spelling to opt into it.
 
 ## NoValidValueError
 
-**Layer: live read.** Reserved for exactly one situation: the zerno has **never** produced a valid value in this process. There is no invalid-after-valid transition to report and no last good to coast on — this is the never-valid case, and only the lazy and unchecked doors can reach it, because an eager `bind()` validates at bind and refuses to hand you a binding at all:
+**Layer: live read.** Reserved for exactly one situation: the tessera has **never** produced a valid value in this process. There is no invalid-after-valid transition to report and no last good to coast on — this is the never-valid case, and only the lazy and unchecked doors can reach it, because an eager `bind()` validates at bind and refuses to hand you a binding at all:
 
 ```ts
-const tiers = zerno({
+const tiers = tessera({
   key: "FEATURE_TIERS",
   schema: tierSchema,
   exposure: "public",
@@ -274,38 +274,38 @@ live.unwrap(tiers);
 // Fix the source, or bind eagerly to fail at boot instead of at read.
 ```
 
-`live.health()` reports the zerno as `"never-valid"`, with the last validation error — counts and paths only if the zerno is secret. Under the probe contract, this is the only status readiness may gate on; liveness probes never consult zerno validity.
+`live.health()` reports the tessera as `"never-valid"`, with the last validation error — counts and paths only if the tessera is secret. Under the probe contract, this is the only status readiness may gate on; liveness probes never consult tessera validity.
 
-**The restart story.** Nothing is inherited: live values are current truth, not process memory. That makes failure *symmetric* across restarts — a running pod and a freshly restarted pod fail on exactly the same values. The running process throws `InvalidLiveValueError` on the poisoned zerno; the restarted one dies at eager bind with an aggregated `MissingConfigError`, or throws `NoValidValueError` through a lazy door. A restart can never silently "fix" a bad push by resurrecting a value the source no longer contains, so what you debug on one pod is true of all of them. For zernos where availability beats freshness, opt in at the bind site with `keepLastGood` — see `CoastBudgetExceededError` above.
+**The restart story.** Nothing is inherited: live values are current truth, not process memory. That makes failure *symmetric* across restarts — a running pod and a freshly restarted pod fail on exactly the same values. The running process throws `InvalidLiveValueError` on the poisoned tessera; the restarted one dies at eager bind with an aggregated `MissingConfigError`, or throws `NoValidValueError` through a lazy door. A restart can never silently "fix" a bad push by resurrecting a value the source no longer contains, so what you debug on one pod is true of all of them. For tesserae where availability beats freshness, opt in at the bind site with `keepLastGood` — see `CoastBudgetExceededError` above.
 
 ## StaleBakeError
 
-**Layer: baked client read.** The client bake target emits a generated module with an inlined snapshot shim that imports nothing at runtime. The shim carries a per-zerno identity hash, and its `unwrap()` verifies the hash of the descriptor you pass against the hash recorded at bake time. If a library was upgraded after baking — its zerno's schema `version` bumped, a source added — the identities diverge:
+**Layer: baked client read.** The client bake target emits a generated module with an inlined snapshot shim that imports nothing at runtime. The shim carries a per-tessera identity hash, and its `unwrap()` verifies the hash of the descriptor you pass against the hash recorded at bake time. If a library was upgraded after baking — its tessera's schema `version` bumped, a source added — the identities diverge:
 
 ```ts
-import { widgetTheme } from "@acme/widgets/zernos"; // upgraded to v3: descriptor changed
+import { widgetTheme } from "@acme/widgets/tesserae"; // upgraded to v3: descriptor changed
 import { config } from "./config.baked";    // baked against v2
 
 config.unwrap(widgetTheme);
-// StaleBakeError: WIDGET_THEME was baked as zernov1:xxh128:aa04f2…, but the
-// imported descriptor hashes to zernov1:xxh128:d17b9c… — the bake is stale.
-// Re-run `komirka bake`. In CI, `komirka bake --check` fails the build before this ships.
+// StaleBakeError: WIDGET_THEME was baked as tesserav1:xxh128:aa04f2…, but the
+// imported descriptor hashes to tesserav1:xxh128:d17b9c… — the bake is stale.
+// Re-run `tessellum bake`. In CI, `tessellum bake --check` fails the build before this ships.
 ```
 
-The remediation chain is mechanical: `komirka bake` regenerates, `komirka bake --check` is the CI drift gate that makes shipping this state impossible, and `komirka bake --watch` keeps dev and HMR in sync so you never meet it locally.
+The remediation chain is mechanical: `tessellum bake` regenerates, `tessellum bake --check` is the CI drift gate that makes shipping this state impossible, and `tessellum bake --watch` keeps dev and HMR in sync so you never meet it locally.
 
 ## Variants and write errors (summary)
 
 Conditional config and writable sources add their own named errors. They obey the same first-line contract; here they get one line each — full treatment lives on the Conditional config and Database-backed config pages.
 
-- `InactiveVariantError` — subclass of `UnboundZernoError`, refining `unwrap()`'s three-way contract: the zerno is declared, but in a variant branch that is not active; carries `group`, `discriminant`, `activeBranch`, and `expectedBranch`.
-- `MissingDiscriminantError` — a variant group's discriminant zerno produced no value, so no branch can be selected.
+- `InactiveVariantError` — subclass of `UnboundTesseraError`, refining `unwrap()`'s three-way contract: the tessera is declared, but in a variant branch that is not active; carries `group`, `discriminant`, `activeBranch`, and `expectedBranch`.
+- `MissingDiscriminantError` — a variant group's discriminant tessera produced no value, so no branch can be selected.
 - `LiveDiscriminantError` — a discriminant resolved through a live source; branch selection must be stable for the life of the process.
-- `AmbiguousZernoMembershipError` — a zerno appears in more than one variant branch or group, so membership cannot be resolved.
+- `AmbiguousTesseraMembershipError` — a tessera appears in more than one variant branch or group, so membership cannot be resolved.
 - `VariantsNestingError` — a variant group declared inside another variant's branch; nesting is rejected.
-- `RuleViolationError` — a declared cross-zerno rule failed even though every member zerno validated individually.
+- `RuleViolationError` — a declared cross-tessera rule failed even though every member tessera validated individually.
 - `VariantsInClientTargetError` — a variant group reached the client bake target; branch selection is server-side.
-- `SecretNameInClientTargetError` — a zerno in a `client` target carries a declared `key`, or an effective source name in its client-reachable wiring closure, that matches the well-known-secret-suffix denylist (`*_SECRET`, `*_TOKEN`, `*_PASSWORD`, `*_PRIVATE_KEY`, `*_API_KEY`) — matched as whole tokens *anywhere* in the `_`-delimited name, so `STRIPE_SECRET_KEY` trips on its `SECRET` token while `viewport`, `MONKEY`, `CACHE_KEY`, and `API_BASE_URL` do not — **even though the zerno is `exposure: "public"`**. A public value *named* like a secret is almost always a misclassification or an attempt to launder a credential into the public allowlist, so bake refuses it as defense-in-depth *behind* the exposure gate — never as the primary secrecy mechanism; the flag still decides exposure (this library does not do secrecy-by-naming-convention). The only escape is the same explicit per-name allowlist that backs `WiringExposureError`, declared in the manifest's client attestation and recorded in `config.manifest.lock.json` so each exception is a reviewable line under CODEOWNERS — there is no global override flag. Client targets only: the server wiring module is names-only by design and legitimately carries `SMTP_PASSWORD` and its kin.
+- `SecretNameInClientTargetError` — a tessera in a `client` target carries a declared `key`, or an effective source name in its client-reachable wiring closure, that matches the well-known-secret-suffix denylist (`*_SECRET`, `*_TOKEN`, `*_PASSWORD`, `*_PRIVATE_KEY`, `*_API_KEY`) — matched as whole tokens *anywhere* in the `_`-delimited name, so `STRIPE_SECRET_KEY` trips on its `SECRET` token while `viewport`, `MONKEY`, `CACHE_KEY`, and `API_BASE_URL` do not — **even though the tessera is `exposure: "public"`**. A public value *named* like a secret is almost always a misclassification or an attempt to launder a credential into the public allowlist, so bake refuses it as defense-in-depth *behind* the exposure gate — never as the primary secrecy mechanism; the flag still decides exposure (this library does not do secrecy-by-naming-convention). The only escape is the same explicit per-name allowlist that backs `WiringExposureError`, declared in the manifest's client attestation and recorded in `config.manifest.lock.json` so each exception is a reviewable line under CODEOWNERS — there is no global override flag. Client targets only: the server wiring module is names-only by design and legitimately carries `SMTP_PASSWORD` and its kin.
 - `WriteConflictError` — a compare-and-set write with `ifVersion` found the stored version had moved; re-read and retry.
 - `NotWritableError` — the write would be shadowed by a higher-precedence source, so its effect would never be observable; refused up front.
 - `WriteFailedError` — the provider failed during a write; the cause is scrubbed, the cache is untouched, and no epoch bump occurs.
@@ -315,19 +315,19 @@ Conditional config and writable sources add their own named errors. They obey th
 
 And the call-shape / wiring family (details on the [Binding](/docs/concepts/binding) page):
 
-- `LivenessViolationError` — `.value`/`.values` touched on a binding containing live or async zernos (the type split normally prevents this; the runtime backstop catches type-widened zernos). Pin first.
+- `LivenessViolationError` — `.value`/`.values` touched on a binding containing live or async tesserae (the type split normally prevents this; the runtime backstop catches type-widened tesserae). Pin first.
 - `ReservedKeyError` — a record-form bind used the key `toJSON`, `then`, or `constructor`, which would shadow the values bag's guards.
-- `UnknownWiringError` — a wiring override (`env(zerno, "NAME")`) targets a zerno that declares no ref of that kind, or a zerno in neither the binding nor any bound variants branch; a typo'd override must never silently no-op.
-- `WiringCollisionError` — wiring *created* a convergence (two zernos onto one effective name) that the declared refs did not have.
-- `WiringExposureError` — a non-secret zerno was wired onto a name in the secret-name set (lockfile authority + well-known-secret-suffix denylist); routing credentials through public-exposure zernos would launder them past redaction and into bake's public inlining.
-- `InheritanceExposureError` — a public zerno may not inherit from a secret one through an `inherit()` relation: a chain's effective exposure is the max secrecy of any link, so downward inheritance would surface a secret through a public read and into bake's client inlining. `WiringExposureError` applied to the inheritance path — checked at construction/bind; secret-inherits-public stays legal. (Its sibling inheritance guards, `InheritanceCycleError` and `InheritanceFreshnessError`, are recorded in [ADR 0001](https://github.com/rejifald/komirka/blob/main/docs/adr/0001-zerno-inheritance.md).)
+- `UnknownWiringError` — a wiring override (`env(tessera, "NAME")`) targets a tessera that declares no ref of that kind, or a tessera in neither the binding nor any bound variants branch; a typo'd override must never silently no-op.
+- `WiringCollisionError` — wiring *created* a convergence (two tesserae onto one effective name) that the declared refs did not have.
+- `WiringExposureError` — a non-secret tessera was wired onto a name in the secret-name set (lockfile authority + well-known-secret-suffix denylist); routing credentials through public-exposure tesserae would launder them past redaction and into bake's public inlining.
+- `InheritanceExposureError` — a public tessera may not inherit from a secret one through an `inherit()` relation: a chain's effective exposure is the max secrecy of any link, so downward inheritance would surface a secret through a public read and into bake's client inlining. `WiringExposureError` applied to the inheritance path — checked at construction/bind; secret-inherits-public stays legal. (Its sibling inheritance guards, `InheritanceCycleError` and `InheritanceFreshnessError`, are recorded in [ADR 0001](https://github.com/rejifald/tessellum/blob/main/docs/adr/0001-tessera-inheritance.md).)
 - `WiringSkewError` — a baked artifact's wiring digest disagrees with the composition root's actual wiring (including bind-site transforms); fail-closed on bake-covered production targets.
-- `DuplicateWiringError` — a zerno is reachable through two entries in one bind (including a group member wired again as a leaf); there is no precedence hierarchy — specialization goes inside the group combinator.
+- `DuplicateWiringError` — a tessera is reachable through two entries in one bind (including a group member wired again as a leaf); there is no precedence hierarchy — specialization goes inside the group combinator.
 - `NoWiringError` — a bare `env`/`file` ref under a bind entry point with no natural defaults (core `bind`); import the runtime's bind or wire the entry explicitly.
-- `SecretLiteralError` — `literal()` wired to a secret-exposure zerno outside the test entry point: a live credential in committed wiring JSON bypasses every name-based guard. Tests use `secretLiteral()` from the testing kit; deployments use env or provider wiring.
-- `ExposureMigrationError` — a library flipped a zerno's exposure (identity field) while a deployment still wires it under the old classification; bind compares the lockfile's recorded exposure before identity checks so the flip surfaces by name, with the exact rewiring steps, instead of as a bare descriptor-hash diff. Deliberately a hard error — a grace window would be the laundering window.
+- `SecretLiteralError` — `literal()` wired to a secret-exposure tessera outside the test entry point: a live credential in committed wiring JSON bypasses every name-based guard. Tests use `secretLiteral()` from the testing kit; deployments use env or provider wiring.
+- `ExposureMigrationError` — a library flipped a tessera's exposure (identity field) while a deployment still wires it under the old classification; bind compares the lockfile's recorded exposure before identity checks so the flip surfaces by name, with the exact rewiring steps, instead of as a bare descriptor-hash diff. Deliberately a hard error — a grace window would be the laundering window.
 - `DescriptorError` — a descriptor-level rule violated at construction; the first occupant: variants discriminants must be exposure `"public"` (branch selection is a function of the discriminant's value and leaks through selection metadata that no error scrub sees).
 
 ## Summary
 
-Bind-time errors (`MissingConfigError`, `AsyncValidatorInSyncBindingError`) fail the boot, loudly and completely. Read-time errors (`UnboundZernoError`, `DescriptorMismatchError`, `NotInScopeError`, `AsyncValidatorInSyncBindingError`) refuse to guess — no fallback, no ambient lookup, ever. Boundary errors (`ExposureError`, `StaleBakeError`) are the runtime halves of guarantees that bake starts at build time. Live errors (`InvalidLiveValueError`, `SourceUnavailableError`, `CoastBudgetExceededError`, `NoValidValueError`) keep current truth honest: invalid throws exactly where the zerno is used, unavailable coasts only inside a declared staleness budget, coasting itself has a signed budget, and never-valid is named for what it is. The variants and write errors extend the same contract to conditional config and writable sources. In every case: the key, the layer, the next step — in the first line.
+Bind-time errors (`MissingConfigError`, `AsyncValidatorInSyncBindingError`) fail the boot, loudly and completely. Read-time errors (`UnboundTesseraError`, `DescriptorMismatchError`, `NotInScopeError`, `AsyncValidatorInSyncBindingError`) refuse to guess — no fallback, no ambient lookup, ever. Boundary errors (`ExposureError`, `StaleBakeError`) are the runtime halves of guarantees that bake starts at build time. Live errors (`InvalidLiveValueError`, `SourceUnavailableError`, `CoastBudgetExceededError`, `NoValidValueError`) keep current truth honest: invalid throws exactly where the tessera is used, unavailable coasts only inside a declared staleness budget, coasting itself has a signed budget, and never-valid is named for what it is. The variants and write errors extend the same contract to conditional config and writable sources. In every case: the key, the layer, the next step — in the first line.

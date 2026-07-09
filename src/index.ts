@@ -4,8 +4,8 @@
  * first real descriptor primitive lands. See principles.md (P1) for the design.
  */
 
-/** Structural brand marking a value as an inert knob descriptor (principles.md P1). */
-export const KNOB_BRAND = "$knob" as const;
+/** Structural brand marking a value as an inert tessera descriptor (principles.md P1). */
+export const TESSERA_BRAND = "$tessera" as const;
 
-/** The literal type of {@link KNOB_BRAND}. */
-export type KnobBrand = typeof KNOB_BRAND;
+/** The literal type of {@link TESSERA_BRAND}. */
+export type TesseraBrand = typeof TESSERA_BRAND;
