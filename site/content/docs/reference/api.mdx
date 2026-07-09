@@ -154,7 +154,8 @@ interface Snapshot {
   safe<T>(k: Tessera<T>): { ok: true; value: T } | { ok: false; error: ConfigReadError };
                                      // non-throwing twin of unwrap(); error carries .issues on validation failure
   pick<T extends readonly Tessera[]>(tesserae: T): Scope<ConfigOf<T>>;
-  explain(k: Tessera): Provenance;      // which source, which key resolved; secrets redacted
+  explain(k: Tessera): Provenance;      // source, resolved key, version? (the provider CAS token
+                                     //   this pin carries); secret VALUE redacts, the token does not
   toJSON(): Json;                    // secrets redacted by construction
 }
 ```
@@ -270,7 +271,8 @@ interface AsyncProvider {
 // setMany past maxWriteBatch is refused pre-I/O (AtomicBatchTooLargeError, ADR 0006).
 // Per-key {error} slots route to a per-key unavailable path; a
 // whole-call throw = connection-level down. consistentReads is demoted to a round-trip
-// optimization: falsy/chunked coherent reads run a bounded discriminant re-check loop.
+// optimization: falsy/chunked coherent reads run a bounded coherence re-check loop
+// (discriminant or coherent() group; CoherenceError past the retry budget) — see ADR 0004.
 // A published verifyProvider(impl) conformance kit is the bar for declaring capabilities.
 
 // SECRET PROVIDERS — same batch shape, class pinned (see the Secrets page):
@@ -303,7 +305,7 @@ interface AsyncBinding {
   ready(): Promise<void>;                        // startup line — one batch read, validates all; boot outage → bounded retry then fail-fast (readyTimeoutMs)
   unwrap<T>(k: Tessera<T>): Promise<T>;             // colored read (scripts/jobs)
   safe<T>(k: Tessera<T>): Promise<{ ok: true; value: T } | { ok: false; error: ConfigReadError }>;
-  snapshot(): Promise<Snapshot>;                 // per-request pin — batch read for expired keys only
+  snapshot(): Promise<Snapshot>;                 // per-request pin — re-reads expired keys; a coherent() group re-reads whole, as one cut
   set<T>(k: Tessera<T>, raw: unknown,               // input-typed: validate raw → write verbatim → cache PARSED → epoch++
          opts?: { ifVersion?: string; verify?: "off" | "report" | "revert" }): Promise<SetResult>;
   setMany(entries): Promise<SetResult[]>;        // post-state validated as a whole; atomic on atomicWrites providers (≤ maxWriteBatch, else AtomicBatchTooLargeError)
@@ -312,11 +314,13 @@ interface AsyncBinding {
   health(): HealthReport;
 }
 
-const cfg = bind({ rateLimit: provider(rateLimit, pg), flags: provider(flags, pg) },
-                 { maxStalenessMs: 5_000 });   // async entries → AsyncBinding
+const cfg = bind({ dbHost: provider(dbHost, pg), dbPassword: provider(dbPassword, pg), flags: provider(flags, pg) },
+                 { maxStalenessMs: 5_000,
+                   coherent: [[dbHost, dbPassword]] });   // async entries → AsyncBinding;
+                                       // coherent: rotate-together keys pinned & re-read as ONE cut
 await cfg.ready();        // THE startup line — one batch read; store down at boot → bounded retry (backoff), then SourceUnavailableError past readyTimeoutMs
 await cfg.unwrap(k);      // colored read (scripts/jobs); request paths pin instead:
-await cfg.snapshot();     // fresh cache + one batch read for expired keys only
+await cfg.snapshot();     // zero-I/O if fresh; re-reads expired keys, and any coherent() group whole
 await cfg.set(k, raw, { ifVersion, verify });  // input-typed: validate raw → write raw
                                        // verbatim → install PARSED in cache (read-your-writes) → epoch++
 // verify: "off" (default) | "report" | "revert" → SetResult
@@ -338,8 +342,18 @@ values can never round-trip. Expired reads block on a per-key single-flight re-r
 breaches it throws `SourceUnavailableError` rather than wait unbounded or serve a value past
 its staleness budget ([ADR 0005](https://github.com/rejifald/tessellum/blob/main/docs/adr/0005-async-read-deadline-and-boot-outage.md)).
 `ready()` has no cache to fall back on, so a store outage at boot is bounded retry with
-backoff, then fail-fast past `readyTimeoutMs`. Discriminants pin at `ready()`; `set()` on one
-is a *staged* write observed only via `refresh()`. Scope line: pull-only, context-free,
+backoff, then fail-fast past `readyTimeoutMs`. **Cross-key coherence within a pin is opt-in:**
+the `coherent` bind option names tesserae that must not tear across a generation boundary — a
+rotated `dbHost` + `dbPassword` pair — and `snapshot()` re-reads the whole group as one cut
+whenever any member is expired (one `read()` when it fits a batch and the provider declares
+`consistentReads`, the bounded re-check loop otherwise; a slow group re-read is itself bounded
+by `readTimeoutMs`, a churning one throws `CoherenceError`). A group must resolve to a single
+provider or bind fails with `CoherenceGroupSourceError`; ungrouped keys stay
+expired-keys-only, with no cross-key promise. A variant's discriminant + active branch is an
+implicit group (`refresh()` reads it as one coherent batch). See
+[ADR 0004](https://github.com/rejifald/tessellum/blob/main/docs/adr/0004-async-snapshot-coherence.md).
+Discriminants pin at `ready()`; `set()` on one is a
+*staged* write observed only via `refresh()`. Scope line: pull-only, context-free,
 uniform, operator-plane writes. Full walkthrough:
 [Database-backed config](/docs/guides/database-config).
 

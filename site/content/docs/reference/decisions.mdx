@@ -181,14 +181,23 @@ Related deferral: `cfg.update(tessera, fn, { retries })` read-modify-write sugar
 five-line userland loop over `get`/`set`/`WriteConflictError`; core adds it only if
 demand proves out.
 
+**Separately settled — cross-key coherence within an async `snapshot()`** (a different
+async-read question, resolved in **[ADR 0004](https://github.com/rejifald/tessellum/blob/main/docs/adr/0004-async-snapshot-coherence.md)**): a declared `coherent([...])` group is
+pinned and re-read as one coherent cut (ungrouped keys stay expired-keys-only), `version`
+joins `Provenance` as the CAS token, and a `WriteConflictError` marks the conflicting key
+stale — which is what makes the five-line loop above provably make progress. Stale-while-
+revalidate itself stays deferred as above.
+
 **Separately settled — the blocking-read deadline and boot outage** (the read-*liveness*
 axis of the same async-read question, resolved in **[ADR 0005](https://github.com/rejifald/tessellum/blob/main/docs/adr/0005-async-read-deadline-and-boot-outage.md)**): the single-flight
-re-read above blocks only within `readTimeoutMs` (a new bind option, default `maxStalenessMs`)
-— a slow provider that breaches the deadline throws `SourceUnavailableError` instead of
-wedging every coalesced request unbounded, and `ready()`, which has no cache to fall back on,
-handles a store down at boot with bounded retry then fail-fast (`readyTimeoutMs`, default
-30 000 ms; `0` = pure fail-fast). `maxStalenessMs` bounds *staleness*; `readTimeoutMs` bounds
-the *wait*. Stale-while-revalidate itself stays deferred, as above.
+re-read above (and the coherent-group cut just settled) blocks only within `readTimeoutMs`
+(a new bind option, default `maxStalenessMs`) — a slow provider that breaches the deadline
+throws `SourceUnavailableError` instead of wedging every coalesced request unbounded (distinct
+from `CoherenceError`, a store that answers fast but keeps changing), and `ready()`, which has
+no cache to fall back on, handles a store down at boot with bounded retry then fail-fast
+(`readyTimeoutMs`, default 30 000 ms; `0` = pure fail-fast). `maxStalenessMs` bounds
+*staleness*; `readTimeoutMs` bounds the *wait*. Stale-while-revalidate itself stays deferred,
+as above.
 
 **Write verification ship order** — `verify: "report"` ships first (it delivers most of
 the value: catching store-side mangling before fleet-wide adoption, including the
@@ -231,9 +240,10 @@ parameters carry the tuple inference the call shapes depend on).
 
 - **Secret value representation** — resolved in **[ADR 0002](https://github.com/rejifald/tessellum/blob/main/docs/adr/0002-secret-value-representation.md)**: `unwrap()` of a secret returns a Proxy-based `Secret<T>` — **assignable to `T`** (no `.reveal()` ceremony for coercion) — that throws on `JSON.stringify` and is non-cloneable (`structuredClone`/`postMessage` throw `DataCloneError`), redacts in logs, and offers `.reveal()` for the typecheck sinks (`crypto`, `z.string().parse`), those flagged by a lint rather than the type. A spike (real zod v4 + Node crypto) proved the bare-`string`-that-throws claim unrealizable and characterized boxed-`String` (porous — no `structuredClone` guard, spread leak) vs `Proxy` (complete). The **hybrid** (string-assignable brand + targeted lint) was chosen over a `Redacted<T>` tax (§8) and an honest-but-guardless primitive. Resolves #19; supersedes the earlier claim.
 - **Client read API & bake staleness** — resolved in **[ADR 0003](https://github.com/rejifald/tessellum/blob/main/docs/adr/0003-client-read-api-and-bake-staleness.md)**: bake emits schema-free per-tessera **handles**; client code imports handles from `config.baked` (never the real descriptor), proven to drop `zod` from the browser bundle (~0.4 KB gzip vs ~65 KB with the descriptor). `StaleBakeError` becomes a **build-time** `bake --check` guarantee (load-bearing) in prod, plus an automatic **dev-mode** runtime check that is stripped from prod builds (proven: dynamic-import prod bundle 414 B gzip, zod absent; a *static* descriptor import re-ships ~65 KB of zod). Resolves #20; also fixes the browser-guide-vs-client-graph-lint contradiction.
-- **Tessera inheritance & derivation** — resolved in **[ADR 0001](https://github.com/rejifald/tessellum/blob/main/docs/adr/0001-tessera-inheritance.md)**: a declared, identity-bearing `inherit(target, base, ops?)` relation (not a source ref, not deployment wiring); data-only transforms (never a function); layered validation (the base's own declaration, then the target's); loud-by-default with a bind-site `useDefault` opt-in; single-base and transitive, multiple inheritance deferred. The ADR is the full record — this registry only points to it. Deferred spin-off: a `latch` freshness mode ([#14](https://github.com/rejifald/tessellum/issues/14)).
+- **Async snapshot cross-key coherence** — resolved in **[ADR 0004](https://github.com/rejifald/tessellum/blob/main/docs/adr/0004-async-snapshot-coherence.md)**: coherence within an async `snapshot()` is an explicit, bind-site `coherent([...])` group — pinned and re-read as one cut whenever any member is expired (ungrouped keys stay expired-keys-only; a group must resolve to one provider or bind fails `CoherenceGroupSourceError`, `CoherenceError` if a cut can't be captured in the re-check budget). `version` joins `Provenance` as the provider CAS token, and a `WriteConflictError` marks the conflicting key stale so the database-guide read-modify-write loop provably progresses. The ADR is the full record. Its siblings are now settled too — the async re-read deadline / boot-outage ([ADR 0005](https://github.com/rejifald/tessellum/blob/main/docs/adr/0005-async-read-deadline-and-boot-outage.md)) and `setMany` atomicity vs. chunking ([ADR 0006](https://github.com/rejifald/tessellum/blob/main/docs/adr/0006-atomic-setmany-vs-write-batch.md)).
 - **Async re-read deadline & boot outage** — resolved in **[ADR 0005](https://github.com/rejifald/tessellum/blob/main/docs/adr/0005-async-read-deadline-and-boot-outage.md)**: every blocking async re-read (an expired key; ADR 0004's `coherent`-group cut and its re-check loop; the post-conflict re-read) is bounded by a new `readTimeoutMs` bind option (default `maxStalenessMs`) — a slow provider that breaches it throws `SourceUnavailableError`, so `maxStalenessMs` bounds *staleness* while `readTimeoutMs` bounds the *wait*, and it stays distinct from `CoherenceError` (a store that answers fast but keeps changing). `ready()`, cacheless at boot, meets a store outage with bounded retry then fail-fast (`readyTimeoutMs`, default 30 000 ms; `0` = pure fail-fast). Resolves [#22](https://github.com/rejifald/tessellum/issues/22).
 - **Atomic `setMany` vs. `maxWriteBatch`** — resolved in **[ADR 0006](https://github.com/rejifald/tessellum/blob/main/docs/adr/0006-atomic-setmany-vs-write-batch.md)**: an atomic write is one `write()` to one provider and cannot span chunks (the write-side mirror of ADR 0004's single-source rule), so an atomic `setMany` larger than the provider's `maxWriteBatch` is refused up front with `AtomicBatchTooLargeError` — a chunked atomic write would be the torn durable state the guarantee prevents (discriminant flipped, branch values missing). Shrink the rotate-together set to one batch, or opt into `{ allowNonAtomic: true }` (dependency-ordered singles, benign tear direction only). Resolves [#17](https://github.com/rejifald/tessellum/issues/17).
+- **Tessera inheritance & derivation** — resolved in **[ADR 0001](https://github.com/rejifald/tessellum/blob/main/docs/adr/0001-tessera-inheritance.md)**: a declared, identity-bearing `inherit(target, base, ops?)` relation (not a source ref, not deployment wiring); data-only transforms (never a function); layered validation (the base's own declaration, then the target's); loud-by-default with a bind-site `useDefault` opt-in; single-base and transitive, multiple inheritance deferred. The ADR is the full record — this registry only points to it. Deferred spin-off: a `latch` freshness mode ([#14](https://github.com/rejifald/tessellum/issues/14)).
 - **Live-invalid default** — resolved by author decision: **current truth wins** (poisoned
   slots, `InvalidLiveValueError`, `safe`), with `keepLastGood(tessera, { maxCoastMs })` as
   the explicit bind-site opt-in. See [Freshness](/docs/concepts/freshness).

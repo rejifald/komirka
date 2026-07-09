@@ -303,8 +303,11 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
 - **Torn config.** Two reads of a live pair (DB host + password rotated together) inside
   one request can observe different generations — first fetch hits the old host, the audit
   write hits the new one. *Rule:* per-request pinning (`binding.snapshot()` in middleware)
-  is THE documented consumption pattern; pinning reads each source in a single coherent
-  pass (one file read serves all tesserae from that file).
+  is THE documented consumption pattern; it eliminates tears in *time*, and cross-key
+  *generation* coherence is by source — structural for files (one file read serves all
+  tesserae from it), an explicit `coherent([...])` group re-read as one cut for providers,
+  the async binding cannot infer which keys rotate together, so ungrouped keys pin
+  individually (ADR 0004).
 - **Liveness poisoning the DI contract.** A library typed against `Snapshot` must be able
   to assume value stability. *Rule:* the type split is load-bearing — a binding containing
   any live tessera is a `LiveBinding`, not assignable where `Snapshot` is expected; `pick()`
@@ -437,7 +440,8 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
   missing config); **chunking is exclusively core's job** (provider-internal chunking
   silently voids `consistentReads` — declare `limits` instead); `consistentReads` is
   demoted from honor-claim to round-trip optimization (falsy or chunked coherent reads run
-  a bounded discriminant re-check loop); `atomicWrites` is the one claim core cannot
+  a bounded coherence re-check loop — discriminant or `coherent()` group, `CoherenceError`
+  past the budget); `atomicWrites` is the one claim core cannot
   retrofit — a published `verifyProvider()` conformance kit (probing atomic abort,
   input alignment, absent-vs-error, batch-path echo) is the documented bar for declaring
   it. Core guarantees providers unique keys, never-empty batches, and no duplicate write
