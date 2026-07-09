@@ -1,41 +1,41 @@
 ---
 title: For library authors (config DI)
-description: Ship inert zerno descriptors with your package, type your API against a picked Scope, and let the consuming app own binding, wiring, and baking.
+description: Ship inert tessera descriptors with your package, type your API against a picked Scope, and let the consuming app own binding, wiring, and baking.
 ---
 
 ## The shape of the pattern
 
 A library never knows where its configuration comes from. The app might read process env on Node, a per-request env bag on Cloudflare Workers, an all-literal binding in tests, or a baked module in the browser. So the division of labor is strict:
 
-- **You ship the contract**: inert `Zerno` descriptors — names, schemas, exposure, defaults, docs. Importing them costs nothing: `zerno()` performs zero I/O, zero validation, zero side effects, and the result is frozen.
-- **The app ships the values**: it binds your zernos at *its* composition root, owns the wiring, and hands your factory a narrowed `Scope`.
+- **You ship the contract**: inert `Tessera` descriptors — names, schemas, exposure, defaults, docs. Importing them costs nothing: `tessera()` performs zero I/O, zero validation, zero side effects, and the result is frozen.
+- **The app ships the values**: it binds your tesserae at *its* composition root, owns the wiring, and hands your factory a narrowed `Scope`.
 
 There is no `provide()`, no global registry, no ambient fallback. Your API accepts a scope as an argument, and that is the entire integration surface.
 
-## Ship your zernos
+## Ship your tesserae
 
-Export your descriptors from your package. Because construction is inert, this module is safe to import from anywhere — including browser bundles; the `komirka` core entry supplies no natural sources by construction, so a bare env or file ref bound there is a `NoWiringError`, not a silent read.
+Export your descriptors from your package. Because construction is inert, this module is safe to import from anywhere — including browser bundles; the `tessellum` core entry supplies no natural sources by construction, so a bare env or file ref bound there is a `NoWiringError`, not a silent read.
 
 ```ts
-// @acme/mailer — src/zernos.ts
-import { zerno, defineZernos } from "komirka";
+// @acme/mailer — src/tesserae.ts
+import { tessera, defineTesserae } from "tessellum";
 import { z } from "zod";
 
-export const smtpUrl = zerno({
+export const smtpUrl = tessera({
   key: "MAILER_SMTP_URL",
   schema: z.string().url(),
   doc: "SMTP connection string, e.g. smtps://user:pass@smtp.example.com:465",
   exposure: "secret", // the default — stated explicitly because it is part of your public contract
 });
 
-export const fromAddress = zerno({
+export const fromAddress = tessera({
   key: "MAILER_FROM",
   schema: z.string().email(),
   doc: "Default From: address for outgoing mail",
   exposure: "public",
 });
 
-export const retryCount = zerno({
+export const retryCount = tessera({
   key: "MAILER_RETRIES",
   schema: z.coerce.number().int().min(0).max(10),
   doc: "Delivery attempts before a send is reported as failed",
@@ -43,23 +43,23 @@ export const retryCount = zerno({
   default: 3,
 });
 
-export const mailerZernos = defineZernos([smtpUrl, fromAddress, retryCount]);
+export const mailerTesserae = defineTesserae([smtpUrl, fromAddress, retryCount]);
 ```
 
-Two notes on schemas. First, `T` is inferred from the schema *output*, so `z.coerce.number()` yields a `Zerno<number>` even though the raw source is a string. Second, for `exposure: "secret"` zernos your validator's error text is treated as untrusted (validators echo received values): reports carry issue counts and paths only, never messages or values. Write schemas accordingly — do not encode guidance in error messages for secret zernos; put it in `doc`.
+Two notes on schemas. First, `T` is inferred from the schema *output*, so `z.coerce.number()` yields a `Tessera<number>` even though the raw source is a string. Second, for `exposure: "secret"` tesserae your validator's error text is treated as untrusted (validators echo received values): reports carry issue counts and paths only, never messages or values. Write schemas accordingly — do not encode guidance in error messages for secret tesserae; put it in `doc`.
 
 ## Type your API against a picked scope
 
-Type every config-consuming entry point as a `Scope` of exactly your zernos. `Scope` is a branded type that only `pick()` produces — the root `Snapshot` is deliberately not assignable to it, so callers cannot hand you their entire configuration.
+Type every config-consuming entry point as a `Scope` of exactly your tesserae. `Scope` is a branded type that only `pick()` produces — the root `Snapshot` is deliberately not assignable to it, so callers cannot hand you their entire configuration.
 
 ```ts
 // @acme/mailer — src/index.ts
-import type { Scope, ConfigOf } from "komirka";
-import { mailerZernos, smtpUrl, fromAddress, retryCount } from "./zernos";
+import type { Scope, ConfigOf } from "tessellum";
+import { mailerTesserae, smtpUrl, fromAddress, retryCount } from "./tesserae";
 
-export { mailerZernos, smtpUrl, fromAddress, retryCount };
+export { mailerTesserae, smtpUrl, fromAddress, retryCount };
 
-export function createMailer(cfg: Scope<ConfigOf<typeof mailerZernos>>) {
+export function createMailer(cfg: Scope<ConfigOf<typeof mailerTesserae>>) {
   const transport = smtpConnect(cfg.unwrap(smtpUrl), {
     retries: cfg.unwrap(retryCount),
   });
@@ -78,34 +78,34 @@ The app binds once, at its composition root, then narrows per consumer:
 
 ```ts
 // app — src/config.ts
-import { bind } from "komirka/node";
-import { mailerZernos } from "@acme/mailer";
-import { appZernos } from "./zernos";
+import { bind } from "tessellum/node";
+import { mailerTesserae } from "@acme/mailer";
+import { appTesserae } from "./tesserae";
 
-export const root = bind([...appZernos, ...mailerZernos]);
+export const root = bind([...appTesserae, ...mailerTesserae]);
 ```
 
 ```ts
 // app — src/mail.ts
-import { createMailer, mailerZernos } from "@acme/mailer";
+import { createMailer, mailerTesserae } from "@acme/mailer";
 import { root } from "./config";
 
-export const mailer = createMailer(root.pick(mailerZernos));
+export const mailer = createMailer(root.pick(mailerTesserae));
 ```
 
-Every entry here is bare — no wiring combinators — so your declared refs resolve against the entry point's natural defaults: on `komirka/node`, `process.env` and the filesystem. When a deployment needs a different variable name, that is one wired entry, not a new zerno: `env(smtpUrl, "SMTP_CONNECTION_STRING")` patches your declared env ref in place and preserves any declared fallbacks.
+Every entry here is bare — no wiring combinators — so your declared refs resolve against the entry point's natural defaults: on `tessellum/node`, `process.env` and the filesystem. When a deployment needs a different variable name, that is one wired entry, not a new tessera: `env(smtpUrl, "SMTP_CONNECTION_STRING")` patches your declared env ref in place and preserves any declared fallbacks.
 
-`bind` is eager by default: if `MAILER_SMTP_URL` is unset in production, the app dies at boot with one aggregated `MissingConfigError` listing every missing or invalid zerno — not on the first send, hours later. The failure modes are named and layered:
+`bind` is eager by default: if `MAILER_SMTP_URL` is unset in production, the app dies at boot with one aggregated `MissingConfigError` listing every missing or invalid tessera — not on the first send, hours later. The failure modes are named and layered:
 
 ```ts
 createMailer(root);
 // compile error: Snapshot is not assignable to Scope<...> — only pick() produces a Scope
 
-root.pick(mailerZernos);
-// compile error at the pick site if mailerZernos were never among the bind entries —
+root.pick(mailerTesserae);
+// compile error at the pick site if mailerTesserae were never among the bind entries —
 // "not bound" is caught by the type of the binding, before runtime
 
-const partial = root.pick(defineZernos([fromAddress]));
+const partial = root.pick(defineTesserae([fromAddress]));
 partial.unwrap(smtpUrl);
 // NotInScopeError: "MAILER_SMTP_URL" is not in this scope
 ```
@@ -115,13 +115,13 @@ Because the app owns binding, your package works unchanged on runtimes an import
 ```ts
 // app — Cloudflare Worker: env exists per request, not at import time,
 // so the per-request bag is a required bind option
-import { bind } from "komirka/workers";
-import { createMailer, mailerZernos } from "@acme/mailer";
+import { bind } from "tessellum/workers";
+import { createMailer, mailerTesserae } from "@acme/mailer";
 
 export default {
   async fetch(req: Request, env: Env) {
-    const cfg = bind(mailerZernos, { env });
-    const mailer = createMailer(cfg.pick(mailerZernos));
+    const cfg = bind(mailerTesserae, { env });
+    const mailer = createMailer(cfg.pick(mailerTesserae));
     // ...
   },
 };
@@ -130,8 +130,8 @@ export default {
 And your users test your library with zero `process.env` mutation:
 
 ```ts
-import { bind, literal } from "komirka";
-import { createMailer, mailerZernos, smtpUrl, fromAddress, retryCount } from "@acme/mailer";
+import { bind, literal } from "tessellum";
+import { createMailer, mailerTesserae, smtpUrl, fromAddress, retryCount } from "@acme/mailer";
 
 const cfg = bind([
   literal(smtpUrl, "smtps://test:test@localhost:2525"),
@@ -139,27 +139,27 @@ const cfg = bind([
   literal(retryCount, 0),
 ]);
 
-const mailer = createMailer(cfg.pick(mailerZernos)); // still validated, fully parallel-safe
+const mailer = createMailer(cfg.pick(mailerTesserae)); // still validated, fully parallel-safe
 ```
 
-Literal entries are input-typed, validation runs at bind, and exposure redaction still applies. Because every entry is fully wired, the core `komirka` entry suffices — test files need no runtime entry point and mutate no ambient state.
+Literal entries are input-typed, validation runs at bind, and exposure redaction still applies. Because every entry is fully wired, the core `tessellum` entry suffices — test files need no runtime entry point and mutate no ambient state.
 
 ## The compatibility contract: what edits break identity
 
-Zernos are content-addressed. `identityOf(retryCount)` returns something like `zernov1:xxh128:9f3a...`, computed over the *identity* subset of the descriptor. For a library author, that subset is public API:
+Tesserae are content-addressed. `identityOf(retryCount)` returns something like `tesserav1:xxh128:9f3a...`, computed over the *identity* subset of the descriptor. For a library author, that subset is public API:
 
 | Field | Identity or cosmetic | Editing it in a release means |
 | --- | --- | --- |
-| `key` | Identity | A new zerno, as far as consumers are concerned |
+| `key` | Identity | A new tessera, as far as consumers are concerned |
 | `sources` (order-significant) | Identity | Precedence is behavior; reordering is a real change |
 | `exposure` | Identity | You changed the trust contract |
 | `default` (presence and value) | Identity | Adding, removing, or changing a default all count |
-| `freshness` | Identity | A live zerno and a snapshot twin are different contracts (only snapshot zernos can be discriminants) |
+| `freshness` | Identity | A live tessera and a snapshot twin are different contracts (only snapshot tesserae can be discriminants) |
 | schema identity (`version`, or vendor fingerprint) | Identity | Bump `version` whenever the schema's *meaning* changes |
 | `doc`, examples, deprecation notes | Cosmetic | Safe in a patch release; the hash does not move |
 | Unknown extra fields | Cosmetic | Ignored by identity |
 
-One thing deliberately *not* on this list: deployment wiring. A consumer renaming where your zerno reads from — `env(smtpUrl, "SMTP_CONNECTION_STRING")` at their composition root — patches your declared env ref in place, preserves your declared fallbacks, and never forks identity. Renames *you* ship are different: they are declared fallback chains inside the descriptor, which is why the `sources` row is identity. Keep the two apart in your changelog — a consumer can wire around a name today without your involvement, but only a release of yours can change what the zerno declares.
+One thing deliberately *not* on this list: deployment wiring. A consumer renaming where your tessera reads from — `env(smtpUrl, "SMTP_CONNECTION_STRING")` at their composition root — patches your declared env ref in place, preserves your declared fallbacks, and never forks identity. Renames *you* ship are different: they are declared fallback chains inside the descriptor, which is why the `sources` row is identity. Keep the two apart in your changelog — a consumer can wire around a name today without your involvement, but only a release of yours can change what the tessera declares.
 
 If your validator vendor ships a fingerprint, schema changes are reflected in identity automatically. If not, set `version` explicitly and bump it on semantic schema changes — otherwise two releases with different validation rules hash identically, and the mismatch detector cannot help your users.
 
@@ -170,52 +170,52 @@ Identity changes surface as `DescriptorMismatchError` — most often in dual-pac
 // (v2 changed the default from 3 to 5 — an identity edit).
 cfg.unwrap(retryCount);
 // DescriptorMismatchError: "MAILER_RETRIES" is bound under a different descriptor.
-//   bound:  zernov1:xxh128:41c0...   caller: zernov1:xxh128:9f3a...
+//   bound:  tesserav1:xxh128:41c0...   caller: tesserav1:xxh128:9f3a...
 //   diff:   default: 3 -> 5
 //   To accept the caller's descriptor:
-//   unify: [{ accept: retryCount, aliases: ["zernov1:xxh128:41c0..."] }]
+//   unify: [{ accept: retryCount, aliases: ["tesserav1:xxh128:41c0..."] }]
 ```
 
 The error carries both canonical descriptors, a field-level diff, and a paste-able resolution. The app — not your library — decides the diff is legitimate and unifies at its composition root:
 
 ```ts
-const root = bind([...appZernos, ...mailerZernos], {
-  unify: [{ accept: retryCount, aliases: ["zernov1:xxh128:41c0..."] }],
+const root = bind([...appTesserae, ...mailerTesserae], {
+  unify: [{ accept: retryCount, aliases: ["tesserav1:xxh128:41c0..."] }],
 });
 ```
 
 Unified reads always re-validate with the caller's schema (memoized), so validation never silently downgrades across package copies. Your job as an author is to make this rare: keep identity fields stable, do cosmetic edits freely, and call out identity edits in your changelog the same way you would a breaking API change.
 
-## Your zernos in consumers' bake manifests
+## Your tesserae in consumers' bake manifests
 
-If your package has browser-facing zernos, your `exposure: "public"` declaration is **necessary but not sufficient**. Client delivery is app-attested: the consumer must list your zernos in the `client` target of their `config.manifest.ts`, against a deny-by-default allowlist. Say this in your README, and give them the exact snippet:
+If your package has browser-facing tesserae, your `exposure: "public"` declaration is **necessary but not sufficient**. Client delivery is app-attested: the consumer must list your tesserae in the `client` target of their `config.manifest.ts`, against a deny-by-default allowlist. Say this in your README, and give them the exact snippet:
 
 ```ts
 // consumer's config.manifest.ts
 import { fromAddress, retryCount } from "@acme/mailer";
-import { appPublicZernos, allZernos } from "./src/zernos";
+import { appPublicTesserae, allTesserae } from "./src/tesserae";
 
 export default {
   targets: {
-    client: [...appPublicZernos, fromAddress, retryCount], // explicit app attestation
-    server: [...allZernos],
+    client: [...appPublicTesserae, fromAddress, retryCount], // explicit app attestation
+    server: [...allTesserae],
   },
 };
 ```
 
-Secret zernos like `smtpUrl` cannot ride along: the client artifact contains public literal values only, and bake never resolves secret values anywhere (public values plus secret key *names* only). Your `doc` strings do earn their keep here — bake surfaces them in the generated `.env.example` and `CONFIG.md`, so write them for the operator who has to set the variable.
+Secret tesserae like `smtpUrl` cannot ride along: the client artifact contains public literal values only, and bake never resolves secret values anywhere (public values plus secret key *names* only). Your `doc` strings do earn their keep here — bake surfaces them in the generated `.env.example` and `CONFIG.md`, so write them for the operator who has to set the variable.
 
-The baked client shim also protects you against version skew. It carries per-zerno identity hashes, and its `unwrap()` verifies them:
+The baked client shim also protects you against version skew. It carries per-tessera identity hashes, and its `unwrap()` verifies them:
 
 ```ts
 // App upgraded @acme/mailer after the last bake; the shim notices:
 clientCfg.unwrap(retryCount);
 // StaleBakeError: identity of "MAILER_RETRIES" changed since bake.
-//   baked: zernov1:xxh128:41c0...   current: zernov1:xxh128:9f3a...
-//   Re-run `komirka bake`; gate CI with `komirka bake --check`.
+//   baked: tesserav1:xxh128:41c0...   current: tesserav1:xxh128:9f3a...
+//   Re-run `tessellum bake`; gate CI with `tessellum bake --check`.
 ```
 
-Recommend `komirka bake --check` in CI to your consumers: it turns upgrade-after-bake skew into a red build instead of a runtime `StaleBakeError`.
+Recommend `tessellum bake --check` in CI to your consumers: it turns upgrade-after-bake skew into a red build instead of a runtime `StaleBakeError`.
 
 ## Why there is no global `provide()`
 
@@ -234,25 +234,25 @@ const url = process.env.MAILER_SMTP_URL; // also caught by the client-code AST l
 //    and pins your package to one runtime (the bind entry point you import
 //    *is* the runtime choice).
 export function createMailer() {
-  const cfg = bind(mailerZernos); // bind from komirka/node — do not do this
+  const cfg = bind(mailerTesserae); // bind from tessellum/node — do not do this
 }
 
 // 3. Accepting "no scope" and falling back to something ambient — reintroduces
 //    the channel provide() was rejected for. Make the Scope parameter required.
 ```
 
-Accept the scope. Never reach ambient. If your factory needs a value, it is in your zernos, and it arrives through `pick()`.
+Accept the scope. Never reach ambient. If your factory needs a value, it is in your tesserae, and it arrives through `pick()`.
 
 ## Least privilege, not a sandbox
 
-Be honest in your own docs about what this buys. `pick()` confines *mistakes*: your library cannot accidentally read the app's `DATABASE_URL`, misuse is a `NotInScopeError` or a compile error, and the app can audit exactly which zernos each dependency was granted. It is not a security boundary — hostile in-process code can read `process.env` directly, and no scope stops it. Only provider-resolved, non-ambient values gain real confinement. Claim the least-privilege benefit; do not claim a sandbox.
+Be honest in your own docs about what this buys. `pick()` confines *mistakes*: your library cannot accidentally read the app's `DATABASE_URL`, misuse is a `NotInScopeError` or a compile error, and the app can audit exactly which tesserae each dependency was granted. It is not a security boundary — hostile in-process code can read `process.env` directly, and no scope stops it. Only provider-resolved, non-ambient values gain real confinement. Claim the least-privilege benefit; do not claim a sandbox.
 
 ## Release checklist
 
-- Export inert descriptors and a `defineZernos` group; never call `bind()` inside the package.
-- Type every config-consuming entry point as `Scope<ConfigOf<typeof yourZernos>>`, with the parameter required.
+- Export inert descriptors and a `defineTesserae` group; never call `bind()` inside the package.
+- Type every config-consuming entry point as `Scope<ConfigOf<typeof yourTesserae>>`, with the parameter required.
 - Treat `key`, `sources`, `exposure`, `default`, `freshness`, and schema identity as public API; changing any is a breaking change — bump `version` on schema meaning changes.
-- Ship renames as declared fallback chains in a release; deployment-specific names are the consumer's job via `env(zerno, "NAME")` at their bind site, and deployment wiring never forks identity.
+- Ship renames as declared fallback chains in a release; deployment-specific names are the consumer's job via `env(tessera, "NAME")` at their bind site, and deployment wiring never forks identity.
 - Edit `doc` and examples freely; they are cosmetic and never move the identity hash.
-- Document the manifest attestation step for your public zernos, with a paste-able `config.manifest.ts` snippet.
-- Tell consumers to gate CI with `komirka bake --check`; `StaleBakeError` is the runtime backstop, not the plan.
+- Document the manifest attestation step for your public tesserae, with a paste-able `config.manifest.ts` snippet.
+- Tell consumers to gate CI with `tessellum bake --check`; `StaleBakeError` is the runtime backstop, not the plan.

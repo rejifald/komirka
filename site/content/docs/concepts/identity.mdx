@@ -1,17 +1,17 @@
 ---
 title: Identity and collisions
-description: How zernos are content-addressed, what happens when two copies of a descriptor meet, and which edits break identity across package versions.
+description: How tesserae are content-addressed, what happens when two copies of a descriptor meet, and which edits break identity across package versions.
 ---
 
 ## Why identity exists
 
-There is no runtime registry — not as a limitation, but as a rule of the design. A zerno is a frozen object that a package exports; nothing anywhere keeps a global list of them. That means the same *logical* config value routinely exists as more than one *physical* object in a real dependency tree:
+There is no runtime registry — not as a limitation, but as a rule of the design. A tessera is a frozen object that a package exports; nothing anywhere keeps a global list of them. That means the same *logical* config value routinely exists as more than one *physical* object in a real dependency tree:
 
 - **Dual-package hazard.** A package published as both CJS and ESM can be loaded twice in one process. Each copy constructs its own descriptor object from the same source code.
 - **Diamond installs.** Your app depends on `@acme/mailer@2`, and a transitive dependency still bundles `@acme/mailer@1`. Two versions of `smtpUrl` now coexist in `node_modules`.
-- **Cross-package DI.** A library ships its zernos as inert descriptors and the app binds them at its composition root. The object the library reads with and the object the app bound are frequently not reference-equal.
+- **Cross-package DI.** A library ships its tesserae as inert descriptors and the app binds them at its composition root. The object the library reads with and the object the app bound are frequently not reference-equal.
 
-So `cfg.unwrap(zerno)` cannot key on object reference, and it cannot key on `key` alone — two packages may legitimately use the same key with different contracts. It keys on **content-addressed identity**: the descriptor *is* the identity.
+So `cfg.unwrap(tessera)` cannot key on object reference, and it cannot key on `key` alone — two packages may legitimately use the same key with different contracts. It keys on **content-addressed identity**: the descriptor *is* the identity.
 
 ## What counts as identity
 
@@ -24,7 +24,7 @@ Every field of a descriptor is in exactly one of two buckets.
 | `sources` | identity | Declared precedence is order-significant; reordering changes meaning. |
 | `default` | identity | Presence **and** value both count — adding a default changes behavior. |
 | `schemaId` | identity, when available | A vendor fingerprint of the schema, or your explicit `version` discriminator. |
-| `freshness` | identity | Live-vs-snapshot is behaviorally load-bearing: relations reference discriminants by identity, and a `live` twin of a `snapshot` zerno must never be identity-equal. |
+| `freshness` | identity | Live-vs-snapshot is behaviorally load-bearing: relations reference discriminants by identity, and a `live` twin of a `snapshot` tessera must never be identity-equal. |
 | `doc` | cosmetic | See below. |
 | `examples`, `deprecation` | cosmetic | Documentation, not contract. |
 | any unknown field | cosmetic | Forward-compatible: future metadata never breaks old identities. |
@@ -33,19 +33,19 @@ Every field of a descriptor is in exactly one of two buckets.
 
 Identity is computed over the *effective* descriptor: omitted fields normalize first (`exposure` defaults to `"secret"`, `sources` defaults to the single declared env ref named by `key`), so spelling a default out explicitly does not change the hash.
 
-One thing that is *never* in the table: deployment wiring. The per-entry combinators you apply at `bind` — a ref rename like `env(smtpUrl, "CUSTOM_SMTP_URL")`, a full `chain(...)` replacement, a group prefix — change which effective name supplies a value, and they are covered by the wiring digest and the lockfile's declared→effective map, not by the identity hash. Wiring never forks identity: the same zerno wired three different ways in three services is still, everywhere, the same zerno. Only *declared* refs — the fallback chain the library author ships on the descriptor itself — count as identity.
+One thing that is *never* in the table: deployment wiring. The per-entry combinators you apply at `bind` — a ref rename like `env(smtpUrl, "CUSTOM_SMTP_URL")`, a full `chain(...)` replacement, a group prefix — change which effective name supplies a value, and they are covered by the wiring digest and the lockfile's declared→effective map, not by the identity hash. Wiring never forks identity: the same tessera wired three different ways in three services is still, everywhere, the same tessera. Only *declared* refs — the fallback chain the library author ships on the descriptor itself — count as identity.
 
 The `schema` object itself is not JSON and does not round-trip; `schemaId` stands in for it. When the validator vendor provides a fingerprint, that is used. Otherwise your explicit `version` string is the discriminator — which is why the compatibility contract at the bottom of this page tells you to bump it on every schema change.
 
-## The hash: zernov1, RFC 8785, xxh128
+## The hash: tesserav1, RFC 8785, xxh128
 
-The identity subset is serialized as RFC 8785 (JCS) canonical JSON, prefixed with the literal string `zernov1|`, and hashed with xxh128:
+The identity subset is serialized as RFC 8785 (JCS) canonical JSON, prefixed with the literal string `tesserav1|`, and hashed with xxh128:
 
 ```ts
-import { zerno, identityOf } from "komirka";
+import { tessera, identityOf } from "tessellum";
 import { z } from "zod";
 
-export const smtpUrl = zerno({
+export const smtpUrl = tessera({
   key: "SMTP_URL",
   schema: z.string().url(),
   doc: "SMTP relay endpoint",
@@ -53,26 +53,26 @@ export const smtpUrl = zerno({
 });
 
 identityOf(smtpUrl);
-// "zernov1:xxh128:9f2c77aa…"
+// "tesserav1:xxh128:9f2c77aa…"
 ```
 
 **The hash is an index, not a security boundary.** Bindings use it for fast lookup, but whenever a read resolves through anything other than the exact bound object, structural equality of the identity subset is what decides — an accidental (or crafted) xxh128 collision cannot forge a match, because the canonical descriptors are compared field by field. Structural equality is authoritative; the hash is a shortcut to it.
 
-The same philosophy applies to detecting zernos at all: a descriptor is recognized by its structural `$zerno` brand, never by `instanceof`. `instanceof` fails in precisely the situations identity exists to solve — two module copies mean two class realms, and a JSON-round-tripped descriptor was never constructed by any class in the first place.
+The same philosophy applies to detecting tesserae at all: a descriptor is recognized by its structural `$tessera` brand, never by `instanceof`. `instanceof` fails in precisely the situations identity exists to solve — two module copies mean two class realms, and a JSON-round-tripped descriptor was never constructed by any class in the first place.
 
 ## The three-way unwrap() contract
 
 Every read resolves to exactly one of three outcomes:
 
 1. **Hit** — the descriptor (by reference, or by identity) is bound; you get the validated value.
-2. **`UnboundZernoError`** — no zerno with this key is bound at all. There is no ambient fallback; a read outside a binding is a named error, never a guess.
+2. **`UnboundTesseraError`** — no tessera with this key is bound at all. There is no ambient fallback; a read outside a binding is a named error, never a guess.
 3. **`DescriptorMismatchError`** — the key *is* bound, but under a **different** descriptor.
 
 The third case is the diamond install making contact:
 
 ```ts
-import { bind } from "komirka/node";
-import { smtpUrl } from "@acme/mailer/zernos"; // v2: schema tightened, version: "2"
+import { bind } from "tessellum/node";
+import { smtpUrl } from "@acme/mailer/tesserae"; // v2: schema tightened, version: "2"
 
 const cfg = bind([smtpUrl]); // bare entry: declared refs resolve against process.env
 
@@ -87,11 +87,11 @@ The error carries both canonical descriptors, a field-level diff, and a paste-ab
 ```txt
 DescriptorMismatchError: key "SMTP_URL" is bound, but under a different descriptor.
 
-  requested   zernov1:xxh128:41c09be2…
+  requested   tesserav1:xxh128:41c09be2…
     { "key": "SMTP_URL", "exposure": "secret",
       "sources": [{ "env": "SMTP_URL" }], "schemaId": "1" }
 
-  bound       zernov1:xxh128:9f2c77aa…
+  bound       tesserav1:xxh128:9f2c77aa…
     { "key": "SMTP_URL", "exposure": "secret",
       "sources": [{ "env": "SMTP_URL" }], "schemaId": "2" }
 
@@ -102,11 +102,11 @@ DescriptorMismatchError: key "SMTP_URL" is bound, but under a different descript
   other identity at your composition root:
 
     bind(entries, {
-      unify: [{ accept: smtpUrl, aliases: ["zernov1:xxh128:41c09be2…"] }],
+      unify: [{ accept: smtpUrl, aliases: ["tesserav1:xxh128:41c09be2…"] }],
     })
 ```
 
-Descriptors contain no resolved values, so this error is safe to log even for secret zernos — it prints contracts, never configuration.
+Descriptors contain no resolved values, so this error is safe to log even for secret tesserae — it prints contracts, never configuration.
 
 ## Resolving deliberately: unify at bind
 
@@ -116,7 +116,7 @@ When you have inspected the diff and decided the two contracts are compatible, y
 const cfg = bind([smtpUrl], {
   unify: [
     // Reads made through the old v1 identity resolve to the v2 binding.
-    { accept: smtpUrl, aliases: ["zernov1:xxh128:41c09be2…"] },
+    { accept: smtpUrl, aliases: ["tesserav1:xxh128:41c09be2…"] },
   ],
 });
 ```
@@ -141,37 +141,37 @@ The same rule holds for reads through a `unify` alias: the aliased caller's valu
 
 ## Collisions that never happen — and the ones that warn
 
-Two packages using the same key are not automatically in conflict. `@acme/http` and `@acme/queue` can both ship a zerno named `TIMEOUT_MS`; bound in separate bindings, they never interact, because there is nothing global for them to collide in:
+Two packages using the same key are not automatically in conflict. `@acme/http` and `@acme/queue` can both ship a tessera named `TIMEOUT_MS`; bound in separate bindings, they never interact, because there is nothing global for them to collide in:
 
 ```ts
-const httpCfg = bind(httpZernos);
-const queueCfg = bind(queueZernos);
+const httpCfg = bind(httpTesserae);
+const queueCfg = bind(queueTesserae);
 // No conflict. No registry, no ambient state, no meeting point.
 ```
 
 If both land in **one** binding, each stays independently readable — `unwrap()` is identity-addressed, so each descriptor resolves its own contract — but dev mode warns, because two contracts over one raw key is usually version drift you have not noticed yet:
 
 ```ts
-const cfg = bind([...httpZernos, ...queueZernos]);
-// [komirka] dev warning: duplicate key "TIMEOUT_MS" bound under two identities
-//   zernov1:xxh128:0d11… and zernov1:xxh128:77aa…
+const cfg = bind([...httpTesserae, ...queueTesserae]);
+// [tessellum] dev warning: duplicate key "TIMEOUT_MS" bound under two identities
+//   tesserav1:xxh128:0d11… and tesserav1:xxh128:77aa…
 ```
 
-Note the distinction: two *different* identities sharing a raw key is a warning, because it is legal and occasionally intentional. The *same* zerno reaching one `bind` through two entries — listed twice, or once bare and once inside a wired group — is a hard `DuplicateWiringError`, because one zerno must have exactly one wiring.
+Note the distinction: two *different* identities sharing a raw key is a warning, because it is legal and occasionally intentional. The *same* tessera reaching one `bind` through two entries — listed twice, or once bare and once inside a wired group — is a hard `DuplicateWiringError`, because one tessera must have exactly one wiring.
 
 ## The compatibility contract for library authors
 
-If you ship zernos, your descriptor's identity fields are API surface. This table is the changelog rule of thumb:
+If you ship tesserae, your descriptor's identity fields are API surface. This table is the changelog rule of thumb:
 
-| Edit to a published zerno | Identity | Consequence |
+| Edit to a published tessera | Identity | Consequence |
 | --- | --- | --- |
 | Improve `doc`, `examples`, deprecation notes | preserved | Patch-safe; old and new versions still unify. |
 | Add custom metadata fields | preserved | Unknown fields are cosmetic by rule. |
-| Rename `key` | **broken** | It is a different zerno now; document the migration. |
+| Rename `key` | **broken** | It is a different tessera now; document the migration. |
 | Change `exposure` | **broken** | Deliberate — a secret/public flip must force a decision downstream. |
 | Add, remove, or reorder `sources` | **broken** | Declared precedence order is meaning. (This is the declared fallback chain on the descriptor — deployment wiring at `bind` is not this, and never breaks identity.) |
 | Add or remove `default`, or change its value | **broken** | Presence and value both count. |
-| Change `freshness` | **broken** | A live zerno and a snapshot zerno are different contracts — one can be a variants discriminant, the other cannot. |
+| Change `freshness` | **broken** | A live tessera and a snapshot tessera are different contracts — one can be a variants discriminant, the other cannot. |
 | Bump `version` | **broken** | That is its job: bump it on every schema change. |
 | Change the schema *without* bumping `version` (no vendor fingerprint) | preserved | Silent-drift hazard — identity cannot see the schema itself. This is why `version` exists, and why caller-schema re-validation is the runtime backstop. |
 

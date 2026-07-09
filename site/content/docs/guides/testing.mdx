@@ -7,39 +7,39 @@ description: Test configuration with literal snapshots — zero process.env muta
 
 Most config testing pain comes from one root cause: the library reads the ambient environment at import time and caches the result at module scope. Testing then means mutating a global (`process.env`), resetting module registries, and praying your tests never run concurrently.
 
-This library has no ambient anything. Values exist only inside explicit bindings — there is no global binding, no module-scope cache, no cache on the zerno object. So a test never mutates the environment. It constructs its own snapshot, hands it to the code under test, and throws it away. The composition-root discipline that makes production wiring explicit is exactly what makes tests trivial: config arrives through a parameter, and a parameter is the easiest thing in the world to fake — except here you don't even fake it, you build a real one.
+This library has no ambient anything. Values exist only inside explicit bindings — there is no global binding, no module-scope cache, no cache on the tessera object. So a test never mutates the environment. It constructs its own snapshot, hands it to the code under test, and throws it away. The composition-root discipline that makes production wiring explicit is exactly what makes tests trivial: config arrives through a parameter, and a parameter is the easiest thing in the world to fake — except here you don't even fake it, you build a real one.
 
 ## Literal snapshots with `literal()`
 
-`literal(entry, value)` wires a zerno to an input-typed literal value, and a `bind` whose entries are all literals produces a pinned, immutable `Snapshot`. Both come from the core `komirka` entry — and core `bind` supplies no natural sources, so an all-literal binding *cannot* touch `process.env`, the filesystem, or anything else ambient. That is a structural guarantee, not a convention. There is no separate testing entry point, either: pinning a value in a test is the same `literal` combinator production wiring uses.
+`literal(entry, value)` wires a tessera to an input-typed literal value, and a `bind` whose entries are all literals produces a pinned, immutable `Snapshot`. Both come from the core `tessellum` entry — and core `bind` supplies no natural sources, so an all-literal binding *cannot* touch `process.env`, the filesystem, or anything else ambient. That is a structural guarantee, not a convention. There is no separate testing entry point, either: pinning a value in a test is the same `literal` combinator production wiring uses.
 
-Your app's descriptors are inert — zero I/O, zero validation at construction — so tests import the *real* zernos and exercise the *real* schemas. No test-only duplicates to drift out of sync.
+Your app's descriptors are inert — zero I/O, zero validation at construction — so tests import the *real* tesserae and exercise the *real* schemas. No test-only duplicates to drift out of sync.
 
 ```ts
 // app/config/db.ts — the app's real descriptors; tests import these as-is
-import { zerno, defineZernos } from "komirka";
+import { tessera, defineTesserae } from "tessellum";
 import { z } from "zod";
 
-export const dbUrl = zerno({
+export const dbUrl = tessera({
   key: "DATABASE_URL",
   schema: z.string().url(),
   doc: "Primary Postgres connection string",
   // exposure defaults to "secret" — fail closed
 });
 
-export const poolSize = zerno({
+export const poolSize = tessera({
   key: "DB_POOL_SIZE",
   schema: z.coerce.number().int().min(1).max(64),
   exposure: "public",
   default: 10,
 });
 
-export const dbZernos = defineZernos([dbUrl, poolSize]);
+export const dbTesserae = defineTesserae([dbUrl, poolSize]);
 ```
 
 ```ts
 import { it, expect } from "vitest";
-import { bind, literal } from "komirka";
+import { bind, literal } from "tessellum";
 import { dbUrl, poolSize } from "../app/config/db";
 
 it("reads typed values from a literal snapshot", () => {
@@ -56,7 +56,7 @@ it("reads typed values from a literal snapshot", () => {
 The result is an ordinary `Snapshot` — the binding type is computed from the entries, and all-literal entries yield the plainest one — with the same `unwrap`, `safe`, `pick`, and `explain` your production code sees. And it is still validated: `literal` values run the schema at `bind`, so a bad test value fails loudly with the same aggregated error any eager bind produces. A test snapshot can never hold a value the production path would refuse.
 
 ```ts
-import { MissingConfigError } from "komirka";
+import { MissingConfigError } from "tessellum";
 
 it("a bad test value fails loudly", () => {
   expect(() => bind({ dbUrl: literal(dbUrl, "not-a-url") })).toThrow(
@@ -65,7 +65,7 @@ it("a bad test value fails loudly", () => {
 });
 ```
 
-One rule, now enforced: `literal()` on a secret-exposure zerno is `SecretLiteralError` outside the test entry point — a live credential in committed wiring JSON would bypass every name-based guard. In tests, use `secretLiteral()` from the testing kit (same shape, test-scoped), and `fakeSecretProvider()` — a pre-certified in-memory `SecretProvider` double, the `manualClock` pattern — for testing secret wiring end to end. Placeholders only, never real values.
+One rule, now enforced: `literal()` on a secret-exposure tessera is `SecretLiteralError` outside the test entry point — a live credential in committed wiring JSON would bypass every name-based guard. In tests, use `secretLiteral()` from the testing kit (same shape, test-scoped), and `fakeSecretProvider()` — a pre-certified in-memory `SecretProvider` double, the `manualClock` pattern — for testing secret wiring end to end. Placeholders only, never real values.
 
 ## Inject at the composition root
 
@@ -73,22 +73,22 @@ Factories take config as a parameter and never reach for the environment themsel
 
 ```ts
 // app/db.ts — config arrives as a parameter, always
-import type { Scope, ConfigOf } from "komirka";
-import { dbZernos, dbUrl, poolSize } from "./config/db";
+import type { Scope, ConfigOf } from "tessellum";
+import { dbTesserae, dbUrl, poolSize } from "./config/db";
 
-export function createPool(cfg: Scope<ConfigOf<typeof dbZernos>>) {
+export function createPool(cfg: Scope<ConfigOf<typeof dbTesserae>>) {
   return new Pool({ connectionString: cfg.unwrap(dbUrl), max: cfg.unwrap(poolSize) });
 }
 ```
 
 ```ts
 // app/main.ts — the only place that touches the real environment
-import { bind } from "komirka/node";
-import { dbZernos } from "./config/db";
+import { bind } from "tessellum/node";
+import { dbTesserae } from "./config/db";
 import { createPool } from "./db";
 
-const root = bind(dbZernos); // bare entries — declared refs resolve against process.env + files
-const pool = createPool(root.pick(dbZernos));
+const root = bind(dbTesserae); // bare entries — declared refs resolve against process.env + files
+const pool = createPool(root.pick(dbTesserae));
 ```
 
 ```ts
@@ -99,7 +99,7 @@ it("caps the pool at the configured size", () => {
     poolSize: literal(poolSize, 2),
   });
 
-  const pool = createPool(cfg.pick(dbZernos));
+  const pool = createPool(cfg.pick(dbTesserae));
   expect(pool.options.max).toBe(2);
 });
 ```
@@ -114,7 +114,7 @@ it.concurrent("small pool behaviour", () => {
     dbUrl: literal(dbUrl, "postgres://127.0.0.1:5432/a"),
     poolSize: literal(poolSize, 1),
   });
-  expect(createPool(cfg.pick(dbZernos)).options.max).toBe(1);
+  expect(createPool(cfg.pick(dbTesserae)).options.max).toBe(1);
 });
 
 it.concurrent("large pool behaviour", () => {
@@ -122,7 +122,7 @@ it.concurrent("large pool behaviour", () => {
     dbUrl: literal(dbUrl, "postgres://127.0.0.1:5432/b"),
     poolSize: literal(poolSize, 64),
   });
-  expect(createPool(cfg.pick(dbZernos)).options.max).toBe(64);
+  expect(createPool(cfg.pick(dbTesserae)).options.max).toBe(64);
 });
 ```
 
@@ -130,15 +130,15 @@ it.concurrent("large pool behaviour", () => {
 
 ### Missing config at bind: `MissingConfigError`
 
-Eager `bind` validates the whole bound set up front and throws one aggregated error naming every missing or invalid zerno. Testing the boot-failure path needs no setup at all — absence is the natural state of a test process's environment.
+Eager `bind` validates the whole bound set up front and throws one aggregated error naming every missing or invalid tessera. Testing the boot-failure path needs no setup at all — absence is the natural state of a test process's environment.
 
 ```ts
-import { MissingConfigError } from "komirka";
-import { bind } from "komirka/node";
+import { MissingConfigError } from "tessellum";
+import { bind } from "tessellum/node";
 
 it("boot refuses with every problem listed at once", () => {
   try {
-    bind(dbZernos); // bare entries; the test env has no DATABASE_URL
+    bind(dbTesserae); // bare entries; the test env has no DATABASE_URL
     expect.unreachable("bind must throw");
   } catch (err) {
     expect(err).toBeInstanceOf(MissingConfigError);
@@ -151,21 +151,21 @@ it("boot refuses with every problem listed at once", () => {
 
 ### Present-but-invalid values: `safe`
 
-`safe` returns `{ ok: true, value }` or `{ ok: false, error }` instead of throwing. To produce a present-but-invalid raw value without touching `process.env`, declare a file ref on a zerno pointed at a temp file, bind it as a bare entry under `komirka/node`, and take the half-lazy door — `bind.lazy` checks presence eagerly but defers validator execution to the first read.
+`safe` returns `{ ok: true, value }` or `{ ok: false, error }` instead of throwing. To produce a present-but-invalid raw value without touching `process.env`, declare a file ref on a tessera pointed at a temp file, bind it as a bare entry under `tessellum/node`, and take the half-lazy door — `bind.lazy` checks presence eagerly but defers validator execution to the first read.
 
 ```ts
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { zerno } from "komirka";
-import { bind } from "komirka/node";
+import { tessera } from "tessellum";
+import { bind } from "tessellum/node";
 import { z } from "zod";
 
 it("surfaces validation issues without throwing", async () => {
-  const file = join(await mkdtemp(join(tmpdir(), "zernos-")), "timeout");
+  const file = join(await mkdtemp(join(tmpdir(), "tesserae-")), "timeout");
   await writeFile(file, "soon"); // present, not a number
 
-  const timeoutMs = zerno({
+  const timeoutMs = tessera({
     key: "API_TIMEOUT_MS",
     schema: z.coerce.number().int().positive(),
     exposure: "public",
@@ -180,14 +180,14 @@ it("surfaces validation issues without throwing", async () => {
 });
 ```
 
-One property worth knowing when you snapshot-test error reports: for secret zernos, issue reports carry counts and paths only — never validator messages or values, because BYO validators echo what they received and their text is untrusted. A failed secret validation can't leak the secret into your test snapshots or CI logs.
+One property worth knowing when you snapshot-test error reports: for secret tesserae, issue reports carry counts and paths only — never validator messages or values, because BYO validators echo what they received and their text is untrusted. A failed secret validation can't leak the secret into your test snapshots or CI logs.
 
 ### Secrets refuse to serialize: `ExposureError`
 
 Secrets are fail-closed all the way down to serialization. `Snapshot.toJSON` redacts secret values by construction, and a secret value itself throws if code tries to force it through `JSON.stringify` or `structuredClone` — the guard that closes SSR payload leaks. Both behaviors are directly testable.
 
 ```ts
-import { ExposureError } from "komirka";
+import { ExposureError } from "tessellum";
 
 it("secrets cannot ride a serialized payload", () => {
   const cfg = bind({
@@ -205,20 +205,20 @@ it("secrets cannot ride a serialized payload", () => {
 
 ## Testing live config
 
-`freshness: "live"` only means anything for re-readable refs — files and providers. That makes live behavior easy to test: point a zerno's file ref at a temp file you control and bind it as a bare entry under `komirka/node`. Don't sleep past the poll throttle (`maxStalenessMs`, a `bind` option — roughly one second for files by default) — that's how flaky tests are born. `refresh(live)` forces one coherent re-read pass and returns a new pinned `Snapshot`, so the test is deterministic.
+`freshness: "live"` only means anything for re-readable refs — files and providers. That makes live behavior easy to test: point a tessera's file ref at a temp file you control and bind it as a bare entry under `tessellum/node`. Don't sleep past the poll throttle (`maxStalenessMs`, a `bind` option — roughly one second for files by default) — that's how flaky tests are born. `refresh(live)` forces one coherent re-read pass and returns a new pinned `Snapshot`, so the test is deterministic.
 
 ```ts
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { zerno, refresh } from "komirka";
-import { bind } from "komirka/node";
+import { tessera, refresh } from "tessellum";
+import { bind } from "tessellum/node";
 import { z } from "zod";
 
 async function tempUpstream() {
-  const file = join(await mkdtemp(join(tmpdir(), "zernos-")), "upstream-url");
+  const file = join(await mkdtemp(join(tmpdir(), "tesserae-")), "upstream-url");
   await writeFile(file, "https://api.internal.test");
-  const upstreamUrl = zerno({
+  const upstreamUrl = tessera({
     key: "UPSTREAM_URL",
     schema: z.string().url(),
     exposure: "public",
@@ -230,7 +230,7 @@ async function tempUpstream() {
 
 it("bumps the epoch when an accepted value changes", async () => {
   const { file, upstreamUrl } = await tempUpstream();
-  const live = bind([upstreamUrl]); // LiveBinding — a live zerno, no async entries
+  const live = bind([upstreamUrl]); // LiveBinding — a live tessera, no async entries
   const before = live.epoch(upstreamUrl);
 
   await writeFile(file, "https://api-blue.internal.test");
@@ -243,12 +243,12 @@ it("bumps the epoch when an accepted value changes", async () => {
 
 There is deliberately no watch or subscribe API — code that must react to change rebuilds clients keyed on the epoch, so the epoch is also what tests assert.
 
-Invalid content after boot poisons the zerno — current truth wins, and the epoch bumps on the *transition* so consumers can observe it with `safe`:
+Invalid content after boot poisons the tessera — current truth wins, and the epoch bumps on the *transition* so consumers can observe it with `safe`:
 
 ```ts
-import { InvalidLiveValueError, keepLastGood } from "komirka";
+import { InvalidLiveValueError, keepLastGood } from "tessellum";
 
-it("poisons the zerno when the file goes bad", async () => {
+it("poisons the tessera when the file goes bad", async () => {
   const { file, upstreamUrl } = await tempUpstream();
   const rejected: unknown[] = [];
   const live = bind([upstreamUrl], {
@@ -279,12 +279,12 @@ it("keepLastGood is the explicit opt-in, bounded by maxCoastMs", async () => {
 });
 ```
 
-A live zerno that has *never* held a valid value is a different, named failure. Eager `bind` refuses at boot with `MissingConfigError`; if you took the half-lazy door, the first read is where truth arrives:
+A live tessera that has *never* held a valid value is a different, named failure. Eager `bind` refuses at boot with `MissingConfigError`; if you took the half-lazy door, the first read is where truth arrives:
 
 ```ts
-import { NoValidValueError } from "komirka";
+import { NoValidValueError } from "tessellum";
 
-it("a never-yet-valid live zerno throws NoValidValueError", async () => {
+it("a never-yet-valid live tessera throws NoValidValueError", async () => {
   const { file, upstreamUrl } = await tempUpstream();
   await writeFile(file, "not a url"); // invalid from the start
 
@@ -295,11 +295,11 @@ it("a never-yet-valid live zerno throws NoValidValueError", async () => {
 
 ## Testing library code that takes a `Scope`
 
-A library ships its zernos as inert descriptors and types its factory against `Scope<ConfigOf<typeof itsZernos>>`. Testing it is the same move the app makes at its composition root: build an all-literal binding, `pick`, pass it in. An all-literal `bind` returns a real `Snapshot`, so `pick` works on it directly.
+A library ships its tesserae as inert descriptors and types its factory against `Scope<ConfigOf<typeof itsTesserae>>`. Testing it is the same move the app makes at its composition root: build an all-literal binding, `pick`, pass it in. An all-literal `bind` returns a real `Snapshot`, so `pick` works on it directly.
 
 ```ts
-import { bind, literal, defineZernos, NotInScopeError } from "komirka";
-import { createMailer, mailerZernos, smtpUrl, smtpFrom } from "@acme/mailer";
+import { bind, literal, defineTesserae, NotInScopeError } from "tessellum";
+import { createMailer, mailerTesserae, smtpUrl, smtpFrom } from "@acme/mailer";
 
 it("wires the mailer from a picked scope", () => {
   const cfg = bind({
@@ -307,7 +307,7 @@ it("wires the mailer from a picked scope", () => {
     smtpFrom: literal(smtpFrom, "noreply@test.local"),
   });
 
-  const mailer = createMailer(cfg.pick(mailerZernos));
+  const mailer = createMailer(cfg.pick(mailerTesserae));
   // createMailer(cfg) does not compile: the root Snapshot is deliberately
   // not assignable to Scope — the pick() call is the audit point.
 });
@@ -318,7 +318,7 @@ it("a scope is runtime-restricted, not just typed", () => {
     smtpFrom: literal(smtpFrom, "noreply@test.local"),
   });
 
-  const scope = cfg.pick(defineZernos([smtpUrl]));
+  const scope = cfg.pick(defineTesserae([smtpUrl]));
   expect(() => scope.unwrap(smtpFrom)).toThrow(NotInScopeError);
 });
 ```
@@ -334,7 +334,7 @@ Every pattern below exists to work around ambient config state. None of them is 
 vi.stubEnv("DATABASE_URL", "postgres://127.0.0.1:5432/app_test");
 ```
 
-`stubEnv` mutates a process-wide global: it races under `it.concurrent`, leaks into the next test if cleanup is forgotten, and carries untyped, unvalidated strings. Here it is also pointless — nothing reads the environment unless you bound under an entry point whose natural defaults include it (`komirka/node`), and the core `bind` these tests use supplies no natural sources at all.
+`stubEnv` mutates a process-wide global: it races under `it.concurrent`, leaks into the next test if cleanup is forgotten, and carries untyped, unvalidated strings. Here it is also pointless — nothing reads the environment unless you bound under an entry point whose natural defaults include it (`tessellum/node`), and the core `bind` these tests use supplies no natural sources at all.
 
 ```ts
 // Anti-pattern: mutating process.env by hand
@@ -351,7 +351,7 @@ vi.mock("../config", () => ({
 }));
 ```
 
-This mocks a shape, not a contract: validation is skipped entirely (`"64"` where a number belongs, and nobody notices), the mock drifts silently when the real module refactors, and hoisting rules make failures cryptic. In this design there is also nothing to intercept — there is no central all-zernos module (groups are declared near their call sites) and no ambient binding hiding behind an import.
+This mocks a shape, not a contract: validation is skipped entirely (`"64"` where a number belongs, and nobody notices), the mock drifts silently when the real module refactors, and hoisting rules make failures cryptic. In this design there is also nothing to intercept — there is no central all-tesserae module (groups are declared near their call sites) and no ambient binding hiding behind an import.
 
 ```ts
 // Instead: a real, validated snapshot per test
@@ -359,7 +359,7 @@ const cfg = bind({
   dbUrl: literal(dbUrl, "postgres://127.0.0.1:5432/app_test"),
   poolSize: literal(poolSize, 2),
 });
-const pool = createPool(cfg.pick(dbZernos));
+const pool = createPool(cfg.pick(dbTesserae));
 ```
 
 If a test is hard to write, that's the design telling you something: somewhere, code is reading configuration instead of receiving it. Move the read to the composition root and the test writes itself.
