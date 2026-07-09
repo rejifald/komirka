@@ -13,3 +13,4 @@ the registry links to each one as its question gets settled.
 | # | Title | Status |
 | --- | --- | --- |
 | [0001](./0001-tessera-inheritance.md) | Tessera inheritance and derivation (value fallback and transform across descriptors) | Accepted |
+| [0004](./0004-async-snapshot-coherence.md) | Async snapshot cross-key coherence (coherence groups) | Accepted |

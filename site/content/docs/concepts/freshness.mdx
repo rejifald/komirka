@@ -113,7 +113,7 @@ app.get("/proxy", (req, res) => {
 });
 ```
 
-Requests get per-request freshness; nothing inside a request ever tears.
+Requests get per-request freshness; nothing inside a request ever tears in *time* — the pin freezes every value at one instant, so no re-read can split a pair mid-request. Generation coherence *across keys* is a second, separate guarantee. For **file** sources the pin delivers it for free: one file read serves all its tesserae (above), so a rotated pair in one file moves together. For **provider** sources a pin re-reads only expired keys, so a rotated pair split across the staleness boundary would still tear — the async binding cannot infer which keys are related. Declare them as a `coherent([...])` group and the pin re-reads them as one cut: see [Database-backed config](/docs/guides/database-config#coherent-key-groups) and [ADR 0004](https://github.com/rejifald/tessellum/blob/main/docs/adr/0004-async-snapshot-coherence.md).
 
 ## When the new value is invalid: current truth wins
 

@@ -181,6 +181,13 @@ Related deferral: `cfg.update(tessera, fn, { retries })` read-modify-write sugar
 five-line userland loop over `get`/`set`/`WriteConflictError`; core adds it only if
 demand proves out.
 
+**Separately settled — cross-key coherence within an async `snapshot()`** (a different
+async-read question, resolved in **[ADR 0004](https://github.com/rejifald/tessellum/blob/main/docs/adr/0004-async-snapshot-coherence.md)**): a declared `coherent([...])` group is
+pinned and re-read as one coherent cut (ungrouped keys stay expired-keys-only), `version`
+joins `Provenance` as the CAS token, and a `WriteConflictError` marks the conflicting key
+stale — which is what makes the five-line loop above provably make progress. Stale-while-
+revalidate itself stays deferred as above.
+
 **Write verification ship order** — `verify: "report"` ships first (it delivers most of
 the value: catching store-side mangling before fleet-wide adoption, including the
 mangled-but-valid class nothing else sees). `verify: "revert"` ships only once the
@@ -218,6 +225,7 @@ parameters carry the tuple inference the call shapes depend on).
 ## 10. Recently resolved
 
 - **Tessera inheritance & derivation** — resolved in **[ADR 0001](https://github.com/rejifald/tessellum/blob/main/docs/adr/0001-tessera-inheritance.md)**: a declared, identity-bearing `inherit(target, base, ops?)` relation (not a source ref, not deployment wiring); data-only transforms (never a function); layered validation (the base's own declaration, then the target's); loud-by-default with a bind-site `useDefault` opt-in; single-base and transitive, multiple inheritance deferred. The ADR is the full record — this registry only points to it. Deferred spin-off: a `latch` freshness mode ([#14](https://github.com/rejifald/tessellum/issues/14)).
+- **Async snapshot cross-key coherence** — resolved in **[ADR 0004](https://github.com/rejifald/tessellum/blob/main/docs/adr/0004-async-snapshot-coherence.md)**: coherence within an async `snapshot()` is an explicit, bind-site `coherent([...])` group — pinned and re-read as one cut whenever any member is expired (ungrouped keys stay expired-keys-only; a group must resolve to one provider or bind fails `CoherenceGroupSourceError`, `CoherenceError` if a cut can't be captured in the re-check budget). `version` joins `Provenance` as the provider CAS token, and a `WriteConflictError` marks the conflicting key stale so the database-guide read-modify-write loop provably progresses. The ADR is the full record. Siblings still open: async re-read timeout / boot-outage ([#22](https://github.com/rejifald/tessellum/issues/22)) and `setMany` atomicity vs. chunking ([#17](https://github.com/rejifald/tessellum/issues/17)).
 - **Live-invalid default** — resolved by author decision: **current truth wins** (poisoned
   slots, `InvalidLiveValueError`, `safe`), with `keepLastGood(tessera, { maxCoastMs })` as
   the explicit bind-site opt-in. See [Freshness](/docs/concepts/freshness).
