@@ -160,7 +160,7 @@ The remediation is deliberately a design question: either widen the group at the
 
 ## ExposureError
 
-**Layer: exposure boundary.** Fires when a secret value is about to cross into a public context. The most important instance is the serialization guard: secret values throw on `JSON.stringify` and `structuredClone`. This closes the SSR payload leak — a request-time serialization the build-time leak scan structurally cannot see, and explicitly out of its scope.
+**Layer: exposure boundary.** Fires when a secret value is about to cross into a public context. The most important instance is the serialization guard: `unwrap()` of a secret tessera returns a `Secret<T>` (assignable to `T`) that throws `ExposureError` on `JSON.stringify` and is non-cloneable, so `structuredClone`/`postMessage` throw `DataCloneError`. This closes the SSR/RSC payload leak — a request-time serialization the build-time leak scan structurally cannot see, and explicitly out of its scope. Coercion still works (the value *is* a string everywhere it is coerced); call `.reveal()` at a boundary that typechecks its input (`crypto.createHmac`, `z.string().parse`). See [Secrets](/docs/concepts/secrets) and [ADR 0002](https://github.com/rejifald/tessellum/blob/main/docs/adr/0002-secret-value-representation.md).
 
 ```ts
 export async function getServerSideProps() {
@@ -280,19 +280,18 @@ live.unwrap(tiers);
 
 ## StaleBakeError
 
-**Layer: baked client read.** The client bake target emits a generated module with an inlined snapshot shim that imports nothing at runtime. The shim carries a per-tessera identity hash, and its `unwrap()` verifies the hash of the descriptor you pass against the hash recorded at bake time. If a library was upgraded after baking — its tessera's schema `version` bumped, a source added — the identities diverge:
+**Layer: build (`bake --check`), plus an automatic dev-mode runtime check.** A stale bake is a client artifact generated before a dependency changed a tessera's schema (`version` bumped, a source added). The **production** catch is at build time: `tessellum bake --check` re-derives every artifact and fails CI on the drift. It is load-bearing, because client code imports lightweight handles from the baked module — not the upgraded descriptor — so in prod there is no runtime descriptor to compare against ([ADR 0003](https://github.com/rejifald/tessellum/blob/main/docs/adr/0003-client-read-api-and-bake-staleness.md)).
+
+In **dev**, the generated module also runs an automatic hash check — it loads the current descriptors through a dev-only dynamic import and compares each against the hash recorded at bake time, throwing on skew for fast local feedback:
 
 ```ts
-import { widgetTheme } from "@acme/widgets/tesserae"; // upgraded to v3: descriptor changed
-import { config } from "./config.baked";    // baked against v2
-
 config.unwrap(widgetTheme);
-// StaleBakeError: WIDGET_THEME was baked as tesserav1:xxh128:aa04f2…, but the
-// imported descriptor hashes to tesserav1:xxh128:d17b9c… — the bake is stale.
-// Re-run `tessellum bake`. In CI, `tessellum bake --check` fails the build before this ships.
+// (dev only) StaleBakeError: WIDGET_THEME was baked as tesserav1:xxh128:aa04f2…,
+// but the current descriptor hashes to tesserav1:xxh128:d17b9c… — the bake is stale.
+// Re-run `tessellum bake`.
 ```
 
-The remediation chain is mechanical: `tessellum bake` regenerates, `tessellum bake --check` is the CI drift gate that makes shipping this state impossible, and `tessellum bake --watch` keeps dev and HMR in sync so you never meet it locally.
+That check is stripped from production builds (dynamic import in a `NODE_ENV`-gated branch → dead-code-eliminated, zod with it — a static import would re-ship the schema). The remediation is mechanical: `tessellum bake` regenerates, `tessellum bake --check` is the CI drift gate that makes shipping this state impossible, and `tessellum bake --watch` keeps dev and HMR in sync. The honest cost: in production a stale bake that slips past `bake --check` reaches users as a wrong or missing value, not a runtime `StaleBakeError` — keep the gate required in CI.
 
 ## Variants and write errors (summary)
 

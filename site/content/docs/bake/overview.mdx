@@ -105,7 +105,7 @@ One `tessellum bake` run produces, per the manifest:
 
 | Artifact | Contents |
 | --- | --- |
-| Client module (per `client` target) | Public literal values + an inlined snapshot shim (~30 lines) |
+| Client module (per `client` target) | Public literal values + per-tessera **handles** (key + identity, no schema) + an inlined snapshot shim (~30 lines) |
 | Server wiring module (optional, per `server` target) | Key *names* + dynamic env access — never values |
 | `.env.example` | Every key, its `doc` text, defaults for public tesserae, blanks for secrets |
 | `CONFIG.md` | Human-readable inventory generated from `doc` fields |
@@ -114,24 +114,16 @@ One `tessellum bake` run produces, per the manifest:
 
 ### The client module: literals plus a zero-import shim
 
-The client artifact contains public literal values and an inlined shim of roughly thirty lines. It imports **nothing** at runtime — not even `tessellum` — so the baked path is genuinely zero-runtime-dependency. The shim carries the `Scope` brand, so it satisfies the same type that `pick()` produces, and library code typed as `Scope<ConfigOf<typeof widgetTesserae>>` accepts it unchanged:
+The client artifact contains public literal values, a lightweight **handle** per tessera (key + identity hash + a phantom `Tessera<V>` type, no schema), and an inlined shim of roughly thirty lines. It imports **nothing** at runtime — not even `tessellum` — so the baked path is genuinely zero-runtime-dependency (measured: ~0.4 KB gzip; importing a real descriptor for the `unwrap()` key instead would pull in ~65 KB of `zod`). Client code imports the handles from the baked module, never the real descriptor; the shim carries the `Scope` brand, so library code typed `Scope<ConfigOf<typeof widgetTesserae>>` accepts it unchanged (the handle's `Tessera<V>` type flows through `import type`, erased at build):
 
 ```ts
 // Client code. Path and export shape shown are illustrative of the generated output.
-import { config } from "./config.baked";
-import { apiBaseUrl } from "./src/config/public";
+import { config, apiBaseUrl } from "./config.baked"; // handle, not descriptor
 
-const url = config.unwrap(apiBaseUrl); // sync, typed, hash-verified
+const url = config.unwrap(apiBaseUrl); // sync, typed
 ```
 
-Every entry in the shim carries the tessera's identity hash, and `unwrap()` verifies it on read. Upgrade `@acme/widget` to a version that changed a tessera's schema, forget to re-bake, and the read fails loudly instead of returning a value validated against yesterday's contract:
-
-```ts
-config.unwrap(widgetTheme);
-// StaleBakeError: WIDGET_THEME was baked from tesserav1:xxh128:9f2e…
-// but the imported descriptor is tesserav1:xxh128:c41a….
-// Re-run `tessellum bake` (or `tessellum bake --check` in CI would have caught this).
-```
+Staleness — a dependency whose tessera schema changed after you baked — is caught in **production** at **build time**: `tessellum bake --check` re-derives every artifact and fails CI on the drift. That gate is load-bearing, because the client imports handles rather than the upgraded descriptor, so there is nothing to hash-check at runtime in prod. In **dev**, the generated module additionally runs an automatic hash check for fast local "re-bake" feedback; it is stripped from prod builds — reached only via a dynamic import in a `NODE_ENV`-gated branch, so the prod bundle keeps zero dependencies (a static descriptor import would re-ship zod). See [ADR 0003](https://github.com/rejifald/tessellum/blob/main/docs/adr/0003-client-read-api-and-bake-staleness.md).
 
 ### The server wiring module: names, never values — and never static access
 
