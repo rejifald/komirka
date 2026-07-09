@@ -10,9 +10,9 @@ Once a question is settled with a full decision record, its entry graduates to a
 | # | Question | Current lean |
 | --- | --- | --- |
 | 1 | Is `default` part of a tessera's identity hash? | Yes — keep it in |
-| 2 | Env-varying public values in build-once SPAs | Bless a runtime-injected JSON mode; shape TBD |
+| 2 | Env-varying public values in build-once SPAs | **Resolved** — ADR 0008: rebuild-per-env is the default, one blessed runtime-injected mode is the escape |
 | 3 | Ship the Node file source in v0.1? | Yes |
-| 4 | Server targets: zero-runtime-dep vs runtime validation | Two-tier: bake what is build-constant, runtime-bind the rest |
+| 4 | Server targets: zero-runtime-dep vs runtime validation | **Resolved** — ADR 0010: two-tier; the optional server module checks presence only |
 | 5 | Final naming | Decided: package `tessellum`, primitive `tessera` |
 | 6 | v0.1 proof gate | Ship only if the demo clearly wins |
 
@@ -59,40 +59,14 @@ The residual cost lands on library authors: a default bump is an identity-breaki
 
 ## 2. Env-varying public values for build-once-promote-many SPAs
 
-This is the predicted number-one GitHub issue, so it gets named before anyone files it.
 
-The bake pipeline inlines public literal values into the client artifact at build time. For secrets that is a feature — bake never resolves secret values, which is what preserves build-once-deploy-many for the server side. But *public* values are frozen at bake time, and teams that promote one immutable artifact from staging to production need `API_BASE_URL` to differ per environment without a rebuild.
+**Resolved** in **[ADR 0008](https://github.com/rejifald/tessellum/blob/main/docs/adr/0008-env-varying-public-values.md)**. This was the predicted number-one GitHub issue, so it gets an answer rather than a hedge. Bake inlines public literals at build time, so `API_BASE_URL` is frozen per build; teams promoting one immutable artifact need it to vary without a rebuild. **Both paths are supported, and the trade-off is explicit:**
 
-**Option A — do nothing; document rebuild-per-environment.** Cheapest and honest (`tessellum bake` once per environment in the CI matrix). It also angers precisely the teams with the strictest promotion pipelines — the ones most likely to care about this library.
+- **Default — re-bake per environment.** `tessellum bake` once per environment in the promote step. Only public values resolve, so no secrets enter the pipeline. Cost: artifacts are no longer bit-identical.
+- **Blessed escape — exactly one runtime-injected public document.** A per-environment `/config.json` fetched **once at boot** through an async provider entry and pinned (`await bind(entries).snapshot()`), so every read after boot is synchronous. Values validate against the same tessera schemas; a secret tessera pointed at the document is an `ExposureError` (the browser entry ships **no** secret-capable sources — construction, not policy); the document is an untrusted input boundary, revalidated on read; and because these tesserae are never baked they carry no baked handle and can never raise `StaleBakeError`. Bake emits a **JSON Schema** for the document so the deploy pipeline validates it *before serving*.
+- **Variant — HTML script-tag injection.** The same document, templated into a script tag: DOM transport instead of a fetch. Saves a request, couples you to a serving layer.
 
-**Option B — a runtime-injected JSON mode (lean).** The deploy environment serves a small public document, conventionally `/config.json`; the client fetches it once at boot through an async provider entry and pins (`await bind(entries).snapshot()`), so every read after boot is sync. Values still validate against the same tessera schemas. The browser entry still contains no secret-capable sources, so a secret tessera pointed at that document fails with `ExposureError` — the document cannot become a side-channel for secrets.
-
-**Option C — HTML injection.** The server templates the same JSON into a script tag; saves a request, couples you to a serving layer. Probably a documented variant of B rather than a separate mode.
-
-The undecided part is the shape, not the need. In the current contract the pieces already compose as a userland recipe — a provider entry plus an async pin:
-
-```ts
-// candidate recipe — sketch, not contract; the blessed shape is TBD
-const apiBase = tessera({
-  key: "API_BASE_URL",
-  schema: z.string().url(),
-  exposure: "public",
-  sources: [{ provider: "runtime-config" }, { env: "API_BASE_URL" }],
-});
-
-// browser boot: runtimeConfigProvider is a userland provider that
-// fetches /config.json once; all reads are sync forever after
-const cfg = await bind({ apiBase: provider(apiBase, runtimeConfigProvider) }).snapshot();
-```
-
-```json
-{
-  "API_BASE_URL": "https://api.example.com",
-  "CDN_ORIGIN": "https://cdn.example.com"
-}
-```
-
-Open shape questions: does core bless a first-class browser source or only document the provider recipe; should bake emit a JSON Schema for the document so the *deploy* pipeline can validate it before serving; and how the baked shim's identity-hash check (`StaleBakeError`) interacts with values that arrive at runtime instead of bake time. Current lean: bless exactly one runtime-injected mode, and keep it out of v0.1 unless the proof-gate demo (below) demands it.
+It stays a **userland recipe** — no first-class core browser source in v0.1 (P6). **P13 was narrowed** to say what it always meant: bake is the only channel that *inlines* client config. See [Browser](/docs/guides/browser).
 
 ## 3. Ship the Node file source in v0.1?
 
@@ -133,7 +107,7 @@ For the client target there is no tension: public values are validated at bake t
 
 For servers the tension is structural. Validators are BYO Standard Schema objects — closures. They do not serialize into a generated module, and bake deliberately never resolves secret values. So for any value that varies per deployment (every secret, every per-environment var), **zero-runtime-dep and runtime schema validation are mutually exclusive**. You cannot inline what you refuse to resolve, and you cannot re-validate without the validator.
 
-The lean is a two-tier story rather than pretending one mechanism covers both:
+**Resolved** in **[ADR 0010](https://github.com/rejifald/tessellum/blob/main/docs/adr/0010-server-bake-target-semantics.md)**. The answer is a two-tier story rather than pretending one mechanism covers both — and it is now settled contract, not a lean:
 
 - **Tier 1 — build-constant values: bake them.** This is how StitchAPI consumes the library — a devDependency, bake at build time, zero runtime dependency in the published package.
 - **Tier 2 — runtime-varying values: runtime-bind them.** The server imports the library as a normal dependency and binds at boot with full schema validation. The contract already permits this: mandatory bake attaches to the *trust boundary* — untrusted client targets — and trusted servers may runtime-bind.
@@ -149,7 +123,9 @@ const cfg = bind(serverTesserae);
 // MissingConfigError listing every offender — not request by request
 ```
 
-The open sub-question is what the *optional* baked server wiring module checks. It already reads env dynamically — computed access over a key array, never static `process.env.KEY`, so DefinePlugin cannot fold values into literals. Candidates: presence-only checks at boot (schema-free, still catches the deploy that forgot a var), or pure enumeration with no checks at all. What is **not** on the table: serializing validators via generated code, or a mini validation DSL embedded in baked output — both collide head-on with BYO Standard Schema and the bundle-frugality gate.
+The sub-question — what the *optional* baked server wiring module checks — is resolved as **presence-only at boot**. It enumerates the declared env key names, reads each via computed access (`process.env[k]`, never static `process.env.KEY`, so DefinePlugin cannot fold values into literals), and throws **one** aggregated error naming every missing key. It is schema-free and **imports nothing** — reusing the *name* `MissingConfigError` without taking the dependency — so a package that bakes at build keeps its zero-runtime-dependency guarantee.
+
+Presence is not validity: `DATABASE_URL=""` passes the module and still fails the real schema at the tier-2 `bind()`. Pure enumeration with no checks was rejected (it gives nothing over reading `process.env` yourself). Permanently **not** on the table: serializing validators via generated code, or a mini validation DSL embedded in baked output — both collide head-on with BYO Standard Schema and the bundle-frugality gate, and a generated check that silently diverged from the real schema would be worse than no check at all.
 
 ## 5. Nested `variants()` / `when()`
 
@@ -226,15 +202,12 @@ code) is the misuse backstop.
 
 ## 9. Attestation strictness for rewired deployments
 
-Open: should production binds on bake-covered targets *require* the lockfile digest check
-(fail-closed when the composition root's effective wiring diverges from the committed
-attestation) or is the check opt-in via `bind(..., { attest })` with a loud dev warning?
-Mandatory is the only thing that makes manifest-invisible wiring truly unable to sneak past the
-manifest; the cost is coupling server boot to a committed artifact. Leaning mandatory for
-client-covered targets only. Related settled points: mapping *functions* are dropped from
-the public source-transform API pre-1.0 (data-only `prefix`/`rename` — nothing in the
-motivating cases needs a function), and the TypeScript floor is **>= 5.0** (`const` type
-parameters carry the tuple inference the call shapes depend on).
+
+**Resolved** in **[ADR 0009](https://github.com/rejifald/tessellum/blob/main/docs/adr/0009-attestation-strictness.md)**. The lockfile wiring-digest check is **mandatory on client-covered targets** — always on, not disableable, and keyed off *bake coverage* (a structural fact) rather than `NODE_ENV`, so no ambient environment string ever decides whether a guarantee is enforced. Divergence is `WiringSkewError`, fail-closed. **Server targets opt in** via `bind(entries, { attest: true })` (`attest?: boolean`, default `false`), and a bake-covered server target bound without it gets a dev-mode warning.
+
+The honest cost, stated rather than hidden: **manifest-invisible wiring on a server is possible by default.** `tessellum bake --check` in a zero-credential CI job is the primary control; `attest: true` is the boot-time backstop for operators who want boot coupled to the committed attestation. Mandatory-everywhere was rejected because it turns a stale lockfile into an outage on the tier that most legitimately rewires per deployment; opt-in-everywhere was rejected because it ships a core security guarantee in the off position.
+
+Related settled points: mapping *functions* are dropped from the public source-transform API pre-1.0 (data-only `prefix`/`rename` — nothing in the motivating cases needs a function), and the TypeScript floor is **>= 5.0** (`const` type parameters carry the tuple inference the call shapes depend on).
 
 ## 10. Recently resolved
 
@@ -243,6 +216,9 @@ parameters carry the tuple inference the call shapes depend on).
 - **Async snapshot cross-key coherence** — resolved in **[ADR 0004](https://github.com/rejifald/tessellum/blob/main/docs/adr/0004-async-snapshot-coherence.md)**: coherence within an async `snapshot()` is an explicit, bind-site `coherent([...])` group — pinned and re-read as one cut whenever any member is expired (ungrouped keys stay expired-keys-only; a group must resolve to one provider or bind fails `CoherenceGroupSourceError`, `CoherenceError` if a cut can't be captured in the re-check budget). `version` joins `Provenance` as the provider CAS token, and a `WriteConflictError` marks the conflicting key stale so the database-guide read-modify-write loop provably progresses. The ADR is the full record. Its siblings are now settled too — the async re-read deadline / boot-outage ([ADR 0005](https://github.com/rejifald/tessellum/blob/main/docs/adr/0005-async-read-deadline-and-boot-outage.md)) and `setMany` atomicity vs. chunking ([ADR 0006](https://github.com/rejifald/tessellum/blob/main/docs/adr/0006-atomic-setmany-vs-write-batch.md)).
 - **Async re-read deadline & boot outage** — resolved in **[ADR 0005](https://github.com/rejifald/tessellum/blob/main/docs/adr/0005-async-read-deadline-and-boot-outage.md)**: every blocking async re-read (an expired key; ADR 0004's `coherent`-group cut and its re-check loop; the post-conflict re-read) is bounded by a new `readTimeoutMs` bind option (default `maxStalenessMs`) — a slow provider that breaches it throws `SourceUnavailableError`, so `maxStalenessMs` bounds *staleness* while `readTimeoutMs` bounds the *wait*, and it stays distinct from `CoherenceError` (a store that answers fast but keeps changing). `ready()`, cacheless at boot, meets a store outage with bounded retry then fail-fast (`readyTimeoutMs`, default 30 000 ms; `0` = pure fail-fast). Resolves [#22](https://github.com/rejifald/tessellum/issues/22).
 - **Atomic `setMany` vs. `maxWriteBatch`** — resolved in **[ADR 0006](https://github.com/rejifald/tessellum/blob/main/docs/adr/0006-atomic-setmany-vs-write-batch.md)**: an atomic write is one `write()` to one provider and cannot span chunks (the write-side mirror of ADR 0004's single-source rule), so an atomic `setMany` larger than the provider's `maxWriteBatch` is refused up front with `AtomicBatchTooLargeError` — a chunked atomic write would be the torn durable state the guarantee prevents (discriminant flipped, branch values missing). Shrink the rotate-together set to one batch, or opt into `{ allowNonAtomic: true }` (dependency-ordered singles, benign tear direction only). Resolves [#17](https://github.com/rejifald/tessellum/issues/17).
+- **Env-varying public values for build-once-promote-many SPAs** — resolved in **[ADR 0008](https://github.com/rejifald/tessellum/blob/main/docs/adr/0008-env-varying-public-values.md)** (§2): **re-bake per environment is the default**; the blessed escape is exactly **one runtime-injected public document** (`/config.json`, fetched once at boot through an async provider entry and pinned), with HTML script-tag injection as a transport variant. Values still validate; a secret pointed at the document is an `ExposureError` because the browser entry ships no secret-capable sources; the document is an untrusted input boundary revalidated on read; and runtime-injected tesserae are never baked, so they carry no baked handle and can never raise `StaleBakeError`. Bake emits a JSON Schema for the document. It stays a userland recipe — no core browser source in v0.1 — and **P13 was narrowed** to "bake is the only channel that *inlines* client config." Resolves [#28](https://github.com/rejifald/tessellum/issues/28).
+- **Attestation strictness for rewired deployments** — resolved in **[ADR 0009](https://github.com/rejifald/tessellum/blob/main/docs/adr/0009-attestation-strictness.md)** (§9): the lockfile wiring-digest check is **mandatory and always on for client-covered targets** (not disableable; keyed off bake coverage, never `NODE_ENV`), and **opt-in for server targets** via `bind(entries, { attest: true })` with a dev-mode warning when a bake-covered server omits it. Honest cost: manifest-invisible wiring on a server is possible by default, so `bake --check` in CI is the primary control. Resolves [#29](https://github.com/rejifald/tessellum/issues/29).
+- **Server bake-target semantics** — resolved in **[ADR 0010](https://github.com/rejifald/tessellum/blob/main/docs/adr/0010-server-bake-target-semantics.md)** (§4): the two-tier story is settled (build-constant → bake; runtime-varying → runtime bind), and the optional server wiring module performs **presence-only** checks at boot — schema-free, importing nothing, dynamic computed access, one aggregated error naming every missing key. Presence is not validity; serialized validators and embedded DSLs stay permanently off the table. Resolves [#30](https://github.com/rejifald/tessellum/issues/30).
 - **Cross-install branded-type identity & library consumption** — resolved in **[ADR 0007](https://github.com/rejifald/tessellum/blob/main/docs/adr/0007-cross-install-identity-and-library-consumption.md)**: the `Scope`/`ConfigOf` brand is **structural** (a well-known string key), never a `unique symbol` — a `tsc` spike proved a nominal brand *loses* identity across duplicate installs while a structural one survives and still blocks `Snapshot → Scope` (P12); it is also what lets ADR 0003's baked shim carry the brand while importing nothing. Library authors declare tessellum a `peerDependency` (dedup + no second bundled copy), but content-addressed identity + revalidate-on-fallback is the load-bearing floor, not the peer-dep (P17). A documented escape — a plain-object accessor plus an optional `…/tessellum` adapter entry — lets libraries serve consumers who don't use tessellum; public values cross bare, secret values cross as `Secret<T>` (ADR 0002; assignable to `T`, so the adapter passes `unwrap()` through with no `.reveal()` and the Proxy guards ride along). Resolves [#31](https://github.com/rejifald/tessellum/issues/31).
 - **Tessera inheritance & derivation** — resolved in **[ADR 0001](https://github.com/rejifald/tessellum/blob/main/docs/adr/0001-tessera-inheritance.md)**: a declared, identity-bearing `inherit(target, base, ops?)` relation (not a source ref, not deployment wiring); data-only transforms (never a function); layered validation (the base's own declaration, then the target's); loud-by-default with a bind-site `useDefault` opt-in; single-base and transitive, multiple inheritance deferred. The ADR is the full record — this registry only points to it. Deferred spin-off: a `latch` freshness mode ([#14](https://github.com/rejifald/tessellum/issues/14)).
 - **Live-invalid default** — resolved by author decision: **current truth wins** (poisoned

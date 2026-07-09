@@ -95,9 +95,14 @@ Every feature must pass all of these. "It would be convenient" never overrides a
   while `Snapshot` stays un-assignable, and it is what makes a library's `Scope<...>` signature accept a baked shim's scope
   across installs (ADR 0003). Structural means forgeable, which is fine: this is
   mistake-prevention, not a sandbox.
-- **P13 — Bake is the only client delivery channel.** Client-targeted code receives config
-  exclusively via the bake-generated module. The manifest must declare targets explicitly;
-  a declared client target with no completed bake fails the build.
+- **P13 — Bake is the only channel that *inlines* client config.** Build-constant
+  client-targeted values reach the browser exclusively via the bake-generated module. The
+  manifest must declare targets explicitly; a declared client target with no completed bake
+  fails the build. The one sanctioned alternative is a **runtime-injected public document**
+  (ADR 0008): bound through a declared source at the composition root, never inlined, always an
+  untrusted input boundary revalidated on read, and structurally incapable of carrying secrets
+  because the browser entry ships no secret-capable sources (P7). Narrowing, not weakening —
+  attestation, deny-by-default client targets, and the secret-name bake gate are unchanged.
 - **P14 — Bake never resolves secret values.** It resolves public values and secret *key
   names* only. Secrets are validated at runtime, where the value actually lives. This also
   preserves build-once-deploy-many and keeps prod secrets out of CI.
