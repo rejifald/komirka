@@ -138,6 +138,11 @@ interface BindOptions {
   clock?: Clock;                 // time source for maxStalenessMs, coast budgets, and poll throttles;
                                  //   manualClock (testing kit) advances it by hand — no real waiting.
                                  //   A bind-site policy option, never a descriptor field → NOT in identity.
+  attest?: boolean;              // verify the committed lockfile's wiring digest against this root's
+                                 //   effective wiring; divergence → WiringSkewError. Default false.
+                                 //   SERVER targets only: on CLIENT-covered targets the check is
+                                 //   mandatory, always on, and NOT disableable by this flag.
+                                 //   An explicit flag — never NODE_ENV sniffing (ADR 0009).
 }
 ```
 
