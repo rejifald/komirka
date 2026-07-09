@@ -468,7 +468,9 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
 - **Fail-closed-by-missing-module has holes.** It only fails builds for code that imports
   the generated module; hand-written `process.env.SECRET` in a client component and un-baked
   second entrypoints sail through. *Rule:* the mandatory stack is: required `targets`
-  declaration → generated-module-only delivery → no-secret-sources browser entry → AST lint
+  declaration → secret-name bake gate (client-target declared key / effective source name vs
+  the secret-suffix denylist, whole-token, refused even at `exposure: "public"`) →
+  generated-module-only delivery → no-secret-sources browser entry → AST lint
   banning raw env reads in client-designated code → bake coverage report (manifest vs
   client-reachable zernos) → allowlist leak scan. No single mechanism is claimed as
   sufficient.
@@ -476,7 +478,12 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
   dependency can declare `exposure: "public"` over `{ env: "STRIPE_SECRET_KEY" }`. *Rule:*
   client-target membership requires **app-level attestation** in the manifest
   (`targets.client` enumerates zerno groups explicitly) plus deny-by-default env-source
-  allowlisting for the client target. `exposure: "public"` is necessary, never sufficient.
+  allowlisting for the client target — **and** bake refuses any client-target zerno whose
+  declared key or effective source name matches the secret-suffix denylist (whole-token,
+  anywhere in the name) even at `exposure: "public"` (`SecretNameInClientTargetError`),
+  escapable only by a reviewed per-name entry in the manifest attestation, never a global
+  flag. That closes the `{ env: "STRIPE_SECRET_KEY" }` case by name as well as by flag:
+  `exposure: "public"` is necessary, never sufficient.
 - **Build-once-deploy-many vs inlining.** Baking an env-varying value freezes the build
   env's value into promoted artifacts. *Rule:* baked = constant-per-build by contract;
   env-varying browser values are an explicitly documented open problem (runtime-injected
@@ -551,7 +558,8 @@ ones (provider-resolved: SSM, Vault) — and only if the root snapshot is never 
 | Cross-request/tenant bleed on Workers | P3: no ambient binding, no fallback; per-request bind |
 | Window-injected config spoofing (XSS ordering) | Injected browser config is an untrusted input boundary: revalidated on read, never used for secret-tier values |
 | Prototype pollution via `decode: "json"` / nested-key sources | Null-prototype objects throughout decode/merge; `__proto__`/`constructor`/`prototype` keys rejected before any validator runs |
-| Supply chain: dependency-declared zernos entering the client bake | App attestation + deny-by-default source allowlist (never trust package-declared `exposure` alone) |
+| Supply chain: dependency-declared zernos entering the client bake | App attestation + deny-by-default source allowlist (never trust package-declared `exposure` alone) + secret-name bake gate (`SecretNameInClientTargetError`) on the declared key / effective source name |
+| Secret laundered into a public read via the inheritance relation | `InheritanceExposureError` — a public zerno may not inherit a secret base; a chain's effective exposure is the max secrecy of any link (fail-closed at construction/bind) |
 | Supply chain: import-time `provide()` spoofing | No global provide exists (P3) |
 | Build-time RCE via manifest execution | Side-effect-free manifest contract, constrained execution, sensitive-input handling |
 
