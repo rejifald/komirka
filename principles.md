@@ -559,6 +559,7 @@ ones (provider-resolved: SSM, Vault) — and only if the root snapshot is never 
 | Window-injected config spoofing (XSS ordering) | Injected browser config is an untrusted input boundary: revalidated on read, never used for secret-tier values |
 | Prototype pollution via `decode: "json"` / nested-key sources | Null-prototype objects throughout decode/merge; `__proto__`/`constructor`/`prototype` keys rejected before any validator runs |
 | Supply chain: dependency-declared zernos entering the client bake | App attestation + deny-by-default source allowlist (never trust package-declared `exposure` alone) + secret-name bake gate (`SecretNameInClientTargetError`) on the declared key / effective source name |
+| Secret laundered into a public read via the inheritance relation | `InheritanceExposureError` — a public zerno may not inherit a secret base; a chain's effective exposure is the max secrecy of any link (fail-closed at construction/bind) |
 | Supply chain: import-time `provide()` spoofing | No global provide exists (P3) |
 | Build-time RCE via manifest execution | Side-effect-free manifest contract, constrained execution, sensitive-input handling |
 
