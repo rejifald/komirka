@@ -19,3 +19,6 @@ the registry links to each one as its question gets settled.
 | [0005](./0005-async-read-deadline-and-boot-outage.md) | Async re-read deadline and boot-outage policy (`readTimeoutMs` / `readyTimeoutMs`) | Accepted |
 | [0006](./0006-atomic-setmany-vs-write-batch.md) | Atomic `setMany` vs. `maxWriteBatch` (an atomic write cannot span chunks) | Accepted |
 | [0007](./0007-cross-install-identity-and-library-consumption.md) | Cross-install branded-type identity and library-author consumption (structural `Scope` brand, peer-dep, escape) | Accepted |
+| [0008](./0008-env-varying-public-values.md) | Env-varying public values for build-once-promote-many SPAs (rebuild default + one blessed runtime-injected mode) | Accepted |
+| [0009](./0009-attestation-strictness.md) | Attestation strictness for rewired deployments (`attest`: mandatory on client targets, opt-in on servers) | Accepted |
+| [0010](./0010-server-bake-target-semantics.md) | Server bake-target semantics (the wiring module checks presence, nothing else) | Accepted |

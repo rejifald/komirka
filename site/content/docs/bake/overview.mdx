@@ -106,7 +106,8 @@ One `tessellum bake` run produces, per the manifest:
 | Artifact | Contents |
 | --- | --- |
 | Client module (per `client` target) | Public literal values + per-tessera **handles** (key + identity, no schema) + an inlined snapshot shim (~30 lines) |
-| Server wiring module (optional, per `server` target) | Key *names* + dynamic env access — never values |
+| Server wiring module (optional, per `server` target) | Key *names* + dynamic env access + a **presence check** at boot — never values, never schemas |
+| Runtime-config JSON Schema (when tesserae route to a runtime-injected document) | Names + types for the per-environment `/config.json`, so the deploy pipeline validates it before serving — never values |
 | `.env.example` | Every key, its `doc` text, defaults for public tesserae, blanks for secrets |
 | `CONFIG.md` | Human-readable inventory generated from `doc` fields |
 | `manifest.json` | Machine-readable inventory: keys, exposure, identity hashes, source refs — never values |
@@ -125,17 +126,25 @@ const url = config.unwrap(apiBaseUrl); // sync, typed
 
 Staleness — a dependency whose tessera schema changed after you baked — is caught in **production** at **build time**: `tessellum bake --check` re-derives every artifact and fails CI on the drift. That gate is load-bearing, because the client imports handles rather than the upgraded descriptor, so there is nothing to hash-check at runtime in prod. In **dev**, the generated module additionally runs an automatic hash check for fast local "re-bake" feedback; it is stripped from prod builds — reached only via a dynamic import in a `NODE_ENV`-gated branch, so the prod bundle keeps zero dependencies (a static descriptor import would re-ship zod). See [ADR 0003](https://github.com/rejifald/tessellum/blob/main/docs/adr/0003-client-read-api-and-bake-staleness.md).
 
-### The server wiring module: names, never values — and never static access
+### The server wiring module: presence checks, names, never values — and never static access
 
-For server targets, bake can emit an optional wiring module that enumerates which env keys the runtime bind expects. The emitted code always uses **dynamic computed access**:
+For server targets, bake can emit an optional wiring module that enumerates which env keys the runtime bind expects and **checks that each one is present at boot** ([ADR 0010](https://github.com/rejifald/tessellum/blob/main/docs/adr/0010-server-bake-target-semantics.md)). It does a presence check and nothing else: schema-free, value-free, and importing nothing — so a package that bakes at build keeps its zero-runtime-dependency guarantee. The emitted code always uses **dynamic computed access**:
 
 ```ts
-// config.baked.server.ts (excerpt) — key NAMES only, never values
+// config.baked.server.ts (excerpt) — key NAMES only, never values; imports nothing
 const keys = ["DATABASE_URL", "DB_POOL_SIZE", "SMTP_PASSWORD"];
-for (let i = 0; i < keys.length; i++) {
-  raw[keys[i]] = process.env[keys[i]]; // computed — never process.env.DATABASE_URL
+
+const missing = keys.filter((k) => process.env[k] === undefined); // computed — never process.env.DATABASE_URL
+if (missing.length) {
+  const err = new Error(`Missing required configuration: ${missing.join(", ")}`);
+  err.name = "MissingConfigError"; // the same name the runtime bind throws — without taking the import
+  throw err;
 }
 ```
+
+**Presence is not validity.** The module cannot validate: your schemas are BYO Standard Schema closures, and closures do not serialize into generated code. (Serializing validators, or embedding a mini validation DSL in baked output, is permanently off the table — both collide with BYO validation and with bundle frugality, and a generated check that silently diverged from the real schema would be worse than no check at all.) So `DATABASE_URL=""` passes the presence check and still fails the real schema at the runtime `bind()`. What the module buys you is the single most common server misconfiguration — the deploy that forgot a variable — turned into a named boot failure that lists every offender at once, instead of an `undefined` surfacing inside a connection string an hour later.
+
+That is the **two-tier story**, and it is settled: build-constant values are **baked** (zero runtime dependency), and runtime-varying values are **runtime-bound** at boot with full schema validation. Mandatory bake attaches to the trust boundary — untrusted client targets — and trusted servers may runtime-bind.
 
 Why is static `process.env.KEY` forbidden? Because webpack's DefinePlugin, esbuild's `define`, and their equivalents fold **static member expressions** into literals at build time. If server code containing `process.env.SMTP_PASSWORD` ever passes through a bundler with such a define configured, the build has just inlined a secret into an artifact. Computed access — `process.env[keys[i]]` — has no static member expression to fold, so there is nothing for a define pass to inline. The same rule is enforced on your own code by the client-side AST lint (see the defense stack below).
 

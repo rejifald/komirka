@@ -149,10 +149,11 @@ And your users test your library with zero `process.env` mutation:
 
 ```ts
 import { bind, literal } from "tessellum";
+import { secretLiteral } from "tessellum/testing";
 import { createMailer, mailerTesserae, smtpUrl, fromAddress, retryCount } from "@acme/mailer";
 
 const cfg = bind([
-  literal(smtpUrl, "smtps://test:test@localhost:2525"),
+  secretLiteral(smtpUrl, "smtps://test:test@localhost:2525"),
   literal(fromAddress, "noreply@example.test"),
   literal(retryCount, 0),
 ]);

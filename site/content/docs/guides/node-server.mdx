@@ -174,17 +174,29 @@ Production often keeps secrets in a manager, not in env. Which manager, and unde
 
 ```ts
 // src/config/ssm.ts — providers are plain objects you own; tessellum ships no cloud SDK clients.
-import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
+// stripeKey is secret-exposure, so this is a SecretProvider (class: "secret"): it may serve
+// secret tesserae only, and core quarantines its errors and reshapes its result slots.
+import type { SecretProvider } from "tessellum/async";
+import { SSMClient, GetParametersCommand } from "@aws-sdk/client-ssm";
 
 const client = new SSMClient({});
 
-export const ssm = {
-  id: "ssm", // the id is what the lockfile records — anonymous impls are a bind-time error on bake-covered targets
-  color: "async", // declared, not inferred: an untyped color is a compile error
-  async resolve(key: string) {
-    const out = await client.send(new GetParameterCommand({ Name: key, WithDecryption: true }));
-    return out.Parameter?.Value;
+export const ssm: SecretProvider = {
+  id: "ssm",           // recorded in the lockfile — anonymous impls are a bind-time error on bake-covered targets
+  color: "async",      // declared, not inferred: an untyped color is a compile error
+  class: "secret",     // secret-class: wireable only to secret-exposure tesserae (the pairing rule)
+  limits: { maxReadBatch: 10 }, // GetParameters takes ≤10 names; core chunks to this — a provider never splits a batch itself
+  // BATCH, input-aligned: result[i] answers keys[i]. Absent is definitive; a whole-call throw is
+  // connection-level down (core never sees a secret provider's error object — error quarantine).
+  async read(keys) {
+    const out = await client.send(
+      new GetParametersCommand({ Names: [...keys], WithDecryption: true }),
+    );
+    const found = new Map((out.Parameters ?? []).map((p) => [p.Name!, p.Value!]));
+    // names SSM cannot resolve come back in InvalidParameters → { absent: true }, not an error slot
+    return keys.map((k) => (found.has(k) ? { raw: found.get(k)! } : { absent: true }));
   },
+  // no write(): this store is read-only here
 };
 ```
 
@@ -206,6 +218,8 @@ const root = await bind({
 ```
 
 `chain` is the only full-replacement spelling: it discards the tessera's declared refs in favor of the ordered links you give it, and resolution errors list the refs it dropped — a fallback that quietly stopped being consulted still shows up in the failure.
+
+Because `stripeKey` is secret-exposure, its **provider** link must resolve through a secret-class provider (or a general provider that declares `holdsSecrets: true`) — a plain config-class provider wired to a secret is refused at bind. That is why `ssm` above is `class: "secret"`. The `env("STRIPE_SECRET_KEY")` fallback needs nothing special: env- and file-sourced secrets are unaffected by the pairing rule; only *provider*-sourced secrets require the secret-class pairing.
 
 Fetching from SSM is async, and the color is in the types: every link carries its impl's color, and a single async link recolors the whole binding to an `AsyncBinding` — a type only `tessellum/async`'s `bind` produces. `await bind(entries).snapshot()` is the async door, and it is async exactly **once**: the pin resolves everything up front and hands back a plain sync-read `Snapshot`.
 
@@ -289,11 +303,12 @@ Because factories accept a scope rather than reading the environment, tests neve
 ```ts
 // test/repo.spec.ts
 import { bind, literal } from "tessellum";
+import { secretLiteral } from "tessellum/testing";
 import { dbTesserae, dbUrl, poolSize } from "../src/db/tesserae";
 import { createRepo } from "../src/db/repo";
 
 const cfg = bind({
-  dbUrl: literal(dbUrl, "postgres://localhost/test"),
+  dbUrl: secretLiteral(dbUrl, "postgres://localhost/test"),
   poolSize: literal(poolSize, 2),
 });
 const repo = createRepo(cfg.pick(dbTesserae)); // still validated — a bad literal fails here, not in CI at 2am

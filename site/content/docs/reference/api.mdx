@@ -23,7 +23,7 @@ import { bind, env, file } from "tessellum/node";     // natural defaults = proc
 // import { bind } from "tessellum";                  // core: no natural defaults — literal() entries only
 
 // tests: a dedicated entry point of pre-certified doubles (see Testing):
-import { secretLiteral, fakeSecretProvider, manualClock, verifyProvider } from "tessellum/testing";
+import { secretLiteral, fakeProvider, fakeSecretProvider, manualClock, verifyProvider } from "tessellum/testing";
 ```
 
 The core entry (`"tessellum"`) is universal — it runs in browsers, Workers, Node, Deno, and
@@ -117,6 +117,9 @@ literal(tessera, inputValue)    // input-typed; validation RUNS; exposure redact
 // records; anonymous impls are a bind error on bake-covered targets. There is no load():
 //   const cfg = await bind(entries).snapshot();   // resolve once → sync reads forever
 
+type Clock = { now(): number };  // injectable time source (ms since epoch); system clock by default.
+                                 // Poll-on-read only (P10: no timers) — a monotonic now() is all it needs.
+
 interface BindOptions {
   env?: EnvBag;                  // workers: the per-request bag — REQUIRED there, never wiring data
   transform?: { prefix?: string; rename?: Record<string, string> };
@@ -132,6 +135,14 @@ interface BindOptions {
   onSourceError?: (tessera: Tessera, cause: unknown) => void;           // never routed through onInvalid
   invalid?: KeepLastGood[];      // keepLastGood(tessera, { maxCoastMs }) — maxCoastMs required
   unify?: { accept: Tessera; aliases: string[] }[];                  // identity alias table (see Identity)
+  clock?: Clock;                 // time source for maxStalenessMs, coast budgets, and poll throttles;
+                                 //   manualClock (testing kit) advances it by hand — no real waiting.
+                                 //   A bind-site policy option, never a descriptor field → NOT in identity.
+  attest?: boolean;              // verify the committed lockfile's wiring digest against this root's
+                                 //   effective wiring; divergence → WiringSkewError. Default false.
+                                 //   SERVER targets only: on CLIENT-covered targets the check is
+                                 //   mandatory, always on, and NOT disableable by this flag.
+                                 //   An explicit flag — never NODE_ENV sniffing (ADR 0009).
 }
 ```
 
@@ -392,9 +403,10 @@ Consequences:
 ## Testing
 
 ```ts
-import { bind, literal } from "tessellum";   // core bind — the purest test spelling
+import { bind } from "tessellum";                 // core bind — the purest test spelling
+import { secretLiteral } from "tessellum/testing";
 
-const cfg = bind({ db: literal(dbUrl, "postgres://localhost:5432/test") });
+const cfg = bind({ db: secretLiteral(dbUrl, "postgres://localhost:5432/test") });
 // input-typed, still validated (a bad test value fails loudly), zero process.env mutation
 // Never commit real secret values — placeholders only; bake fails closed on
 // literal-wired secrets in client targets.
@@ -402,10 +414,13 @@ const cfg = bind({ db: literal(dbUrl, "postgres://localhost:5432/test") });
 
 The **testing kit** is a dedicated `tessellum/testing` entry point of pre-certified doubles:
 `secretLiteral()` (the secret-safe `literal()` — test-scoped, so `SecretLiteralError` still
-guards production), `fakeSecretProvider()` (an in-memory `SecretProvider` that already
-passes the conformance kit), `manualClock` (drive `maxStalenessMs` and coast budgets
-deterministically), and `verifyProvider(impl)` (the conformance kit itself — the bar for
-declaring a provider's `atomicWrites` / `consistentReads`).
+guards production), `fakeProvider()` (an in-memory general `AsyncProvider` — seed read values,
+capture writes, set `version`s and `absent`/`error` slots, toggle `atomicWrites` /
+`consistentReads` — already passing the conformance kit), `fakeSecretProvider()` (its
+`SecretProvider` sibling), `manualClock` (a `Clock` you advance by hand — pass it as `bind`'s
+`clock` option to drive `maxStalenessMs` and coast budgets with zero real waiting), and
+`verifyProvider(impl)` (the conformance kit itself — the bar for declaring a provider's
+`atomicWrites` / `consistentReads`).
 
 ## Bake — the CLI
 

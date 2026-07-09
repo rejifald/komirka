@@ -207,14 +207,47 @@ Honest boundaries: the scan is entropy- and length-gated, so a short value like 
 
 A baked value is a constant of the build artifact. That is the contract, stated plainly: if a value can change after the build, it is not baked client config. This is the browser-side edition of the core rule — if it can change while the process runs, it's state, not config — and it is what makes the shim so small: no fetching, no polling, no cache invalidation, just literals.
 
-### Open decision: build once, promote many
+### Build once, promote many
 
-The constant-per-build contract has a real cost we are not papering over. If your pipeline builds one artifact and promotes it through environments — staging, then prod — an env-varying public value like `API_BASE_URL` is a genuine problem: bake froze whatever the build environment held. Today you have two honest options:
+The constant-per-build contract has a real cost, and it has a decided answer ([ADR 0008](https://github.com/rejifald/tessellum/blob/main/docs/adr/0008-env-varying-public-values.md)). If your pipeline builds one artifact and promotes it through environments — staging, then prod — an env-varying public value like `API_BASE_URL` is a genuine problem: bake froze whatever the build environment held. There are two supported paths, and the trade-off between them is explicit.
 
-- **Re-bake per environment** in the promote step. Only public values are resolved, so no secrets are needed in the pipeline, but you give up bit-identical artifacts.
-- **Keep env-varying values out of the client target** and have the SPA fetch them from your own API at boot. That is userland, and it reintroduces a network read the baked path exists to avoid.
+**The default: re-bake per environment.** Run `tessellum bake` once per environment in the promote step. Only public values are resolved, so no secrets are needed in the pipeline. The cost, stated plainly: you give up bit-identical artifacts. For teams that can rebuild, this is the simplest correct answer and needs no new machinery.
 
-A runtime-injected JSON mode — the shim reading a small, per-environment JSON document deployed next to the artifact instead of inlined literals — is under consideration but not designed. It is an open decision, not a promised feature.
+**The escape: a runtime-injected public document.** For pipelines that must promote one bit-identical artifact, deploy a small **public** JSON document — conventionally `/config.json` — next to the artifact, one per environment. The client fetches it **once at boot** through an async provider entry and pins; every read after that is synchronous.
+
+```ts
+import { tessera, provider } from "tessellum"; // descriptor + wiring data (pure, universal)
+import { bind } from "tessellum/async";        // the async door: provider entries
+import { z } from "zod";
+
+const apiBase = tessera({
+  key: "API_BASE_URL",
+  schema: z.string().url(),
+  exposure: "public", // public, or the bind is an ExposureError
+  sources: [{ provider: "runtime-config" }, { env: "API_BASE_URL" }],
+});
+
+// runtimeConfigProvider is a userland provider that fetches /config.json exactly once
+const cfg = await bind({ apiBase: provider(apiBase, runtimeConfigProvider) }).snapshot();
+// one await at boot; every read after this line is synchronous
+```
+
+```json
+{ "API_BASE_URL": "https://api.example.com", "CDN_ORIGIN": "https://cdn.example.com" }
+```
+
+Four properties make this a sanctioned mode rather than a hole in the model:
+
+- **Values still validate.** The document flows through the same tessera schemas at boot, so a bad deploy is one aggregated `MissingConfigError` — not a mystery at first use.
+- **Secrets are structurally impossible.** The browser entry ships no secret-capable sources, so an `exposure: "secret"` tessera pointed at the document fails with `ExposureError`. The document cannot become a secret channel; that is construction, not policy.
+- **It is an untrusted input boundary.** Injected browser config is revalidated on read and never used for secret-tier values. Whoever can serve `/config.json` can serve a *valid-but-wrong* URL — the same trust you already place in whoever serves your JS bundle.
+- **It never touches `StaleBakeError`.** Runtime-injected tesserae are not in the `client` bake target: never inlined, no baked handle, no identity hash. `StaleBakeError` stays exactly what it is — a build-time `bake --check` gate over baked handles.
+
+Bake emits a **JSON Schema** for the document, so your deploy pipeline can validate `/config.json` *before serving it* rather than discovering the error in someone's browser.
+
+**Variant: HTML injection.** Your server can template the same JSON into a script tag and have the provider read it from the DOM instead of fetching. It saves a request and couples you to a serving layer. Same schemas, same `ExposureError` guard, same untrusted-input rule — one document shape, two transports.
+
+The honest cost of the escape, in one line: it reintroduces a network read on the boot path that the baked path exists to avoid, and it makes boot depend on that document being served. That is why re-baking is the default.
 
 ## Upgrading a dependency after baking: StaleBakeError
 

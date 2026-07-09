@@ -246,8 +246,9 @@ This is also what makes testing boring, in the good way — construct a literal 
 
 ```ts
 import { bind, literal } from "tessellum"; // core bind: literal entries only — nothing ambient
+import { secretLiteral } from "tessellum/testing"; // secret-safe literal(), test-scoped
 
-const cfg = bind([literal(dbUrl, "pg://localhost/test"), literal(poolSize, 2)]);
+const cfg = bind([secretLiteral(dbUrl, "pg://localhost/test"), literal(poolSize, 2)]);
 const pool = createPool(cfg.pick(dbTesserae)); // still validated — a bad literal fails here
 ```
 
@@ -299,9 +300,10 @@ const cfg = await bind(provider(sendgridKey, ssm)).snapshot();
 import { bind } from "tessellum/workers";
 const cfg = bind(sendgridKey, { env });
 
-// tests: a literal entry — validated like any source, zero process.env mutation
-import { bind, literal } from "tessellum";
-const cfg = bind(literal(sendgridKey, "SG.test-key"));
+// tests: a secret literal entry — validated like any source, zero process.env mutation
+import { bind } from "tessellum";
+import { secretLiteral } from "tessellum/testing";
+const cfg = bind(secretLiteral(sendgridKey, "SG.test-key"));
 ```
 
 This split is also the browser-safety story, stated precisely: the universal `tessellum`
@@ -376,8 +378,14 @@ validation):
 App-wide transforms exist, but only as a *restatement* of data the manifest declares for
 the target — `bind(entries, { transform: { prefix: "MYAPP_", rename: { ... } } })` — and
 the wiring digest covers them: a composition root whose wiring diverges from the
-committed lockfile fails closed on client-covered production targets
-(`WiringSkewError`). The precedence law fits in one line: per-entry and group overrides
+committed lockfile fails closed on client-covered targets (`WiringSkewError`). That check
+is **always on** for client-covered targets and cannot be disabled — it keys off bake
+coverage, never `NODE_ENV`. Server targets **opt in** with `bind(entries, { attest: true })`,
+and a bake-covered server bound without it gets a dev-mode warning; the honest consequence is
+that manifest-invisible wiring on a server is possible by default, which is what
+`tessellum bake --check` in CI exists to catch
+([ADR 0009](https://github.com/rejifald/tessellum/blob/main/docs/adr/0009-attestation-strictness.md)).
+The precedence law fits in one line: per-entry and group overrides
 are absolute; `rename[declared]` is terminal (it escapes prefixes); prefixes apply to
 everything else.
 
