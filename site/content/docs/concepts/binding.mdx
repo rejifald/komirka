@@ -200,6 +200,12 @@ cfg.toJSON();       // full dump — secrets redacted by construction
 }
 ```
 
+For a provider-sourced value the record also carries **`version`** — the store's CAS token the
+pin last saw (a SQL row version, an etcd revision) — which the concurrent-writer retry loop
+reads back as `explain(k).version`. It is `undefined` for env, file, and defaulted values, and,
+being metadata rather than the value, it is present even when the value itself is a redacted
+secret.
+
 `toJSON()` is safe to log because redaction is structural, not best-effort. And the guard goes one level deeper: `unwrap()` of a secret returns a `Secret<T>` (assignable to `T`, so no ceremony) that itself refuses serialization, so an SSR payload cannot smuggle one out by accident:
 
 ```ts
