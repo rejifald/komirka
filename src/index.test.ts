@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { KNOB_BRAND } from "./index.js";
+import { TESSERA_BRAND } from "./index.js";
 
-describe("KNOB_BRAND", () => {
-  it("is the structural brand string used to detect knob descriptors", () => {
-    expect(KNOB_BRAND).toBe("$knob");
+describe("TESSERA_BRAND", () => {
+  it("is the structural brand string used to detect tessera descriptors", () => {
+    expect(TESSERA_BRAND).toBe("$tessera");
   });
 });

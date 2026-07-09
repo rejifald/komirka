@@ -3,37 +3,37 @@ title: API reference
 description: The complete provisional API surface — entries, the descriptor, bindings, snapshots, live bindings, identity, testing, and the bake CLI.
 ---
 
-> The package is **komirka** (published on npm as a 0.0.0 placeholder; repo
-> [github.com/rejifald/komirka](https://github.com/rejifald/komirka)). The primitive is
-> **`zerno`** (Ukrainian for a grain — one small unit of config; see
+> The package is **tessellum** (published on npm as a 0.0.0 placeholder; repo
+> [github.com/rejifald/tessellum](https://github.com/rejifald/tessellum)). The primitive is
+> **`tessera`** (one mosaic tile — one config value; see
 > [naming](/docs/reference/decisions)). This page is the canonical contract: every example
 > elsewhere on this site uses only what is defined here.
 
 ## Entry points
 
 ```ts
-import { zerno, defineZernos, refresh, identityOf, keepLastGood, isSecret } from "komirka";
-import { literal, chain, provider } from "komirka";         // universal wiring combinators (pure data)
-import type { Zerno, Secret, Snapshot, LiveBinding, AsyncBinding, Scope, ConfigOf } from "komirka";
+import { tessera, defineTesserae, refresh, identityOf, keepLastGood, isSecret } from "tessellum";
+import { literal, chain, provider } from "tessellum";         // universal wiring combinators (pure data)
+import type { Tessera, Secret, Snapshot, LiveBinding, AsyncBinding, Scope, ConfigOf } from "tessellum";
 
 // pick ONE bind per entrypoint — the entry point is what grants capability:
-import { bind, env, file } from "komirka/node";     // natural defaults = process.env + fs
-// import { bind } from "komirka/workers";          // per-request bag REQUIRED at opts: bind(entries, { env })
-// import { bind } from "komirka/async";            // async-capable (providers); re-exports node combinators
-// import { bind } from "komirka";                  // core: no natural defaults — literal() entries only
+import { bind, env, file } from "tessellum/node";     // natural defaults = process.env + fs
+// import { bind } from "tessellum/workers";          // per-request bag REQUIRED at opts: bind(entries, { env })
+// import { bind } from "tessellum/async";            // async-capable (providers); re-exports node combinators
+// import { bind } from "tessellum";                  // core: no natural defaults — literal() entries only
 
 // tests: a dedicated entry point of pre-certified doubles (see Testing):
-import { secretLiteral, fakeSecretProvider, manualClock, verifyProvider } from "komirka/testing";
+import { secretLiteral, fakeSecretProvider, manualClock, verifyProvider } from "tessellum/testing";
 ```
 
-The core entry (`"komirka"`) is universal — it runs in browsers, Workers, Node, Deno, and
+The core entry (`"tessellum"`) is universal — it runs in browsers, Workers, Node, Deno, and
 Bun, and it ships **no source resolvers**: core `bind` supplies no natural defaults (a
 bare `env`/`file` ref under it is `NoWiringError`; only `literal()` entries resolve).
-`env`/`file` live in `komirka/node`, which imports `node:process`/`node:fs` so bundling it
+`env`/`file` live in `tessellum/node`, which imports `node:process`/`node:fs` so bundling it
 for a browser fails at build. Capability is granted only by the bind entry point — never
 by wiring data, which is pure JSON-representable description.
 
-## `zerno(config)` — the descriptor
+## `tessera(config)` — the descriptor
 
 ```ts
 type Json = string | number | boolean | null | Json[] | { [k: string]: Json };
@@ -44,7 +44,7 @@ type SourceRef =
   | { provider: string; key?: string }  // named provider supplied at bind
   | { literal: Json };                  // inline value
 
-interface ZernoConfig {
+interface TesseraConfig {
   key: string;                          // canonical name            (identity)
   schema?: StandardSchemaV1;            // BYO validator — zod/valibot/arktype
   doc?: string;                         // human documentation       (cosmetic)
@@ -56,18 +56,18 @@ interface ZernoConfig {
   version?: string;                     // schema-identity discriminator
 }
 
-function zerno(config: ZernoConfig): Zerno<T>;
-// T inferred from the schema's OUTPUT: z.coerce.number() -> Zerno<number>.
-// No schema -> Zerno<string>.
+function tessera(config: TesseraConfig): Tessera<T>;
+// T inferred from the schema's OUTPUT: z.coerce.number() -> Tessera<number>.
+// No schema -> Tessera<string>.
 ```
 
 Construction is **inert**: zero I/O, zero validation, zero registration, zero caching. The
-result is frozen, carries a structural `$zerno` brand (never checked via `instanceof`), and
+result is frozen, carries a structural `$tessera` brand (never checked via `instanceof`), and
 round-trips as JSON minus the schema function. A non-JSON value in any field is a
 `TypeError` at construction.
 
 ```ts
-function defineZernos<T extends readonly Zerno[]>(zernos: T): T;
+function defineTesserae<T extends readonly Tessera[]>(tesserae: T): T;
 // const-tuple inference for groups; groups are plain arrays declared near call sites
 ```
 
@@ -75,7 +75,7 @@ function defineZernos<T extends readonly Zerno[]>(zernos: T): T;
 
 ```ts
 // One generic signature per door (TS >= 5.0 `const` type parameters — the floor).
-// Entries: a single zerno/variants group, an array, or a record. Sources: one or many.
+// Entries: a single tessera/variants group, an array, or a record. Sources: one or many.
 // The snapshot mirrors the input shape:
 //   bind(dbUrl, src).value                 : string
 //   bind([dbUrl, poolSize], src).values    : readonly [string, number]  (real frozen tuple)
@@ -83,14 +83,14 @@ function defineZernos<T extends readonly Zerno[]>(zernos: T): T;
 //                                            variants entries yield the match() union)
 // Snapshots are deliberately NOT iterable (positional iterable types are a lie in TS).
 // .value/.values are ABSENT on LiveBinding/AsyncBinding (freshness is a type parameter;
-// widened Zerno<string> fails safe to no-sugar) + runtime LivenessViolationError backstop.
+// widened Tessera<string> fails safe to no-sugar) + runtime LivenessViolationError backstop.
 // The values bag: null-prototype, redacting toJSON + inspect (secrets never dump via
-// JSON.stringify/console.log); spread = unwrap() on every zerno; ReservedKeyError for
+// JSON.stringify/console.log); spread = unwrap() on every tessera; ReservedKeyError for
 // record keys "toJSON" | "then" | "constructor".
 
 // There is NO sources argument: wiring is per entry, and bare entries resolve their
 // DECLARED refs against the bind entry point's natural defaults.
-type Entry = Zerno | VariantsGroup | WiredEntry;
+type Entry = Tessera | VariantsGroup | WiredEntry;
 type BindInput = Entry | readonly Entry[] | Record<string, Entry>;
 
 // EAGER (the default door): validates the listed set NOW — one aggregated MissingConfigError.
@@ -99,20 +99,20 @@ bind.lazy(entries, opts?);       // HALF-LAZY: presence eager, validation deferr
 bind.unchecked(entries, opts?);  // fully deferred — the name carries the warning
 
 // WIRING COMBINATORS (pure JSON-representable data — capability enters only at bind):
-env(zerno, "PLATFORM_NAME")   // REF RENAME: patches the matching declared ref IN PLACE,
-file(zerno, "/etc/app/x")     //   preserving declared fallbacks; UnknownWiringError if the
-provider(zerno, impl, key?)   //   zerno declares no ref of that kind. Name/path REQUIRED.
-chain(zerno, provider(ssm, "/prod/sg"), env("SG_KEY"))
+env(tessera, "PLATFORM_NAME")   // REF RENAME: patches the matching declared ref IN PLACE,
+file(tessera, "/etc/app/x")     //   preserving declared fallbacks; UnknownWiringError if the
+provider(tessera, impl, key?)   //   tessera declares no ref of that kind. Name/path REQUIRED.
+chain(tessera, provider(ssm, "/prod/sg"), env("SG_KEY"))
                              // the ONLY full-replacement spelling — errors list dropped refs;
                              //   links carry color: one async link → AsyncBinding
 env(group, { prefix: "MAILER_", overrides: { password: "SECRET_PW" } })
-                             // group wiring: ONE entry per zerno ever (DuplicateWiringError);
+                             // group wiring: ONE entry per tessera ever (DuplicateWiringError);
                              //   overrides escape the prefix; the discriminant is a member
-literal(zerno, inputValue)    // input-typed; validation RUNS; exposure redaction applies
+literal(tessera, inputValue)    // input-typed; validation RUNS; exposure redaction applies
                              //   (replaces snapshotOf — testing = all-literal entries)
 
 // COLORING: the result type is computed from the entries —
-//   any async entry → AsyncBinding; else any live zerno → LiveBinding; else Snapshot.
+//   any async entry → AsyncBinding; else any live tessera → LiveBinding; else Snapshot.
 // Provider impls declare { id, color: "sync" | "async" } — the id is what the lockfile
 // records; anonymous impls are a bind error on bake-covered targets. There is no load():
 //   const cfg = await bind(entries).snapshot();   // resolve once → sync reads forever
@@ -124,10 +124,10 @@ interface BindOptions {
                                  // (digest-verified → WiringSkewError). LAW: per-entry/group
                                  // overrides are absolute; rename is terminal; prefix for the rest.
   maxStalenessMs?: number;       // live/async poll-on-read staleness budget
-  onInvalid?: (zerno: Zerno, raw: string, issues: Issue[]) => void; // once per (zerno, distinct raw); secrets get { rawDigest, length }
-  onSourceError?: (zerno: Zerno, cause: unknown) => void;           // never routed through onInvalid
-  invalid?: KeepLastGood[];      // keepLastGood(zerno, { maxCoastMs }) — maxCoastMs required
-  unify?: { accept: Zerno; aliases: string[] }[];                  // identity alias table (see Identity)
+  onInvalid?: (tessera: Tessera, raw: string, issues: Issue[]) => void; // once per (tessera, distinct raw); secrets get { rawDigest, length }
+  onSourceError?: (tessera: Tessera, cause: unknown) => void;           // never routed through onInvalid
+  invalid?: KeepLastGood[];      // keepLastGood(tessera, { maxCoastMs }) — maxCoastMs required
+  unify?: { accept: Tessera; aliases: string[] }[];                  // identity alias table (see Identity)
 }
 ```
 
@@ -145,12 +145,12 @@ thrown (validation failures carry `.issues`).
 
 ```ts
 interface Snapshot {
-  unwrap<T>(k: Zerno<T>): T;          // strict read, typed. Three outcomes: value |
-                                     // UnboundZernoError | DescriptorMismatchError
-  safe<T>(k: Zerno<T>): { ok: true; value: T } | { ok: false; error: ConfigReadError };
+  unwrap<T>(k: Tessera<T>): T;          // strict read, typed. Three outcomes: value |
+                                     // UnboundTesseraError | DescriptorMismatchError
+  safe<T>(k: Tessera<T>): { ok: true; value: T } | { ok: false; error: ConfigReadError };
                                      // non-throwing twin of unwrap(); error carries .issues on validation failure
-  pick<T extends readonly Zerno[]>(zernos: T): Scope<ConfigOf<T>>;
-  explain(k: Zerno): Provenance;      // which source, which key resolved; secrets redacted
+  pick<T extends readonly Tessera[]>(tesserae: T): Scope<ConfigOf<T>>;
+  explain(k: Tessera): Provenance;      // which source, which key resolved; secrets redacted
   toJSON(): Json;                    // secrets redacted by construction
 }
 ```
@@ -160,26 +160,26 @@ interface Snapshot {
   reading anything else throws `NotInScopeError`. The `Scope` type is brand-gated — only
   `pick()` produces it, and the root `Snapshot` is deliberately not assignable to it, so
   library signatures force the narrowing.
-- A **secret**-exposure zerno's `T` is `Secret<V>` (`V` = the schema output): assignable to
+- A **secret**-exposure tessera's `T` is `Secret<V>` (`V` = the schema output): assignable to
   `V`, so usable anywhere a `V` is, but it throws `ExposureError` on `JSON.stringify` and is
   non-cloneable (`structuredClone`/`postMessage` throw `DataCloneError`) — closing the
   request-time SSR/RSC payload class no build-time scan can see. Coercion works everywhere;
   call `.reveal(): V` at a boundary that *typechecks* its input (`crypto`,
-  `z.string().parse`), and `isSecret(v)` to detect one. `zerno()` brands the type when
-  `exposure` is secret (the default); public zernos are plain `V`. Full contract:
-  [ADR 0002](https://github.com/rejifald/komirka/blob/main/docs/adr/0002-secret-value-representation.md).
+  `z.string().parse`), and `isSecret(v)` to detect one. `tessera()` brands the type when
+  `exposure` is secret (the default); public tesserae are plain `V`. Full contract:
+  [ADR 0002](https://github.com/rejifald/tessellum/blob/main/docs/adr/0002-secret-value-representation.md).
 
 ## `LiveBinding` — poll-on-read freshness
 
 ```ts
 interface LiveBinding {
-  unwrap<T>(k: Zerno<T>): T;     // re-reads raw (throttled per-source maxStalenessMs);
+  unwrap<T>(k: Tessera<T>): T;     // re-reads raw (throttled per-source maxStalenessMs);
                                 // re-validates ONLY when the raw value changed
-  safe<T>(k: Zerno<T>): { ok: true; value: T } | { ok: false; error: ConfigReadError };
+  safe<T>(k: Tessera<T>): { ok: true; value: T } | { ok: false; error: ConfigReadError };
   snapshot(): Snapshot;         // THE per-request pin; single coherent pass per source
-  epoch(k: Zerno): number;       // monotonic; bumps when an accepted value changes
-  health(): HealthReport;       // per-zerno staleness / last validation error
-  pick(zernos): Scope;           // pick() pins — a Scope is always a consistent cut
+  epoch(k: Tessera): number;       // monotonic; bumps when an accepted value changes
+  health(): HealthReport;       // per-tessera staleness / last validation error
+  pick(tesserae): Scope;           // pick() pins — a Scope is always a consistent cut
 }
 
 async function refresh(b: LiveBinding | Snapshot, opts?: { partial?: "keep-old" }): Promise<Snapshot>;
@@ -193,20 +193,20 @@ process's OS environment never changes, so `freshness: "live"` over an `{ env }`
 draws a dev-mode warning (and on workerd, where env is fixed per deployment, live is a
 no-op).
 
-**When a live re-read turns invalid, current truth wins** (no inherited values): the zerno
-becomes *poisoned* — `snapshot()` never throws wholesale (the bad zerno occupies an error
-slot), `unwrap(thatZerno)` throws `InvalidLiveValueError`, `safe()` is the non-throwing
+**When a live re-read turns invalid, current truth wins** (no inherited values): the tessera
+becomes *poisoned* — `snapshot()` never throws wholesale (the bad tessera occupies an error
+slot), `unwrap(thatTessera)` throws `InvalidLiveValueError`, `safe()` is the non-throwing
 form, and `epoch` bumps on the transition (single clock — epoch consumers use `safe`).
 Invalid is not unavailable: a source that is *down* serves the cached value within
 `maxStalenessMs` (the declared budget), then `SourceUnavailableError`. Keep-last-good is
-a bind-site opt-in — `keepLastGood(zerno, { maxCoastMs })` — for values where availability
-beats freshness; past the coast budget it throws `CoastBudgetExceededError`. A zerno that
+a bind-site opt-in — `keepLastGood(tessera, { maxCoastMs })` — for values where availability
+beats freshness; past the coast budget it throws `CoastBudgetExceededError`. A tessera that
 has never had a valid value throws `NoValidValueError`.
 
 ## Conditional config — `variants()`, `when()`, `rule()`
 
 ```ts
-function variants<D extends Zerno<string>, B>(on: D, branches: B): Variants<D, B>;
+function variants<D extends Tessera<string>, B>(on: D, branches: B): Variants<D, B>;
 // bind resolves the discriminant FIRST (eagerly, in every bind mode), then requires
 // and validates ONLY the active branch. Branches may reuse the same env key with
 // different schema/default — sibling branches never co-bind.
@@ -214,11 +214,11 @@ snapshot.match(email)
 // → { type: "console", values: {} } | { type: "smtp", values: { host: string; … } } | …
 // match() exists on Snapshot and eager bindings only — pin LiveBinding/AsyncBinding first.
 
-function when(cond: { zerno: Zerno; is: "set" | { equals: Json } | { in: Json[] } },
-              members: Record<string, Zerno>): When;
+function when(cond: { tessera: Tessera; is: "set" | { equals: Json } | { in: Json[] } },
+              members: Record<string, Tessera>): When;
 // "set" = a source produced a non-empty raw; defaults do NOT count.
 
-function rule<const D extends readonly Zerno[]>(
+function rule<const D extends readonly Tessera[]>(
   deps: D,
   fn: (values: RuleValues<D>) => Issue[] | void,   // values: positional, aligned to deps;
   meta: { id: string; description: string },        //   an absent OPTIONAL dep is undefined
@@ -228,16 +228,16 @@ function rule<const D extends readonly Zerno[]>(
 // snapshot()/pin — never at unwrap(); promotes deps to eager.
 ```
 
-Discriminants and `when()` condition zernos must be `freshness: "snapshot"`
+Discriminants and `when()` condition tesserae must be `freshness: "snapshot"`
 (`LiveDiscriminantError` at construction and at bind). Relations round-trip as recursive
 tagged JSON (`relv1|` content-addressed); nesting is rejected in v1
 (`VariantsNestingError`). A variants group is client-**ineligible** in v1
 (`VariantsInClientTargetError`). Full semantics: [Conditional config](/docs/concepts/conditional).
 
-## Async bindings and writes — `komirka/async`
+## Async bindings and writes — `tessellum/async`
 
 ```ts
-import { bind } from "komirka/async";
+import { bind } from "tessellum/async";
 
 type ReadSlot =
   | { raw: Json; version?: string; cacheUntil?: number }  // present; cacheUntil = CACHE ceiling:
@@ -283,32 +283,32 @@ interface SecretProvider {
   capabilities?: { versionTokens?; strongRead?; normalizes?; atomicWrites?; consistentReads? };
 }
 // PAIRING (bind + bake, lockfile {implId, class, holdsSecrets} normative): a secret-class
-// provider serves ONLY secret-exposure zernos; a provider-sourced SECRET zerno requires a
+// provider serves ONLY secret-exposure tesserae; a provider-sourced SECRET tessera requires a
 // secret-class provider OR a general provider declaring holdsSecrets: true — which
 // inherits the FULL secret obligation set (error QUARANTINE — provider error objects are
 // never propagated; result reshape; secret conformance profile; echo-verify disabled) and
 // exposure-SEGREGATED batches. env/file-sourced secrets are unaffected. Secret writes
 // verify by version equality > strongRead digest > honest "inconclusive" outcome
-// (per-zerno requireVerifiedWrites refuses). literal() on a secret zerno = SecretLiteralError
+// (per-tessera requireVerifiedWrites refuses). literal() on a secret tessera = SecretLiteralError
 // outside the test entry (secretLiteral()/fakeSecretProvider() live in the testing kit).
 // Variants discriminants must be exposure "public" (DescriptorError at construction).
 
 interface AsyncBinding {
-  ready(): Promise<void>;                        // startup line — one batch read, validates all listed zernos
-  unwrap<T>(k: Zerno<T>): Promise<T>;             // colored read (scripts/jobs)
-  safe<T>(k: Zerno<T>): Promise<{ ok: true; value: T } | { ok: false; error: ConfigReadError }>;
+  ready(): Promise<void>;                        // startup line — one batch read, validates all listed tesserae
+  unwrap<T>(k: Tessera<T>): Promise<T>;             // colored read (scripts/jobs)
+  safe<T>(k: Tessera<T>): Promise<{ ok: true; value: T } | { ok: false; error: ConfigReadError }>;
   snapshot(): Promise<Snapshot>;                 // per-request pin — batch read for expired keys only
-  set<T>(k: Zerno<T>, raw: unknown,               // input-typed: validate raw → write verbatim → cache PARSED → epoch++
+  set<T>(k: Tessera<T>, raw: unknown,               // input-typed: validate raw → write verbatim → cache PARSED → epoch++
          opts?: { ifVersion?: string; verify?: "off" | "report" | "revert" }): Promise<SetResult>;
   setMany(entries): Promise<SetResult[]>;        // post-state validated as a whole; atomic on atomicWrites providers
   refresh(): Promise<Snapshot>;                  // re-reads discriminants + full active branch as one coherent batch
-  epoch(k: Zerno): number;
+  epoch(k: Tessera): number;
   health(): HealthReport;
 }
 
 const cfg = bind({ rateLimit: provider(rateLimit, pg), flags: provider(flags, pg) },
                  { maxStalenessMs: 5_000 });   // async entries → AsyncBinding
-await cfg.ready();        // THE startup line — one batch read, validates all listed zernos
+await cfg.ready();        // THE startup line — one batch read, validates all listed tesserae
 await cfg.unwrap(k);      // colored read (scripts/jobs); request paths pin instead:
 await cfg.snapshot();     // fresh cache + one batch read for expired keys only
 await cfg.set(k, raw, { ifVersion, verify });  // input-typed: validate raw → write raw
@@ -335,7 +335,7 @@ uniform, operator-plane writes. Full walkthrough:
 ## Identity
 
 ```ts
-function identityOf(k: Zerno): string;   // "zernov1:xxh128:…"
+function identityOf(k: Tessera): string;   // "tesserav1:xxh128:…"
 ```
 
 Identity is content-addressed over a **closed field list**:
@@ -343,7 +343,7 @@ Identity is content-addressed over a **closed field list**:
 `freshness` (live-vs-snapshot is behaviorally load-bearing — relations reference
 discriminants by identity), and
 `schemaId` when available (vendor fingerprint, else the explicit `version` field).
-`doc`, examples, and all unknown fields are cosmetic. The preimage is `zernov1|` +
+`doc`, examples, and all unknown fields are cosmetic. The preimage is `tesserav1|` +
 RFC 8785 canonical JSON, hashed with xxh128 — the hash is an index, not a security
 boundary; structural equality of the identity subset is authoritative.
 
@@ -358,7 +358,7 @@ Consequences:
 ## Testing
 
 ```ts
-import { bind, literal } from "komirka";   // core bind — the purest test spelling
+import { bind, literal } from "tessellum";   // core bind — the purest test spelling
 
 const cfg = bind({ db: literal(dbUrl, "postgres://localhost:5432/test") });
 // input-typed, still validated (a bad test value fails loudly), zero process.env mutation
@@ -366,7 +366,7 @@ const cfg = bind({ db: literal(dbUrl, "postgres://localhost:5432/test") });
 // literal-wired secrets in client targets.
 ```
 
-The **testing kit** is a dedicated `komirka/testing` entry point of pre-certified doubles:
+The **testing kit** is a dedicated `tessellum/testing` entry point of pre-certified doubles:
 `secretLiteral()` (the secret-safe `literal()` — test-scoped, so `SecretLiteralError` still
 guards production), `fakeSecretProvider()` (an in-memory `SecretProvider` that already
 passes the conformance kit), `manualClock` (drive `maxStalenessMs` and coast budgets
@@ -377,27 +377,27 @@ declaring a provider's `atomicWrites` / `consistentReads`).
 
 ```ts
 // config.manifest.ts — side-effect-free by contract; bake executes it in a
-// constrained context (zerno construction is inert, so I/O here is detectable)
+// constrained context (tessera construction is inert, so I/O here is detectable)
 export default {
   targets: {
-    client: [...appPublicZernos, ...widgetZernos], // app attestation: deny-by-default
-    server: [...allZernos],
+    client: [...appPublicTesserae, ...widgetTesserae], // app attestation: deny-by-default
+    server: [...allTesserae],
   },
 };
 ```
 
 ```bash
-komirka bake           # generate per-target modules + .env.example + CONFIG.md + manifest.json + leak scan
-komirka bake --check   # CI drift gate
-komirka bake --watch   # dev / HMR (dev output is unscanned — banner says so)
+tessellum bake           # generate per-target modules + .env.example + CONFIG.md + manifest.json + leak scan
+tessellum bake --check   # CI drift gate
+tessellum bake --watch   # dev / HMR (dev output is unscanned — banner says so)
 ```
 
 Per target:
 
 - **client** → `config.baked.ts`: public literal values plus an inlined ~30-line snapshot
   shim that imports nothing at runtime (zero runtime dependency), carries the `Scope`
-  brand and per-zerno identity hashes, and throws `StaleBakeError` on bake/runtime skew.
-  A secret zerno in `targets.client` fails the bake.
+  brand and per-tessera identity hashes, and throws `StaleBakeError` on bake/runtime skew.
+  A secret tessera in `targets.client` fails the bake.
 - **server** (optional wiring) → dynamic computed env access (`process.env[keys[i]]`),
   never static `process.env.KEY` (bundler `define` folds static member expressions into
   literal secrets), and never values.
@@ -408,12 +408,12 @@ Secrets validate at runtime, where the value actually lives. See
 
 ## Error taxonomy
 
-Core: `MissingConfigError` · `UnboundZernoError` · `DescriptorMismatchError` ·
+Core: `MissingConfigError` · `UnboundTesseraError` · `DescriptorMismatchError` ·
 `NotInScopeError` · `ExposureError` ·
 `AsyncValidatorInSyncBindingError` · `NoValidValueError` · `StaleBakeError`.
 Live: `InvalidLiveValueError` · `SourceUnavailableError` · `CoastBudgetExceededError`.
-Variants: `InactiveVariantError` (subclass of `UnboundZernoError`) ·
-`MissingDiscriminantError` · `LiveDiscriminantError` · `AmbiguousZernoMembershipError` ·
+Variants: `InactiveVariantError` (subclass of `UnboundTesseraError`) ·
+`MissingDiscriminantError` · `LiveDiscriminantError` · `AmbiguousTesseraMembershipError` ·
 `VariantsNestingError` · `RuleViolationError` · `VariantsInClientTargetError`.
 Writes: `WriteConflictError` · `NotWritableError` · `WriteFailedError` ·
 `WriteMangledError` · `VerifyCapabilityError` · `ProviderContractError`.
@@ -421,6 +421,6 @@ Shapes & wiring: `LivenessViolationError` · `ReservedKeyError` · `UnknownWirin
 `WiringCollisionError` · `WiringExposureError` · `WiringSkewError` ·
 `DuplicateWiringError` · `NoWiringError`.
 Secret plane: `SecretLiteralError` · `ExposureMigrationError` · `DescriptorError`.
-Every error names the zerno key, the layer, and a next step. For secret zernos, BYO
+Every error names the tessera key, the layer, and a next step. For secret tesserae, BYO
 validator text is untrusted (validators echo received values): reports carry issue counts
 and paths only. Full details: [Error taxonomy](/docs/reference/errors).

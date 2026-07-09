@@ -1,5 +1,5 @@
 {
-  "name": "komirka",
+  "name": "tessellum",
   "version": "0.0.0",
   "description": "Atomic configuration — every config value is an inert, importable, documented, validated descriptor, bound explicitly per runtime. Design phase: this release reserves the name; see the repository for the full design.",
   "keywords": [
@@ -16,10 +16,10 @@
   "author": "Oleksandr Zhuravlov",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/rejifald/komirka.git"
+    "url": "git+https://github.com/rejifald/tessellum.git"
   },
-  "homepage": "https://github.com/rejifald/komirka#readme",
-  "bugs": "https://github.com/rejifald/komirka/issues",
+  "homepage": "https://github.com/rejifald/tessellum#readme",
+  "bugs": "https://github.com/rejifald/tessellum/issues",
   "type": "module",
   "sideEffects": false,
   "engines": {
@@ -33,7 +33,7 @@
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "//": "Future subpath entries (principles.md P5): ./node, ./workers, ./async, ./testing kit, plus a `komirka` bake CLI bin. Add each to tsup `entry` and this `exports` map when its source lands.",
+  "//": "Future subpath entries (principles.md P5): ./node, ./workers, ./async, ./testing kit, plus a `tessellum` bake CLI bin. Add each to tsup `entry` and this `exports` map when its source lands.",
   "exports": {
     ".": {
       "import": {

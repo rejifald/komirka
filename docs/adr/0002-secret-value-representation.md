@@ -3,7 +3,7 @@
 - **Status:** Accepted (2026-07-09; design phase — no code yet)
 - **Date:** 2026-07-09
 - **Deciders:** project author
-- **Constitution touchpoints:** P4 (the zerno's type is the schema's output), P7 (fail-closed
+- **Constitution touchpoints:** P4 (the tessera's type is the schema's output), P7 (fail-closed
   exposure), P9 (`Snapshot` immutability), P17 (honest claims — every guarantee states its
   boundary)
 - **Related docs:** [`concepts/secrets`](../../site/content/docs/concepts/secrets.mdx),
@@ -57,7 +57,7 @@ caught by the compiler if the value is typed `string`. Derived strings (`` `${s}
 3. **Secret-by-default equilibrium.** Because `exposure` defaults to `secret`, *most* reads
    are secret. Any per-read tax pushes teams toward `exposure: "public"` — the worse
    security equilibrium (decisions §8).
-4. **Defense-in-depth, not a single gate.** komirka already runs an AST lint for
+4. **Defense-in-depth, not a single gate.** tessellum already runs an AST lint for
    client-designated env reads; a lint is an available, in-character layer.
 
 ## Considered options
@@ -75,7 +75,7 @@ caught by the compiler if the value is typed `string`. Derived strings (`` `${s}
 ## Decision
 
 Adopt the **hybrid**. `unwrap()`, `.value`/`.values`, and `match()` values of a
-**secret-exposure** zerno return a Proxy-based **`Secret<T>`**.
+**secret-exposure** tessera return a Proxy-based **`Secret<T>`**.
 
 ### Type
 
@@ -84,10 +84,10 @@ type Secret<T> = T & { readonly reveal: () => T; readonly [secretBrand]: true };
 ```
 
 `Secret<T>` is **assignable to `T`** — usable anywhere a `T` is, with no reveal ceremony for
-coercion. `zerno()` brands the descriptor's output type when `exposure` is `secret` (the
-default): `zerno({ schema: z.string() })` is `Zerno<Secret<string>>`; an
-`exposure: "public"` zerno is `Zerno<string>`. Exposure thus rides *inside* the existing
-`Zerno<T>` type parameter — no new type parameter on `Snapshot`/`bind`, and `unwrap<T>` stays
+coercion. `tessera()` brands the descriptor's output type when `exposure` is `secret` (the
+default): `tessera({ schema: z.string() })` is `Tessera<Secret<string>>`; an
+`exposure: "public"` tessera is `Tessera<string>`. Exposure thus rides *inside* the existing
+`Tessera<T>` type parameter — no new type parameter on `Snapshot`/`bind`, and `unwrap<T>` stays
 generic. `.reveal(): T` returns the raw; `isSecret(v)` is the runtime brand check.
 
 ### Runtime (Proxy over the raw)
@@ -143,16 +143,16 @@ footguns statically without taxing the ordinary coercing read.
 - The exposure→brand conditional typing, and `Secret<T>`-assignable-to-`T`, are TypeScript
   claims — **validated** by a standalone `tsc --strict` type-spike (#18); to be re-committed as
   an enforced `*.test-d.ts` alongside the real types. (The spike also flagged that a bare
-  `Zerno` in a *constraint* position defaults to `snapshot` and must be written
-  `Zerno<any, any>`.)
+  `Tessera` in a *constraint* position defaults to `snapshot` and must be written
+  `Tessera<any, any>`.)
 
 **Implementation notes**
 
-- `unwrap()` must **memoize one Proxy per `(binding, zerno)`** so value identity is stable
+- `unwrap()` must **memoize one Proxy per `(binding, tessera)`** so value identity is stable
   (`===`, Map/Set keys).
 - The `has` trap must box the raw (`p in Object(raw)`), or a validator probing
   `"constructor" in value` (real zod v4) throws.
 - The `util.inspect` custom hook is cosmetic polish; redaction already holds via empty
   `ownKeys`.
-- Only secret-exposure zernos are wrapped; public zernos return the raw `T`. `literal()` /
+- Only secret-exposure tesserae are wrapped; public tesserae return the raw `T`. `literal()` /
   `secretLiteral()` and provider-sourced secrets all funnel through the same wrapper at read.

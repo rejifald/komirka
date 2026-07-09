@@ -2,7 +2,7 @@ import { defineConfig } from "tsup";
 
 // Dual ESM + CJS output with per-format type declarations, so consumers on any
 // runtime resolve the right thing (principles.md: browser-first universal core,
-// dual-package hazard handled structurally via the `$knob` brand, not `instanceof`).
+// dual-package hazard handled structurally via the `$tessera` brand, not `instanceof`).
 //
 // Future subpath entries (principles.md P5) — add each to `entry` when its source
 // lands: src/node.ts, src/workers.ts, src/async.ts, src/testing.ts, plus a `bake`

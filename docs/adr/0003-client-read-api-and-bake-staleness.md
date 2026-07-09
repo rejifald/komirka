@@ -22,15 +22,15 @@ key:
 
 ```ts
 import { config } from "./config.baked";
-import { apiBaseUrl } from "./config.zernos"; // <-- imports zod + every schema
+import { apiBaseUrl } from "./config.tesserae"; // <-- imports zod + every schema
 config.unwrap(apiBaseUrl);
 ```
 
-`config.zernos` imports `zod` and constructs schemas, and a bundler cannot tree-shake a
+`config.tesserae` imports `zod` and constructs schemas, and a bundler cannot tree-shake a
 schema that is a live property of an object passed to `unwrap()`. So the flagship
 "zero runtime dependency" client — the whole point of bake removing "the real bundle
 payload" (principles §1) — shipped `zod` and every client schema anyway. The same import
-also **violates the design's own client-graph lint** ("no `*.zernos.ts` reachable from a
+also **violates the design's own client-graph lint** ("no `*.tesserae.ts` reachable from a
 client entry", bake defense stack / conditional.mdx cost note).
 
 An empirical bundle test (esbuild `--bundle --minify`, `scratchpad/bundle/`) quantified it:
@@ -50,9 +50,9 @@ schema. You cannot have both a runtime staleness net *and* a schema-free client 
 
 **Option 1 — baked handles + build-time staleness.**
 
-1. **Bake emits a per-zerno handle.** For each client-target zerno, the generated
+1. **Bake emits a per-tessera handle.** For each client-target tessera, the generated
    `config.baked` module exports a lightweight **handle** — brand + `key` + identity hash +
-   a phantom `Zerno<V>` type, **no schema** — alongside the public literal value and the
+   a phantom `Tessera<V>` type, **no schema** — alongside the public literal value and the
    ~30-line shim. Client code reads through the baked module only:
 
    ```ts
@@ -61,8 +61,8 @@ schema. You cannot have both a runtime staleness net *and* a schema-free client 
    ```
 
    It never imports the real descriptor. Types still flow through `import type` (erased at
-   build, no runtime cost), so a library API typed `Scope<ConfigOf<typeof widgetZernos>>`
-   keeps working. The existing **client-graph lint** ("no `*.zernos.ts` reachable from a
+   build, no runtime cost), so a library API typed `Scope<ConfigOf<typeof widgetTesserae>>`
+   keeps working. The existing **client-graph lint** ("no `*.tesserae.ts` reachable from a
    client entry") is what enforces handle-only imports — Option 1 is what makes that lint
    satisfiable.
 
@@ -108,7 +108,7 @@ schema. You cannot have both a runtime staleness net *and* a schema-free client 
 
 - Handles carry the identity hash for the opt-in runtime check and for `explain()`
   provenance; the shim still carries the `Scope` brand.
-- Secret zernos never get a client handle — bake never resolves secret values, so nothing
+- Secret tesserae never get a client handle — bake never resolves secret values, so nothing
   secret is emitted (P14, unchanged).
 - Test code and server code may still import real descriptors (they are not the client
   bundle); the lint scopes to client-reachable graphs only.

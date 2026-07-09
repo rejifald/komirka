@@ -5,15 +5,15 @@ description: The honest undecided list — every open design question, its optio
 
 A design document that hides its open questions is marketing. Everything else on this site reads as contract; this page is the delta between contract and certainty. Each entry states the question, the options on the table, and the current lean. A lean is not a promise — if you have production experience that bears on any of these, that is exactly the feedback this phase exists to collect.
 
-Once a question is settled with a full decision record, its entry graduates to a one-line pointer to an [ADR](https://github.com/rejifald/komirka/tree/main/docs/adr) (see §10 for the first) — the ADR carries the context, options, and consequences; this page stays the map of decided-with-a-record versus still-open. This registry is the single source of truth: `principles.md` §6 now points here instead of keeping a second copy of the list.
+Once a question is settled with a full decision record, its entry graduates to a one-line pointer to an [ADR](https://github.com/rejifald/tessellum/tree/main/docs/adr) (see §10 for the first) — the ADR carries the context, options, and consequences; this page stays the map of decided-with-a-record versus still-open. This registry is the single source of truth: `principles.md` §6 now points here instead of keeping a second copy of the list.
 
 | # | Question | Current lean |
 | --- | --- | --- |
-| 1 | Is `default` part of a zerno's identity hash? | Yes — keep it in |
+| 1 | Is `default` part of a tessera's identity hash? | Yes — keep it in |
 | 2 | Env-varying public values in build-once SPAs | Bless a runtime-injected JSON mode; shape TBD |
 | 3 | Ship the Node file source in v0.1? | Yes |
 | 4 | Server targets: zero-runtime-dep vs runtime validation | Two-tier: bake what is build-constant, runtime-bind the rest |
-| 5 | Final naming | Decided: package `komirka`, primitive `zerno` |
+| 5 | Final naming | Decided: package `tessellum`, primitive `tessera` |
 | 6 | v0.1 proof gate | Ship only if the demo clearly wins |
 
 ## 1. Is `default` part of the identity hash?
@@ -28,7 +28,7 @@ The lean is A: a loud error beats a silent wrong value. The escape hatch already
 
 ```ts
 // @acme/mailer v1.4.0
-const retries = zerno({
+const retries = tessera({
   key: "MAILER_RETRIES",
   schema: z.coerce.number().int(),
   exposure: "public",
@@ -36,7 +36,7 @@ const retries = zerno({
 });
 
 // @acme/mailer v1.5.0 — only the default changed
-const retries = zerno({
+const retries = tessera({
   key: "MAILER_RETRIES",
   schema: z.coerce.number().int(),
   exposure: "public",
@@ -48,11 +48,11 @@ With `default` in the hash, an app that binds one copy and reads through the oth
 
 ```text
 DescriptorMismatchError: "MAILER_RETRIES" is bound under a different descriptor.
-  bound:    default: 3   (zernov1:xxh128:9f2a…)
-  reading:  default: 5   (zernov1:xxh128:c41b…)
+  bound:    default: 3   (tesserav1:xxh128:9f2a…)
+  reading:  default: 5   (tesserav1:xxh128:c41b…)
   diff: default
   To accept the newer descriptor at your composition root:
-    bind(zernos, { unify: [{ accept: retries, aliases: ["zernov1:xxh128:9f2a…"] }] })
+    bind(tesserae, { unify: [{ accept: retries, aliases: ["tesserav1:xxh128:9f2a…"] }] })
 ```
 
 The residual cost lands on library authors: a default bump is an identity-breaking change and should be released like one. `unify` resolutions always re-validate with the caller's schema, so accepting the newer descriptor never downgrades validation. If real-world friction shows this generating more `unify` boilerplate than it prevents bugs, option B gets a second hearing — but the burden of proof sits on the silent side.
@@ -63,9 +63,9 @@ This is the predicted number-one GitHub issue, so it gets named before anyone fi
 
 The bake pipeline inlines public literal values into the client artifact at build time. For secrets that is a feature — bake never resolves secret values, which is what preserves build-once-deploy-many for the server side. But *public* values are frozen at bake time, and teams that promote one immutable artifact from staging to production need `API_BASE_URL` to differ per environment without a rebuild.
 
-**Option A — do nothing; document rebuild-per-environment.** Cheapest and honest (`komirka bake` once per environment in the CI matrix). It also angers precisely the teams with the strictest promotion pipelines — the ones most likely to care about this library.
+**Option A — do nothing; document rebuild-per-environment.** Cheapest and honest (`tessellum bake` once per environment in the CI matrix). It also angers precisely the teams with the strictest promotion pipelines — the ones most likely to care about this library.
 
-**Option B — a runtime-injected JSON mode (lean).** The deploy environment serves a small public document, conventionally `/config.json`; the client fetches it once at boot through an async provider entry and pins (`await bind(entries).snapshot()`), so every read after boot is sync. Values still validate against the same zerno schemas. The browser entry still contains no secret-capable sources, so a secret zerno pointed at that document fails with `ExposureError` — the document cannot become a side-channel for secrets.
+**Option B — a runtime-injected JSON mode (lean).** The deploy environment serves a small public document, conventionally `/config.json`; the client fetches it once at boot through an async provider entry and pins (`await bind(entries).snapshot()`), so every read after boot is sync. Values still validate against the same tessera schemas. The browser entry still contains no secret-capable sources, so a secret tessera pointed at that document fails with `ExposureError` — the document cannot become a side-channel for secrets.
 
 **Option C — HTML injection.** The server templates the same JSON into a script tag; saves a request, couples you to a serving layer. Probably a documented variant of B rather than a separate mode.
 
@@ -73,7 +73,7 @@ The undecided part is the shape, not the need. In the current contract the piece
 
 ```ts
 // candidate recipe — sketch, not contract; the blessed shape is TBD
-const apiBase = zerno({
+const apiBase = tessera({
   key: "API_BASE_URL",
   schema: z.string().url(),
   exposure: "public",
@@ -101,10 +101,10 @@ Open shape questions: does core bless a first-class browser source or only docum
 The argument for shipping is that the file source is what makes `freshness: "live"` real. Live env vars are physically impossible on Node — a running process's OS environment never changes. Files are the one re-readable source with a mainstream deployment story: Kubernetes volume-mounted ConfigMaps update in place via the `..data` symlink swap (`subPath` mounts never update). Without a file source, `LiveBinding`, `epoch()`, `refresh()`, `health()`, and keep-last-good are paper features that no one can run — and a v0.1 that documents machinery it cannot demonstrate fails the honesty bar this project set for itself.
 
 ```ts
-import { zerno } from "komirka";
-import { bind } from "komirka/node";
+import { tessera } from "tessellum";
+import { bind } from "tessellum/node";
 
-const rateLimit = zerno({
+const rateLimit = tessera({
   key: "RATE_LIMIT",
   schema: z.coerce.number().int().positive(),
   exposure: "public",
@@ -112,7 +112,7 @@ const rateLimit = zerno({
   freshness: "live",
 });
 
-const live = bind(rateLimit); // : LiveBinding — the declared { file } ref resolves via komirka/node
+const live = bind(rateLimit); // : LiveBinding — the declared { file } ref resolves via tessellum/node
 
 // per-request pin — the documented pattern
 app.use((req, res, next) => {
@@ -121,11 +121,11 @@ app.use((req, res, next) => {
 });
 
 app.get("/healthz", (req, res) => {
-  res.json(live.health()); // staleness + last validation error, per zerno
+  res.json(live.health()); // staleness + last validation error, per tessera
 });
 ```
 
-The argument against is scope: poll-on-read throttling (`maxStalenessMs`), single-coherent-pass reads so multi-zerno files never tear, keep-last-good plus `onInvalid`, and filesystem quirks across platforms are a real test surface for a first release. The lean stays yes — the file source is the difference between "live is designed" and "live exists."
+The argument against is scope: poll-on-read throttling (`maxStalenessMs`), single-coherent-pass reads so multi-tessera files never tear, keep-last-good plus `onInvalid`, and filesystem quirks across platforms are a real test surface for a first release. The lean stays yes — the file source is the difference between "live is designed" and "live exists."
 
 ## 4. Server bake targets: zero-runtime-dep or runtime validation?
 
@@ -141,10 +141,10 @@ The lean is a two-tier story rather than pretending one mechanism covers both:
 ```ts
 // Tier 2: the library is a real dependency here, and that is the point —
 // secrets validate at runtime, where the value actually lives
-import { bind } from "komirka";
-import { serverZernos } from "./config/zernos";
+import { bind } from "tessellum";
+import { serverTesserae } from "./config/tesserae";
 
-const cfg = bind(serverZernos);
+const cfg = bind(serverTesserae);
 // anything missing or invalid dies here, at boot, in ONE aggregated
 // MissingConfigError listing every offender — not request by request
 ```
@@ -157,7 +157,7 @@ The open sub-question is what the *optional* baked server wiring module checks. 
 groups instead. Nesting semantics (transitive activity propagation, chained
 `InactiveVariantError`, condition algebra) are the hard 20% and nobody has presented the
 real case yet. **But the relation wire format is recursive and tagged from day one** —
-entries are a zerno descriptor, a `$when` node, or a `$variants` node — so enabling nesting
+entries are a tessera descriptor, a `$when` node, or a `$variants` node — so enabling nesting
 later is a feature flag, not a format break. Non-negotiable either way: transitive
 inactivity is specced now, so a default can never resurrect a subtree whose ancestor
 branch is inactive.
@@ -177,7 +177,7 @@ exactly which branch the client was frozen to.
 Not in v1. Expired reads block on a per-key single-flight re-read, so `maxStalenessMs`
 stays an honest hard bound — serve-stale-while-revalidating would make the name a lie.
 If demand materializes it arrives as a loudly-named opt-in, never a silent default.
-Related deferral: `cfg.update(zerno, fn, { retries })` read-modify-write sugar — it is a
+Related deferral: `cfg.update(tessera, fn, { retries })` read-modify-write sugar — it is a
 five-line userland loop over `get`/`set`/`WriteConflictError`; core adds it only if
 demand proves out.
 
@@ -194,11 +194,11 @@ revert-of-many has an answer for partially superseded batches.
 The `.values` view ships with **raw values plus a hardened bag** (null prototype,
 redacting `toJSON`, redacting Node inspect hook — so `JSON.stringify` and `console.log`
 never dump secrets; spread is the documented residual, equivalent to calling `unwrap()` on
-every zerno). Two alternatives were considered and are recorded as revisitable:
-`Redacted<T>` brands for secret zernos (safest, but under secret-by-default exposure it
+every tessera). Two alternatives were considered and are recorded as revisitable:
+`Redacted<T>` brands for secret tesserae (safest, but under secret-by-default exposure it
 guts the flagship destructure and pressures everyone toward `exposure: "public"` — a
-worse equilibrium), and omitting secret zernos from `.values` entirely (type-level
-omission requires exposure as a type parameter, and a type-widened zerno would then
+worse equilibrium), and omitting secret tesserae from `.values` entirely (type-level
+omission requires exposure as a type parameter, and a type-widened tessera would then
 silently *vanish* from the record — a stranger confusion than the spread residual).
 The AST lint rule (no `cfg.values` as a function argument or spread in client/library
 code) is the misuse backstop.
@@ -217,11 +217,11 @@ parameters carry the tuple inference the call shapes depend on).
 
 ## 10. Recently resolved
 
-- **Secret value representation** — resolved in **[ADR 0002](https://github.com/rejifald/komirka/blob/main/docs/adr/0002-secret-value-representation.md)**: `unwrap()` of a secret returns a Proxy-based `Secret<T>` — **assignable to `T`** (no `.reveal()` ceremony for coercion) — that throws on `JSON.stringify` and is non-cloneable (`structuredClone`/`postMessage` throw `DataCloneError`), redacts in logs, and offers `.reveal()` for the typecheck sinks (`crypto`, `z.string().parse`), those flagged by a lint rather than the type. A spike (real zod v4 + Node crypto) proved the bare-`string`-that-throws claim unrealizable and characterized boxed-`String` (porous — no `structuredClone` guard, spread leak) vs `Proxy` (complete). The **hybrid** (string-assignable brand + targeted lint) was chosen over a `Redacted<T>` tax (§8) and an honest-but-guardless primitive. Resolves #19; supersedes the earlier claim.
-- **Client read API & bake staleness** — resolved in **[ADR 0003](https://github.com/rejifald/komirka/blob/main/docs/adr/0003-client-read-api-and-bake-staleness.md)**: bake emits schema-free per-zerno **handles**; client code imports handles from `config.baked` (never the real descriptor), proven to drop `zod` from the browser bundle (~0.4 KB gzip vs ~65 KB with the descriptor). `StaleBakeError` becomes a **build-time** `bake --check` guarantee (load-bearing) in prod, plus an automatic **dev-mode** runtime check that is stripped from prod builds (proven: dynamic-import prod bundle 414 B gzip, zod absent; a *static* descriptor import re-ships ~65 KB of zod). Resolves #20; also fixes the browser-guide-vs-client-graph-lint contradiction.
-- **Zerno inheritance & derivation** — resolved in **[ADR 0001](https://github.com/rejifald/komirka/blob/main/docs/adr/0001-zerno-inheritance.md)**: a declared, identity-bearing `inherit(target, base, ops?)` relation (not a source ref, not deployment wiring); data-only transforms (never a function); layered validation (the base's own declaration, then the target's); loud-by-default with a bind-site `useDefault` opt-in; single-base and transitive, multiple inheritance deferred. The ADR is the full record — this registry only points to it. Deferred spin-off: a `latch` freshness mode ([#14](https://github.com/rejifald/komirka/issues/14)).
+- **Secret value representation** — resolved in **[ADR 0002](https://github.com/rejifald/tessellum/blob/main/docs/adr/0002-secret-value-representation.md)**: `unwrap()` of a secret returns a Proxy-based `Secret<T>` — **assignable to `T`** (no `.reveal()` ceremony for coercion) — that throws on `JSON.stringify` and is non-cloneable (`structuredClone`/`postMessage` throw `DataCloneError`), redacts in logs, and offers `.reveal()` for the typecheck sinks (`crypto`, `z.string().parse`), those flagged by a lint rather than the type. A spike (real zod v4 + Node crypto) proved the bare-`string`-that-throws claim unrealizable and characterized boxed-`String` (porous — no `structuredClone` guard, spread leak) vs `Proxy` (complete). The **hybrid** (string-assignable brand + targeted lint) was chosen over a `Redacted<T>` tax (§8) and an honest-but-guardless primitive. Resolves #19; supersedes the earlier claim.
+- **Client read API & bake staleness** — resolved in **[ADR 0003](https://github.com/rejifald/tessellum/blob/main/docs/adr/0003-client-read-api-and-bake-staleness.md)**: bake emits schema-free per-tessera **handles**; client code imports handles from `config.baked` (never the real descriptor), proven to drop `zod` from the browser bundle (~0.4 KB gzip vs ~65 KB with the descriptor). `StaleBakeError` becomes a **build-time** `bake --check` guarantee (load-bearing) in prod, plus an automatic **dev-mode** runtime check that is stripped from prod builds (proven: dynamic-import prod bundle 414 B gzip, zod absent; a *static* descriptor import re-ships ~65 KB of zod). Resolves #20; also fixes the browser-guide-vs-client-graph-lint contradiction.
+- **Tessera inheritance & derivation** — resolved in **[ADR 0001](https://github.com/rejifald/tessellum/blob/main/docs/adr/0001-tessera-inheritance.md)**: a declared, identity-bearing `inherit(target, base, ops?)` relation (not a source ref, not deployment wiring); data-only transforms (never a function); layered validation (the base's own declaration, then the target's); loud-by-default with a bind-site `useDefault` opt-in; single-base and transitive, multiple inheritance deferred. The ADR is the full record — this registry only points to it. Deferred spin-off: a `latch` freshness mode ([#14](https://github.com/rejifald/tessellum/issues/14)).
 - **Live-invalid default** — resolved by author decision: **current truth wins** (poisoned
-  slots, `InvalidLiveValueError`, `safe`), with `keepLastGood(zerno, { maxCoastMs })` as
+  slots, `InvalidLiveValueError`, `safe`), with `keepLastGood(tessera, { maxCoastMs })` as
   the explicit bind-site opt-in. See [Freshness](/docs/concepts/freshness).
 - **`freshness` in the identity hash** — resolved: **yes**. Live-vs-snapshot is
   behaviorally load-bearing; relations reference discriminants by identity, and a live
@@ -245,7 +245,7 @@ parameters carry the tuple inference the call shapes depend on).
   pure cache ceiling (leased/dynamic credentials are a written non-goal),
   `SecretLiteralError` gating `literal()` on secrets outside tests, and public-only
   discriminants. Secret write verification: version equality > `strongRead` digest >
-  honest `"inconclusive"` outcome (per-zerno `requireVerifiedWrites` refuses). Open:
+  honest `"inconclusive"` outcome (per-tessera `requireVerifiedWrites` refuses). Open:
   extending `read()` to version-pinned keys is deferred until conformance data across
   real stores shows the `"superseded"` outcome is insufficient.
 - **Batch-only provider contract** — resolved (author proposal): `read`/`readMany` and
@@ -260,7 +260,7 @@ parameters carry the tuple inference the call shapes depend on).
   Single-key providers get a documented 3-line recipe, deliberately not an exported
   helper (a shipped adapter becomes a shadow second contract form).
 - **Wiring (supersedes the sources argument AND `rebind`)** — resolved: per-entry
-  combinators — `env(zerno, "NAME")` renames a declared ref in place preserving fallbacks,
+  combinators — `env(tessera, "NAME")` renames a declared ref in place preserving fallbacks,
   `chain()` is the only full replacement, groups wire as one entry with
   `{ prefix, overrides }`, bare entries resolve declared refs against the bind entry
   point's natural defaults. Combinators are pure JSON data (provider impls declare
@@ -274,26 +274,26 @@ parameters carry the tuple inference the call shapes depend on).
 
 Both names are settled.
 
-**Package: `komirka`** (комірка — Ukrainian for a memory/spreadsheet cell), published on npm as a 0.0.0 placeholder; the repo lives at github.com/rejifald/komirka.
+**Package: `tessellum`** — from Latin *tessella*, a small mosaic tile. The package is the *tessellation*: many small config tiles composing one complete surface, no gaps and no overlaps. Published on npm as a 0.0.0 placeholder; the repo lives at github.com/rejifald/tessellum.
 
-**Primitive: `zerno`** (зерно — Ukrainian for a grain/seed: one small unit of config). It carries through the whole surface: the group helper `defineZernos`, the type `Zerno<T>`, the `$zerno` structural brand, and the `zernov1:` identity-hash prefix. It reads well as the unit, is search-unique (greppable — the deciding criterion), has no reactivity connotation, and stays on-brand with the package's Ukrainian metaphor: grains kept in a memory-cell.
+**Primitive: `tessera`** — one mosaic tile, and in Rome a *token*: the *tessera militaris* carried the camp watchword, and the *tessera hospitalis* was split between two parties so that rejoining the halves proved a bond of trust. One config value is one tessera: a single tile in the surface that carries its own identity and exposure. It threads through the whole API — the group helper `defineTesserae`, the type `Tessera<T>`, the `$tessera` structural brand, and the `tesserav1:` identity-hash prefix. (Plural: `tesserae`, the established English plural, over the anglicized `tesseras`.)
 
-Why not keep `knob`: a knob is something you *turn*, which quietly promises the runtime tuning/reactivity this library refuses. An inert descriptor you never adjust should not borrow a control-panel verb. **atom** was rejected for the same reason and then some — jotai and recoil own it, and it implies subscription and re-render; there is no watch or subscribe API here, by design.
+**Why these, and why the change.** The names replaced an earlier Ukrainian pair — `komirka` (комірка, a memory/spreadsheet cell) and `zerno` (зерно, a grain), chosen 2026-07-05 — on 2026-07-09. The trade was deliberate: the Ukrainian names carried real cultural resonance but were opaque to an English-speaking audience, and a primitive you type a hundred times a day earns its keep by being *decodable*. *Tessellation* and *tessera* are half-known English already (mosaics, 3-D graphics, board-game tokens), the tile-composing-a-surface metaphor maps cleanly onto atomic config, and `tessera`'s token/trust sense reinforces the secrets-and-identity model for free. The honest cost — recorded here because this page records costs: `tessera` is a real word, so it greps a shade noisier than the search-unique `zerno` it replaced, the very criterion that decided the earlier round. We knowingly traded a little greppability for readability. `komirka@0.0.0` stays a parked npm placeholder and the old repo URL redirects.
 
-Runner-up and also-rans, kept for the record: **`grain`** was the closest contender (same metaphor, self-documenting in English) and lost only on greppability and brand cohesion. Others considered: `slot` / `cell` (storage), `panel` / `dial` / `setpoint` (control-room), `notions` / `bobbin` / `loom` / `weft` (sewing — pairs with the Stitch ecosystem), `mote` / `filament` / `quark` (smallest-unit), `confit` / `confetti` (wordplay).
+**Rejected framing: anything you *turn*.** A `knob` promises the runtime tuning this library refuses; **atom** was out for the same reason and because jotai and recoil own it, implying subscription and re-render. There is no watch or subscribe API here, by design — and a tessera is *placed*, not adjusted, so the metaphor keeps the primitive honestly inert. (Earlier also-rans from the Ukrainian round — `grain`, `slot`, `cell`, `bobbin`, `loom`, `weft`, `mote`, `quark` — are superseded; the lineage is recorded above.)
 
 ## 12. The v0.1 proof gate
 
-The last open decision is whether to ship at all, and it has a pass/fail procedure attached. Before a v0.1 tag exists, one public demo repository must show a **single zernos file, consumed unchanged** — never forked per runtime — by:
+The last open decision is whether to ship at all, and it has a pass/fail procedure attached. Before a v0.1 tag exists, one public demo repository must show a **single tesserae file, consumed unchanged** — never forked per runtime — by:
 
-1. **A Node server** — runtime `bind` from `komirka/node` over bare entries, plus one `freshness: "live"` file-ref zerno proving poisoning, `keepLastGood`, and `epoch()` against an edited file.
-2. **A Cloudflare Worker** — per-request `bind(entries, { env })` from `komirka/workers`: the case import-time validators structurally cannot handle, demonstrated rather than asserted.
-3. **A Vite client** — a baked target running on the zero-runtime-dep shim, with `komirka bake --check` green in CI.
-4. **A planted leak** — a hand-rolled high-entropy string smuggled into client code, and `komirka bake --check` failing the build via the allowlist scan. The gate is not that the scan exists; it is that it visibly catches the plant.
+1. **A Node server** — runtime `bind` from `tessellum/node` over bare entries, plus one `freshness: "live"` file-ref tessera proving poisoning, `keepLastGood`, and `epoch()` against an edited file.
+2. **A Cloudflare Worker** — per-request `bind(entries, { env })` from `tessellum/workers`: the case import-time validators structurally cannot handle, demonstrated rather than asserted.
+3. **A Vite client** — a baked target running on the zero-runtime-dep shim, with `tessellum bake --check` green in CI.
+4. **A planted leak** — a hand-rolled high-entropy string smuggled into client code, and `tessellum bake --check` failing the build via the allowlist scan. The gate is not that the scan exists; it is that it visibly catches the plant.
 5. **A vitest suite with zero `process.env` mutation** — every test constructs its own fixture and passes it into factories:
 
 ```ts
-import { bind, literal } from "komirka";
+import { bind, literal } from "tessellum";
 
 const cfg = bind([
   literal(apiBase, "https://test.local"),

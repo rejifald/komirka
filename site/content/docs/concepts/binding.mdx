@@ -5,49 +5,49 @@ description: Values exist only inside explicit bindings — per-entry wiring com
 
 ## Values exist only inside bindings
 
-A `Zerno<T>` is an inert descriptor. Importing it costs nothing, reads nothing, validates nothing. The value comes into existence in exactly one place: a **binding**, where you hand a set of zernos and a set of source implementations to `bind()`.
+A `Tessera<T>` is an inert descriptor. Importing it costs nothing, reads nothing, validates nothing. The value comes into existence in exactly one place: a **binding**, where you hand a set of tesserae and a set of source implementations to `bind()`.
 
 ```ts
 import { z } from "zod";
-import { zerno, defineZernos } from "komirka";
-import { bind } from "komirka/node";
+import { tessera, defineTesserae } from "tessellum";
+import { bind } from "tessellum/node";
 
-export const dbUrl = zerno({
+export const dbUrl = tessera({
   key: "DATABASE_URL",
   schema: z.string().url(),
   doc: "Primary Postgres connection string",
   // exposure defaults to "secret" — fail closed
 });
 
-export const poolSize = zerno({
+export const poolSize = tessera({
   key: "DB_POOL_SIZE",
   schema: z.coerce.number().int().min(1),
   exposure: "public",
   default: 10,
 });
 
-export const dbZernos = defineZernos([dbUrl, poolSize]);
+export const dbTesserae = defineTesserae([dbUrl, poolSize]);
 
 // the composition root — the only place sources are actually read
-const cfg = bind(dbZernos); // bare entries resolve their declared refs against
+const cfg = bind(dbTesserae); // bare entries resolve their declared refs against
                            // this entry point's natural defaults: process.env + fs
 
 cfg.unwrap(dbUrl);    // string — sync, typed from the schema's output
 cfg.unwrap(poolSize); // number
 ```
 
-There is no ambient binding to fall back to: no module-scope cache, no global registry, no value stashed on the zerno object itself. Asking a snapshot for a zerno it never bound is a named error, never a silent default:
+There is no ambient binding to fall back to: no module-scope cache, no global registry, no value stashed on the tessera object itself. Asking a snapshot for a tessera it never bound is a named error, never a silent default:
 
 ```ts
 const cfg = bind([dbUrl]);
 
 cfg.unwrap(poolSize);
-// UnboundZernoError: DB_POOL_SIZE is not in the set bound by this snapshot.
+// UnboundTesseraError: DB_POOL_SIZE is not in the set bound by this snapshot.
 //   Bound here: DATABASE_URL
 //   Fix: add DB_POOL_SIZE to the bind() call that created this snapshot.
 ```
 
-`unwrap()` has a three-way contract: a hit, `UnboundZernoError`, or `DescriptorMismatchError` when the same key was bound under a *different* descriptor. The mismatch error carries both canonical descriptors, a field-level diff, and a paste-able `unify` snippet — see the identity page for that story.
+`unwrap()` has a three-way contract: a hit, `UnboundTesseraError`, or `DescriptorMismatchError` when the same key was bound under a *different* descriptor. The mismatch error carries both canonical descriptors, a field-level diff, and a paste-able `unify` snippet — see the identity page for that story.
 
 ## Call shapes: the snapshot mirrors what you bind
 
@@ -87,14 +87,14 @@ Rules that keep the sugar honest:
   throwing position.
 - **Live and async bindings have no `.value`/`.values`** — destructuring would silently
   freeze liveness. Pin first: `live.snapshot().values`. This is enforced in the type
-  (freshness is a type parameter; a type-widened `Zerno<string>` fails *safe*, losing the
+  (freshness is a type parameter; a type-widened `Tessera<string>` fails *safe*, losing the
   sugar rather than gaining a frozen value) and backstopped at runtime
   (`LivenessViolationError`).
 - **The values bag is guarded.** It is a null-prototype object whose `toJSON` applies the
   same secret redaction as `Snapshot.toJSON`, with a redacting Node inspect hook — so
   `JSON.stringify(cfg.values)` and `console.log(cfg.values)` never dump secrets. Spreading
   it (`{ ...cfg.values }`) copies raw values into an unguarded plain object: treat spread
-  as calling `unwrap()` on every zerno. Record keys `toJSON`, `then`, and `constructor` are
+  as calling `unwrap()` on every tessera. Record keys `toJSON`, `then`, and `constructor` are
   rejected at bind (`ReservedKeyError`).
 - `.values` is a **read view at the composition root** — the handoff type for libraries
   remains a `pick()`ed `Scope` (which carries the same `.values` view, so passing the
@@ -109,7 +109,7 @@ const cfg = bind([dbUrl, poolSize, smtpPassword]);
 ```
 
 ```text
-MissingConfigError: 3 of 3 zernos failed to bind
+MissingConfigError: 3 of 3 tesserae failed to bind
 
   ✖ DATABASE_URL    missing — no source produced a value
                     tried: env DATABASE_URL
@@ -120,7 +120,7 @@ MissingConfigError: 3 of 3 zernos failed to bind
                     (message withheld: exposure is "secret")
 ```
 
-Two details worth noticing. For secret zernos the report shows issue counts and paths only — validator messages echo received values, so they are treated as untrusted and never printed. And `default` gets no privileged path: a defaulted value is validated at bind exactly like a sourced one, so a bad default dies at boot, not in production.
+Two details worth noticing. For secret tesserae the report shows issue counts and paths only — validator messages echo received values, so they are treated as untrusted and never printed. And `default` gets no privileged path: a defaulted value is validated at bind exactly like a sourced one, so a bad default dies at boot, not in production.
 
 ## The three doors
 
@@ -133,18 +133,18 @@ Two details worth noticing. For secret zernos the report shows issue counts and 
 `bind.lazy` is the half-lazy door: raw presence is still checked eagerly, so a missing variable dies at bind — the classic 3am failure, where an unset var is only discovered hours later on the first cold code path, is structurally gone. What it defers is validator execution, for when validators are expensive or the set is large.
 
 ```ts
-const cfg = bind.lazy(serverZernos);
+const cfg = bind.lazy(serverTesserae);
 // missing env vars have already thrown MissingConfigError here;
-// schemas run on first cfg.unwrap(...) per zerno
+// schemas run on first cfg.unwrap(...) per tessera
 ```
 
 `bind.unchecked` checks nothing until first read. The name carries the warning; reach for it only when eager checks are genuinely wrong, like a multi-subcommand CLI where `--help` must not demand deploy credentials:
 
 ```ts
-const cfg = bind.unchecked(deployZernos);
+const cfg = bind.unchecked(deployTesserae);
 
 if (command === "deploy") {
-  cfg.unwrap(deployToken); // presence + validation happen here, per zerno
+  cfg.unwrap(deployToken); // presence + validation happen here, per tessera
 }
 ```
 
@@ -152,14 +152,14 @@ if (command === "deploy") {
 
 There is no separate async door: the bind result **type is computed from the entries**.
 Any async-wired entry (a `provider()` whose impl declares `color: "async"`, or a `chain()`
-containing one async link) makes the result an `AsyncBinding`; any live zerno makes it a
+containing one async link) makes the result an `AsyncBinding`; any live tessera makes it a
 `LiveBinding`; otherwise you get a plain `Snapshot`. Sugar views (`.value`/`.values`)
 exist only on snapshots, so an async entry can never hide a network hop behind a sync
 read — the type will not let you.
 
 ```ts
-import { chain, provider } from "komirka";
-import { bind, env } from "komirka/async";     // async-capable bind; node combinators re-exported
+import { chain, provider } from "tessellum";
+import { bind, env } from "tessellum/async";     // async-capable bind; node combinators re-exported
 import { ssm } from "./providers/ssm";       // impl: { id: "aws-ssm", color: "async", read }
 
 const binding = bind({
@@ -193,8 +193,8 @@ cfg.toJSON();       // full dump — secrets redacted by construction
 
 ```json
 {
-  "zerno": "DATABASE_URL",
-  "identity": "zernov1:xxh128:5f21c09a…",
+  "tessera": "DATABASE_URL",
+  "identity": "tesserav1:xxh128:5f21c09a…",
   "resolved": { "source": "env", "key": "DATABASE_URL" },
   "value": "[redacted: exposure is secret]"
 }
@@ -210,37 +210,37 @@ JSON.stringify(page);
 //  genuinely need the raw string — see the Secrets page and ADR 0002)
 ```
 
-For handing a *subset* of a snapshot to a library, `cfg.pick(dbZernos)` returns a runtime-restricted `Scope` — reading a non-member throws `NotInScopeError`, and the root snapshot is deliberately not assignable where a `Scope` is expected. The library DI page covers this pattern in full.
+For handing a *subset* of a snapshot to a library, `cfg.pick(dbTesserae)` returns a runtime-restricted `Scope` — reading a non-member throws `NotInScopeError`, and the root snapshot is deliberately not assignable where a `Scope` is expected. The library DI page covers this pattern in full.
 
 ## Config flows at construction time, not call time
 
 The intended shape: one composition root binds, factories receive their slice at construction, and request handlers never touch config at all.
 
 ```ts
-import type { Scope, ConfigOf } from "komirka";
+import type { Scope, ConfigOf } from "tessellum";
 
 // a factory declares the exact slice it needs, in its type
-export function createPool(cfg: Scope<ConfigOf<typeof dbZernos>>) {
+export function createPool(cfg: Scope<ConfigOf<typeof dbTesserae>>) {
   return new Pool({ url: cfg.unwrap(dbUrl), max: cfg.unwrap(poolSize) });
 }
 ```
 
 ```ts
 // app entrypoint — the composition root
-const root = bind([...dbZernos, ...mailerZernos]);
+const root = bind([...dbTesserae, ...mailerTesserae]);
 
-const pool = createPool(root.pick(dbZernos));
-const mailer = createMailer(root.pick(mailerZernos));
+const pool = createPool(root.pick(dbTesserae));
+const mailer = createMailer(root.pick(mailerTesserae));
 // handlers receive pool and mailer — not root, not process.env
 ```
 
 This is also what makes testing boring, in the good way — construct a literal snapshot per test and pass it in, with zero `process.env` mutation:
 
 ```ts
-import { bind, literal } from "komirka"; // core bind: literal entries only — nothing ambient
+import { bind, literal } from "tessellum"; // core bind: literal entries only — nothing ambient
 
 const cfg = bind([literal(dbUrl, "pg://localhost/test"), literal(poolSize, 2)]);
-const pool = createPool(cfg.pick(dbZernos)); // still validated — a bad literal fails here
+const pool = createPool(cfg.pick(dbTesserae)); // still validated — a bad literal fails here
 ```
 
 ## Why there is no ambient binding
@@ -250,27 +250,27 @@ Import-time and module-global config assumes a process-global environment that e
 Explicit binding matches the platform's physics instead:
 
 ```ts
-import { bind } from "komirka/workers";
-import { appZernos } from "./config";
+import { bind } from "tessellum/workers";
+import { appTesserae } from "./config";
 
 export default {
   fetch(request: Request, env: Env) {
     // bound per invocation — this request's env, no one else's.
     // The bag is a REQUIRED option: capability enters at bind, never inside wiring data.
-    const cfg = bind(appZernos, { env });
+    const cfg = bind(appTesserae, { env });
     return handle(request, cfg);
   },
 };
 ```
 
-Because there is no ambient store, the failure mode of a mis-wired read is a thrown `UnboundZernoError` at the offending line — never a stale or cross-request value.
+Because there is no ambient store, the failure mode of a mis-wired read is a thrown `UnboundTesseraError` at the offending line — never a stale or cross-request value.
 
 ## Source refs are data; implementations are injected
 
-A zerno's `sources` field is ordered *data* — plain JSON refs naming what to read, in precedence order. It never contains an implementation, which is why descriptors round-trip as JSON and why tools like bake can enumerate them without executing app code:
+A tessera's `sources` field is ordered *data* — plain JSON refs naming what to read, in precedence order. It never contains an implementation, which is why descriptors round-trip as JSON and why tools like bake can enumerate them without executing app code:
 
 ```ts
-const sendgridKey = zerno({
+const sendgridKey = tessera({
   key: "SENDGRID_API_KEY",
   schema: z.string().min(1),
   sources: [
@@ -284,48 +284,48 @@ The *how* is supplied at the binding, per runtime, and the descriptor never chan
 
 ```ts
 // Node server: wired via provider() — declared refs resolve in order (ssm, then process.env)
-import { bind, provider } from "komirka/async";
+import { bind, provider } from "tessellum/async";
 const cfg = await bind(provider(sendgridKey, ssm)).snapshot();
 
 // Cloudflare Worker: the per-request bag is a REQUIRED bind option — never wiring data
-import { bind } from "komirka/workers";
+import { bind } from "tessellum/workers";
 const cfg = bind(sendgridKey, { env });
 
 // tests: a literal entry — validated like any source, zero process.env mutation
-import { bind, literal } from "komirka";
+import { bind, literal } from "tessellum";
 const cfg = bind(literal(sendgridKey, "SG.test-key"));
 ```
 
-This split is also the browser-safety story, stated precisely: the universal `komirka`
+This split is also the browser-safety story, stated precisely: the universal `tessellum`
 entry ships no source *resolvers*, and core `bind` supplies no natural defaults — a bare
 `env`/`file` ref under core bind is `NoWiringError`, and `literal()` entries are the only
-thing that resolves. `env` and `file` live in `komirka/node`, which imports `node:process`
+thing that resolves. `env` and `file` live in `tessellum/node`, which imports `node:process`
 and `node:fs`, so bundling them for a browser fails at build rather than shimming to
 empty objects. Capability enters at the bind entry point — never through wiring data.
 
 ## Wiring: deployment wiring, not contract
 
-A zerno declares *what* it needs (`{ env: "SMTP_URL" }`); a deployment decides *where that
+A tessera declares *what* it needs (`{ env: "SMTP_URL" }`); a deployment decides *where that
 lives on this platform*. The wiring is spelled inline, per entry — no source bag, no
-separate rebind option — and it never forks the zerno's identity, because wiring is
+separate rebind option — and it never forks the tessera's identity, because wiring is
 deployment reality, not a contract change:
 
 ```ts
-import { bind, env, file } from "komirka/node";
-import { chain, provider } from "komirka";
-import { smtpUrl } from "@acme/mailer/zernos";
+import { bind, env, file } from "tessellum/node";
+import { chain, provider } from "tessellum";
+import { smtpUrl } from "@acme/mailer/tesserae";
 
 const cfg = bind({
   // bare: declared refs against this runtime's natural defaults
   pool: poolSize,
 
-  // REF RENAME: patches the matching declared ref IN PLACE — the zerno's other
+  // REF RENAME: patches the matching declared ref IN PLACE — the tessera's other
   // declared fallbacks survive. UnknownWiringError if no declared ref of this kind.
   smtp: env(smtpUrl, "MAILER_SMTP_URL"),
   cache: file(cacheRules, "/etc/app/cache-rules.json"),
 
   // FULL REPLACEMENT — chain() is the only spelling that discards declared refs,
-  // and errors for this zerno list exactly what was dropped.
+  // and errors for this tessera list exactly what was dropped.
   sg: chain(sgKey, provider(ssm, "/prod/sg"), env("SG_KEY")),
 
   // groups wire as ONE entry; specialization goes inside (overrides escape the prefix)
@@ -333,8 +333,8 @@ const cfg = bind({
 });
 ```
 
-The distinction between the two override forms is load-bearing: `env(zerno, "NAME")`
-*renames*, preserving the resilience chain the zerno's author declared — a deployment that
+The distinction between the two override forms is load-bearing: `env(tessera, "NAME")`
+*renames*, preserving the resilience chain the tessera's author declared — a deployment that
 only meant to rename must not silently lose the file fallback it will need during an
 outage. `chain()` *replaces*, and says so. Read provenance makes the difference
 observable: every binding records which ref supplied each value, and `explain()`
@@ -343,21 +343,21 @@ and every resolution error name it.
 Wiring rules, checked in the eager phase of **every** door (wiring is shape, not value
 validation):
 
-- **One entry per zerno, ever.** A zerno reachable through two entries — including a group
+- **One entry per tessera, ever.** A tessera reachable through two entries — including a group
   member wired again as a leaf — is `DuplicateWiringError`. There is no precedence
   hierarchy to memorize; specialization lives inside the group combinator.
-- **`WiringCollisionError`** — wiring *created* a convergence (two zernos onto one
+- **`WiringCollisionError`** — wiring *created* a convergence (two tesserae onto one
   effective name) that the declared refs did not have. Declared sharing stays legal.
-- **`WiringExposureError`** — a non-secret zerno may never be wired onto any name in the
-  secret-name set: routing a credential through a public-exposure zerno would launder it
+- **`WiringExposureError`** — a non-secret tessera may never be wired onto any name in the
+  secret-name set: routing a credential through a public-exposure tessera would launder it
   past redaction and into bake's public inlining. Backed by a well-known-secret-suffix
   denylist (`*_SECRET`, `*_TOKEN`, `*_PASSWORD`, `*_PRIVATE_KEY`, `*_API_KEY`) with an
   explicit per-name allowlist, and by the committed lockfile as the app-wide
   effective-name → exposure authority. The same denylist gates the other end of the
-  pipeline: bake refuses a client-target zerno whose declared key or effective source name
+  pipeline: bake refuses a client-target tessera whose declared key or effective source name
   hits the set even at `exposure: "public"` (`SecretNameInClientTargetError`) — see
   [bake](/docs/bake/overview).
-- **Combinators are pure data.** A `WiredEntry` is JSON-representable — zerno identity ref,
+- **Combinators are pure data.** A `WiredEntry` is JSON-representable — tessera identity ref,
   ref kind, name/path/key strings, provider impl *ids* (impls declare `{ id, color }`;
   anonymous impls are an error on bake-covered targets). That inertness is what lets the
   bake manifest import entry modules and generate the lockfile, keeps every wiring
@@ -375,7 +375,7 @@ everything else.
 
 Effective names propagate everywhere: `.env.example` and `CONFIG.md` render the names
 your deployment actually reads (declared name in a comment), the lockfile records
-`declared → effective` per zerno, the leak scan matches the **union** of both, and every
+`declared → effective` per tessera, the leak scan matches the **union** of both, and every
 error speaks the effective name first —
 `Missing MAILER_SMTP_URL (declared SMTP_URL; wired at src/config/root.ts:12)` — because
 an error that tells a 3am operator to set a variable nothing reads is worse than no

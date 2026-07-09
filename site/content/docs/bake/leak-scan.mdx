@@ -3,31 +3,31 @@ title: Leak scan
 description: The allowlist scan that audits every emitted client asset for secret material — and an honest account of exactly what it cannot see.
 ---
 
-Every `komirka bake` run ends with a leak scan of the client target's emitted artifacts, and `komirka bake --check` fails CI on any unwaived finding. The scan is the **last** layer of bake's defense stack, not the first — it sits behind the required targets declaration, the secret-name bake gate, generated-module-only delivery, the no-secret-sources browser entry, the AST lint that bans raw `process.env` / `import.meta.env` reads in client-designated code, and the coverage report. Its job is to catch what slipped past all of those, and it is designed around one hard rule: **it never needs, and never prints, a secret value.**
+Every `tessellum bake` run ends with a leak scan of the client target's emitted artifacts, and `tessellum bake --check` fails CI on any unwaived finding. The scan is the **last** layer of bake's defense stack, not the first — it sits behind the required targets declaration, the secret-name bake gate, generated-module-only delivery, the no-secret-sources browser entry, the AST lint that bans raw `process.env` / `import.meta.env` reads in client-designated code, and the coverage report. Its job is to catch what slipped past all of those, and it is designed around one hard rule: **it never needs, and never prints, a secret value.**
 
 ## Allowlist, not blocklist
 
 The classic secret scanner is a blocklist: give it your real secret values (or regexes derived from them) and grep the build output. That model has three structural problems:
 
 - **It puts plaintext secrets in CI.** To grep for a value you must have the value. Bake never resolves secret values — that is what preserves build-once-deploy-many and keeps production credentials out of your build system. A blocklist scanner would undo that guarantee just to check for it.
-- **It only finds secrets it already knows about.** A token someone pasted straight into a component — never declared as a zerno, never registered anywhere — is invisible to a blocklist.
+- **It only finds secrets it already knows about.** A token someone pasted straight into a component — never declared as a tessera, never registered anywhere — is invisible to a blocklist.
 - **A naive finding message prints the secret into CI logs.** "Found `sk_live_9f2c…` in `checkout.js`" turns the leak detector into the leak.
 
-The leak scan inverts the model. Bake already knows the complete set of values that are *allowed* in client artifacts: the resolved literals of the `exposure: "public"` zernos listed in the manifest's client target. That set is the allowlist. Any high-entropy string in the output that is **not** on it is a finding — no secret material required, and hand-rolled non-zerno secrets are caught precisely *because* nobody registered them.
+The leak scan inverts the model. Bake already knows the complete set of values that are *allowed* in client artifacts: the resolved literals of the `exposure: "public"` tesserae listed in the manifest's client target. That set is the allowlist. Any high-entropy string in the output that is **not** on it is a finding — no secret material required, and hand-rolled non-tessera secrets are caught precisely *because* nobody registered them.
 
 ```ts
-// zernos/api.ts
-import { zerno } from "komirka";
+// tesserae/api.ts
+import { tessera } from "tessellum";
 import { z } from "zod";
 
-export const apiBaseUrl = zerno({
+export const apiBaseUrl = tessera({
   key: "API_BASE_URL",
   schema: z.string().url(),
   exposure: "public",              // registered → its baked literal is allowlisted
   doc: "Public API origin, safe to embed in client bundles",
 });
 
-export const stripeSecretKey = zerno({
+export const stripeSecretKey = tessera({
   key: "STRIPE_SECRET_KEY",
   schema: z.string().startsWith("sk_"),
   doc: "Stripe server-side key",
@@ -37,13 +37,13 @@ export const stripeSecretKey = zerno({
 
 ```ts
 // config.manifest.ts — side-effect-free; bake runs it in a constrained context
-import { apiBaseUrl } from "./zernos/api";
-import { allServerZernos } from "./zernos/server";
+import { apiBaseUrl } from "./tesserae/api";
+import { allServerTesserae } from "./tesserae/server";
 
 export default {
   targets: {
     client: [apiBaseUrl],          // deny-by-default: only what is listed here is public
-    server: allServerZernos,
+    server: allServerTesserae,
   },
 };
 ```
@@ -73,7 +73,7 @@ The scan has no idea what `ANALYTICS_WRITE_KEY` resolves to. It doesn't need to:
 
 ### 2. Secret key names adjacent to env access
 
-Bake never sees secret values, but the descriptors give it every secret key **name** — and, because remaps are declarable only as data (`prefix`/`rename` tables, never functions), every **effective** name too. The scan matches the **union of declared and effective names**: a `MYAPP_`-prefixed deployment leaks under `MYAPP_STRIPE_SECRET_KEY`, and that token is in the scan set because the lockfile records `declared → effective` per zerno. Names match as **whole tokens** appearing adjacent to env-access patterns (`process.env.X`, `env["X"]`, `import.meta.env.X`).
+Bake never sees secret values, but the descriptors give it every secret key **name** — and, because remaps are declarable only as data (`prefix`/`rename` tables, never functions), every **effective** name too. The scan matches the **union of declared and effective names**: a `MYAPP_`-prefixed deployment leaks under `MYAPP_STRIPE_SECRET_KEY`, and that token is in the scan set because the lockfile records `declared → effective` per tessera. Names match as **whole tokens** appearing adjacent to env-access patterns (`process.env.X`, `env["X"]`, `import.meta.env.X`).
 
 ```ts
 // client/pages/admin.tsx — flagged: secret key name next to an env read
@@ -93,25 +93,25 @@ The optional server wiring module that bake generates embeds a random nonce, fre
 
 Findings must be actionable, so candidates below the entropy/length thresholds are dropped rather than reported — the scan **never hard-fails on noise**. The honest cost of that choice: some secrets are *unscannable*. A secret whose value is `"8080"` is indistinguishable from a port number, an HTTP status, or a viewBox dimension; no threshold can separate it from ordinary code.
 
-Bake doesn't paper over this. When a secret zerno's declared schema admits shapes the scan can never distinguish from code — numeric outputs like `z.coerce.number()`, very short strings — bake emits an explicit warning at build time instead of pretending coverage exists:
+Bake doesn't paper over this. When a secret tessera's declared schema admits shapes the scan can never distinguish from code — numeric outputs like `z.coerce.number()`, very short strings — bake emits an explicit warning at build time instead of pretending coverage exists:
 
 ```
 warn  INTERNAL_PROXY_PORT is declared secret, but its schema admits values too
       short/low-entropy for the leak scan to detect. The scan cannot protect this
-      zerno. Structural controls (no-secret-sources browser entry, generated-module
+      tessera. Structural controls (no-secret-sources browser entry, generated-module
       delivery, AST lint) remain your protection here.
 ```
 
 ## Reading a finding
 
-Findings carry the asset location, the nearest zerno key, and **scrubbed** context. Values are masked by construction — there is no verbosity flag that prints them:
+Findings carry the asset location, the nearest tessera key, and **scrubbed** context. Values are masked by construction — there is no verbosity flag that prints them:
 
 ```
 ✗ leak-scan: 2 findings in target "client"
 
   [high-entropy]  dist/assets/checkout-Bx31q.js:1:48211
     unregistered high-entropy string (41 chars)
-    nearest zerno by key-name context: STRIPE_SECRET_KEY
+    nearest tessera by key-name context: STRIPE_SECRET_KEY
     …headers:{authorization:"Bearer «REDACTED · 41 chars»"}…
 
   [key-name]      dist/assets/admin-K2m0.js:1:1180
@@ -125,7 +125,7 @@ Findings carry the asset location, the nearest zerno key, and **scrubbed** conte
 In CI, the same scan runs under the drift gate:
 
 ```bash
-komirka bake --check   # fails on generated-output drift OR any unwaived leak-scan finding
+tessellum bake --check   # fails on generated-output drift OR any unwaived leak-scan finding
 ```
 
 ## Waivers
@@ -145,6 +145,6 @@ The scan is defense-in-depth behind the structural layers. It is **never the pri
   // throws ExposureError — the runtime serialization guard, not the leak scan
   ```
 
-- **Dev-server output is never scanned.** `komirka bake --watch` keeps the generated modules fresh during development, but dev servers serve transformed modules from memory; there are no emitted artifacts to audit. Only production build output is covered — do not treat a clean dev session as a clean scan.
+- **Dev-server output is never scanned.** `tessellum bake --watch` keeps the generated modules fresh during development, but dev servers serve transformed modules from memory; there are no emitted artifacts to audit. Only production build output is covered — do not treat a clean dev session as a clean scan.
 
 - **Encodings and string-splitting evade it.** Base64 in two halves, char-code arrays, concatenation at runtime — any build-time string scan is trivially defeated by code that *intends* to exfiltrate. The scan targets mistakes, not adversaries. Malicious in-process code is outside its threat model (and outside `pick()`'s, too); the structural layers — deny-by-default client allowlist, no-secret-sources browser entry, generated-module-only delivery, the AST lint — are what make the honest-mistake path hard, and the scan is the net underneath them.

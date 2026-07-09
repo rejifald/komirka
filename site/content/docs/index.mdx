@@ -5,9 +5,9 @@ description: Atomic configuration — each config value is an inert, documented,
 
 > **Design phase.** No code exists yet. This site presents the design *as documentation* —
 > pages read like real library docs because that is the fastest way to evaluate a design.
-> The package is **komirka** (published on npm as a `0.0.0` placeholder; repo
-> [github.com/rejifald/komirka](https://github.com/rejifald/komirka)). The primitive is
-> **`zerno`** — Ukrainian for a grain, one small unit of config (see the
+> The package is **tessellum** (published on npm as a `0.0.0` placeholder; repo
+> [github.com/rejifald/tessellum](https://github.com/rejifald/tessellum)). The primitive is
+> **`tessera`** — one mosaic tile, one config value (see the
 > [naming decision](/docs/reference/decisions)).
 
 ## The problem
@@ -26,24 +26,24 @@ entrypoint reads one of them. The consequences are familiar:
 
 ## The idea
 
-Make configuration **atomic**. Each config value is one `zerno`: an inert, frozen,
+Make configuration **atomic**. Each config value is one `tessera`: an inert, frozen,
 JSON-serializable descriptor carrying its name, its validator, its documentation, its
 trust level, and where its value may come from. Descriptors do nothing at import. Values
 exist only inside **bindings** you create explicitly, per runtime:
 
 ```ts
 // config/db.ts — inert descriptors; importing this file costs bytes, not behavior
-import { zerno } from "komirka";
+import { tessera } from "tessellum";
 import { z } from "zod";
 
-export const dbUrl = zerno({
+export const dbUrl = tessera({
   key: "DATABASE_URL",
   schema: z.string().url(),
   doc: "Primary Postgres connection string",
   // exposure defaults to "secret" — fail closed
 });
 
-export const poolSize = zerno({
+export const poolSize = tessera({
   key: "DB_POOL_SIZE",
   schema: z.coerce.number().int().min(1).max(100),
   default: 10,
@@ -55,7 +55,7 @@ export const poolSize = zerno({
 ```ts
 // Node — eager validation of exactly what this entrypoint uses, at boot.
 // Bare entries resolve their declared refs against process.env; overrides are inline.
-import { bind, env } from "komirka/node";
+import { bind, env } from "tessellum/node";
 import { dbUrl, poolSize } from "./config/db";
 
 const cfg = bind({ db: env(dbUrl, "PLATFORM_PG_URL"), pool: poolSize });
@@ -64,7 +64,7 @@ const pool = new Pool({ connectionString: cfg.values.db, max: cfg.values.pool })
 
 ```ts
 // Cloudflare Worker — the same descriptors, bound to the per-request env bag
-import { bind } from "komirka/workers";
+import { bind } from "tessellum/workers";
 
 export default {
   fetch(req: Request, env: Env) {
@@ -76,7 +76,7 @@ export default {
 
 ```ts
 // Tests — literal entries, zero process.env mutation
-import { bind, literal } from "komirka";
+import { bind, literal } from "tessellum";
 
 const cfg = bind({ db: literal(dbUrl, "postgres://localhost:5432/test") });
 ```
@@ -105,7 +105,7 @@ has zero runtime dependencies of its own.
 
 ## Where to start
 
-- [The zerno](/docs/concepts/zerno) — the descriptor, field by field.
+- [The tessera](/docs/concepts/tessera) — the descriptor, field by field.
 - [Binding and snapshots](/docs/concepts/binding) — where values live.
 - [Principles](/docs/principles) — every constraint, pitfall, and security concern, in one
   place. This is the project's constitution.

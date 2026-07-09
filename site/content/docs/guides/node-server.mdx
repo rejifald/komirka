@@ -1,74 +1,74 @@
 ---
 title: Node server
-description: End-to-end Express walkthrough — zernos declared per module, one eager bind at the composition root, and factories that receive exactly the scope they need.
+description: End-to-end Express walkthrough — tesserae declared per module, one eager bind at the composition root, and factories that receive exactly the scope they need.
 ---
 
 ## The shape of the app
 
 Three rules do all the work on a Node server:
 
-1. **Declare zernos next to the code that reads them.** The database module owns the database zernos, the billing module owns Stripe's. There is no central config module.
+1. **Declare tesserae next to the code that reads them.** The database module owns the database tesserae, the billing module owns Stripe's. There is no central config module.
 2. **Bind once, at the composition root.** `main.ts` is the only file that touches wiring. `bind` is eager, so a broken environment kills the process before it can accept a single request.
-3. **Hand each factory a picked scope.** A factory's signature declares exactly which zernos it reads; everything else is invisible to it — at compile time and at runtime.
+3. **Hand each factory a picked scope.** A factory's signature declares exactly which tesserae it reads; everything else is invisible to it — at compile time and at runtime.
 
-## Declare zernos where they're used
+## Declare tesserae where they're used
 
-Zerno construction is inert — zero I/O, zero validation, zero side effects — so these modules are free to import from anywhere, including tests and build tooling.
+Tessera construction is inert — zero I/O, zero validation, zero side effects — so these modules are free to import from anywhere, including tests and build tooling.
 
 ```ts
-// src/db/zernos.ts
-import { zerno, defineZernos } from "komirka";
+// src/db/tesserae.ts
+import { tessera, defineTesserae } from "tessellum";
 import { z } from "zod";
 
-export const dbUrl = zerno({
+export const dbUrl = tessera({
   key: "DATABASE_URL",
   schema: z.string().url(),
   doc: "Primary Postgres connection string",
   // exposure defaults to "secret" — fail closed. Safe requires no annotation.
 });
 
-export const poolSize = zerno({
+export const poolSize = tessera({
   key: "DB_POOL_SIZE",
-  schema: z.coerce.number().int().min(1).max(64), // Zerno<number> — T is the schema OUTPUT
+  schema: z.coerce.number().int().min(1).max(64), // Tessera<number> — T is the schema OUTPUT
   doc: "Max connections in the pg pool",
   exposure: "public",
   default: 10, // validated at bind like any sourced value — defaults get no privileged path
 });
 
-export const dbZernos = defineZernos([dbUrl, poolSize]);
+export const dbTesserae = defineTesserae([dbUrl, poolSize]);
 ```
 
 ```ts
-// src/billing/zernos.ts
-import { zerno, defineZernos } from "komirka";
+// src/billing/tesserae.ts
+import { tessera, defineTesserae } from "tessellum";
 import { z } from "zod";
 
-export const stripeKey = zerno({
+export const stripeKey = tessera({
   key: "STRIPE_SECRET_KEY",
   schema: z.string().startsWith("sk_"),
   doc: "Stripe API secret key",
 });
 
-export const webhookSecret = zerno({
+export const webhookSecret = tessera({
   key: "STRIPE_WEBHOOK_SECRET",
   schema: z.string().startsWith("whsec_"),
   doc: "Signing secret for verifying Stripe webhook payloads",
 });
 
-export const billingZernos = defineZernos([stripeKey, webhookSecret]);
+export const billingTesserae = defineTesserae([stripeKey, webhookSecret]);
 ```
 
 ## Factories take a scope, not the world
 
-The signature is the contract: `createRepo` can read the database zernos and nothing else. The root snapshot is deliberately **not** assignable to `Scope` — only `pick()` produces one — so you cannot accidentally pass the whole config through a narrow door.
+The signature is the contract: `createRepo` can read the database tesserae and nothing else. The root snapshot is deliberately **not** assignable to `Scope` — only `pick()` produces one — so you cannot accidentally pass the whole config through a narrow door.
 
 ```ts
 // src/db/repo.ts
 import { Pool } from "pg";
-import type { Scope, ConfigOf } from "komirka";
-import { dbZernos, dbUrl, poolSize } from "./zernos";
+import type { Scope, ConfigOf } from "tessellum";
+import { dbTesserae, dbUrl, poolSize } from "./tesserae";
 
-export function createRepo(cfg: Scope<ConfigOf<typeof dbZernos>>) {
+export function createRepo(cfg: Scope<ConfigOf<typeof dbTesserae>>) {
   const pool = new Pool({
     connectionString: cfg.unwrap(dbUrl),
     max: cfg.unwrap(poolSize),
@@ -86,10 +86,10 @@ export function createRepo(cfg: Scope<ConfigOf<typeof dbZernos>>) {
 
 ```ts
 // src/billing/client.ts
-import type { Scope, ConfigOf } from "komirka";
-import { billingZernos } from "./zernos";
+import type { Scope, ConfigOf } from "tessellum";
+import { billingTesserae } from "./tesserae";
 
-export function createBilling(cfg: Scope<ConfigOf<typeof billingZernos>>) {
+export function createBilling(cfg: Scope<ConfigOf<typeof billingTesserae>>) {
   /* Stripe client + webhook verification, reading cfg.unwrap(stripeKey) etc. */
 }
 ```
@@ -101,28 +101,28 @@ Calling `createRepo` without a bound, picked scope is a compile error — a depe
 ```ts
 // src/main.ts
 import express from "express";
-import { zerno } from "komirka";
-import { bind } from "komirka/node";
+import { tessera } from "tessellum";
+import { bind } from "tessellum/node";
 import { z } from "zod";
-import { dbZernos, dbUrl, poolSize } from "./db/zernos";
-import { billingZernos, stripeKey, webhookSecret } from "./billing/zernos";
+import { dbTesserae, dbUrl, poolSize } from "./db/tesserae";
+import { billingTesserae, stripeKey, webhookSecret } from "./billing/tesserae";
 import { createRepo } from "./db/repo";
 import { createBilling } from "./billing/client";
 
-// main.ts is the call site for the port, so its zerno lives here — near its use.
-const port = zerno({
+// main.ts is the call site for the port, so its tessera lives here — near its use.
+const port = tessera({
   key: "PORT",
   schema: z.coerce.number().int().min(1).max(65535),
   exposure: "public",
   default: 3000,
 });
 
-// Bare entries: each zerno's declared refs resolve against the node entry
+// Bare entries: each tessera's declared refs resolve against the node entry
 // point's natural defaults — process.env and the filesystem.
 const root = bind({ dbUrl, poolSize, stripeKey, webhookSecret, port });
 
-const repo = createRepo(root.pick(dbZernos));
-const billing = createBilling(root.pick(billingZernos));
+const repo = createRepo(root.pick(dbTesserae));
+const billing = createBilling(root.pick(billingTesserae));
 
 const app = express();
 
@@ -143,7 +143,7 @@ app.listen(root.unwrap(port));
 Bare entries are the whole story until a deployment disagrees with a name. When the platform injects the Postgres URL under its own variable, rename just that ref — per entry, in place:
 
 ```ts
-import { bind, env } from "komirka/node";
+import { bind, env } from "tessellum/node";
 
 const root = bind({
   dbUrl: env(dbUrl, "PG_CONNECTION_STRING"), // patches the env ref in place — other declared fallbacks survive
@@ -154,26 +154,26 @@ const root = bind({
 });
 ```
 
-The rename touches only the matching declared ref; asking to rename a ref kind the zerno never declared is an `UnknownWiringError` at bind. And wiring never forks identity: `dbUrl` is the same zerno under any name — `pick`, scopes, and the lockfile all agree, and errors speak the effective name first.
+The rename touches only the matching declared ref; asking to rename a ref kind the tessera never declared is an `UnknownWiringError` at bind. And wiring never forks identity: `dbUrl` is the same tessera under any name — `pick`, scopes, and the lockfile all agree, and errors speak the effective name first.
 
-`bind` is eager over the bound subset: every listed zerno is resolved and validated on that one line. A broken environment fails once, with the complete picture — one aggregated `MissingConfigError`, not one crash per variable per redeploy:
+`bind` is eager over the bound subset: every listed tessera is resolved and validated on that one line. A broken environment fails once, with the complete picture — one aggregated `MissingConfigError`, not one crash per variable per redeploy:
 
 ```text
-MissingConfigError: 3 of 5 zernos failed to bind
+MissingConfigError: 3 of 5 tesserae failed to bind
 
   DATABASE_URL        missing   no ref produced a value  (tried: env DATABASE_URL)
   STRIPE_SECRET_KEY   missing   no ref produced a value  (tried: env STRIPE_SECRET_KEY)
   DB_POOL_SIZE        invalid   1 issue at value         (from: env DB_POOL_SIZE)
 ```
 
-For secret zernos the report carries issue counts and paths only — never validator messages, because BYO validators echo the values they receive. When a value binds but you're not sure where it came from, `root.explain(dbUrl)` names the ref that supplied the value and the effective name it read, with secret values redacted.
+For secret tesserae the report carries issue counts and paths only — never validator messages, because BYO validators echo the values they receive. When a value binds but you're not sure where it came from, `root.explain(dbUrl)` names the ref that supplied the value and the effective name it read, with secret values redacted.
 
 ## Async secrets at boot: one await
 
-Production often keeps secrets in a manager, not in env. Which manager, and under which key, is deployment wiring — so it lives at the composition root, not on the zerno. `chain` swaps a zerno's declared refs for an ordered list of links, so one binding covers prod and local dev:
+Production often keeps secrets in a manager, not in env. Which manager, and under which key, is deployment wiring — so it lives at the composition root, not on the tessera. `chain` swaps a tessera's declared refs for an ordered list of links, so one binding covers prod and local dev:
 
 ```ts
-// src/config/ssm.ts — providers are plain objects you own; komirka ships no cloud SDK clients.
+// src/config/ssm.ts — providers are plain objects you own; tessellum ships no cloud SDK clients.
 import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 
 const client = new SSMClient({});
@@ -190,8 +190,8 @@ export const ssm = {
 
 ```ts
 // src/main.ts
-import { chain } from "komirka";
-import { bind, env, provider } from "komirka/async";
+import { chain } from "tessellum";
+import { bind, env, provider } from "tessellum/async";
 import { ssm } from "./config/ssm";
 
 const root = await bind({
@@ -205,21 +205,21 @@ const root = await bind({
 // every read after this line is synchronous, including deep inside request handlers.
 ```
 
-`chain` is the only full-replacement spelling: it discards the zerno's declared refs in favor of the ordered links you give it, and resolution errors list the refs it dropped — a fallback that quietly stopped being consulted still shows up in the failure.
+`chain` is the only full-replacement spelling: it discards the tessera's declared refs in favor of the ordered links you give it, and resolution errors list the refs it dropped — a fallback that quietly stopped being consulted still shows up in the failure.
 
-Fetching from SSM is async, and the color is in the types: every link carries its impl's color, and a single async link recolors the whole binding to an `AsyncBinding` — a type only `komirka/async`'s `bind` produces. `await bind(entries).snapshot()` is the async door, and it is async exactly **once**: the pin resolves everything up front and hands back a plain sync-read `Snapshot`.
+Fetching from SSM is async, and the color is in the types: every link carries its impl's color, and a single async link recolors the whole binding to an `AsyncBinding` — a type only `tessellum/async`'s `bind` produces. `await bind(entries).snapshot()` is the async door, and it is async exactly **once**: the pin resolves everything up front and hands back a plain sync-read `Snapshot`.
 
-Handing an async-colored provider to `komirka/node`'s `bind` is not a footgun that fires later — it doesn't compile. Likewise a schema that turns out to be async — async-ness can be input-dependent, so every validation site checks — throws `AsyncValidatorInSyncBindingError` rather than silently returning a pending promise.
+Handing an async-colored provider to `tessellum/node`'s `bind` is not a footgun that fires later — it doesn't compile. Likewise a schema that turns out to be async — async-ness can be input-dependent, so every validation site checks — throws `AsyncValidatorInSyncBindingError` rather than silently returning a pending promise.
 
 ## .env files
 
-Core never parses files — there is no `.env` reader in `komirka`. The recommended route is to let Node populate the process environment itself:
+Core never parses files — there is no `.env` reader in `tessellum`. The recommended route is to let Node populate the process environment itself:
 
 ```bash
 node --env-file=.env dist/main.js
 ```
 
-Bare entries then see those values like any other environment variable — `komirka/node`'s natural defaults read the process environment, not the file. If you need more than `--env-file` offers, dotenv is a userland provider you wire per entry — a provider impl, not a core concern. And because every zerno carries a `doc` field, `komirka bake` keeps a `.env.example` generated for you, so the file new teammates copy is never stale.
+Bare entries then see those values like any other environment variable — `tessellum/node`'s natural defaults read the process environment, not the file. If you need more than `--env-file` offers, dotenv is a userland provider you wire per entry — a provider impl, not a core concern. And because every tessera carries a `doc` field, `tessellum bake` keeps a `.env.example` generated for you, so the file new teammates copy is never stale.
 
 ## Boot errors vs runtime errors
 
@@ -227,12 +227,12 @@ Boot errors mean the **environment or the wiring** is wrong: loud, aggregated, t
 
 | Error | Thrown when | Phase |
 | --- | --- | --- |
-| `MissingConfigError` | a bound zerno is missing or invalid — aggregated across the whole set | boot (`bind`, or the one `await` on an async binding) |
-| `UnknownWiringError` | a per-entry rename targets a ref kind the zerno never declared — `env(zerno, …)` on a zerno with no env ref | boot (`bind`) |
-| `DuplicateWiringError` | one zerno is reachable through two entries of the same `bind`, groups flattened | boot (`bind`) |
+| `MissingConfigError` | a bound tessera is missing or invalid — aggregated across the whole set | boot (`bind`, or the one `await` on an async binding) |
+| `UnknownWiringError` | a per-entry rename targets a ref kind the tessera never declared — `env(tessera, …)` on a tessera with no env ref | boot (`bind`) |
+| `DuplicateWiringError` | one tessera is reachable through two entries of the same `bind`, groups flattened | boot (`bind`) |
 | `AsyncValidatorInSyncBindingError` | a schema returns a thenable at any validation site | boot, or first read under `bind.lazy` |
-| `UnboundZernoError` | `unwrap` is called with a zerno the binding never listed | runtime |
-| `NotInScopeError` | `unwrap` goes through a `Scope` that did not pick that zerno | runtime |
+| `UnboundTesseraError` | `unwrap` is called with a tessera the binding never listed | runtime |
+| `NotInScopeError` | `unwrap` goes through a `Scope` that did not pick that tessera | runtime |
 | `DescriptorMismatchError` | the same key resolves through two different descriptors (dual-package installs); carries a field-level diff and a paste-able `unify` snippet | runtime |
 
 There is no fallback path: a read that cannot be answered throws one of these names, never `undefined`. For a genuinely optional read, say so in code:
@@ -244,34 +244,34 @@ if (size.ok) tunePool(size.value);
 
 ## Anti-patterns
 
-### One god-module of every zerno
+### One god-module of every tessera
 
 ```ts
 // ✗ src/config/index.ts — "the config file", imported by everything
-export const allZernos = defineZernos([
+export const allTesserae = defineTesserae([
   dbUrl, poolSize, stripeKey, webhookSecret, port, /* …and forty more */
 ]);
 ```
 
-Groups are declared near call sites, never as one central module imported at runtime. A god-module makes every importer depend on every config domain, erases the least-privilege story `pick()` gives you (one scope containing everything is no scope at all), and turns every zerno change into an app-wide rebuild. The composition root listing every zerno in a single `bind` entry record is different in kind: `main.ts` is the *only* module that sees everything, and it immediately picks it apart into per-domain scopes.
+Groups are declared near call sites, never as one central module imported at runtime. A god-module makes every importer depend on every config domain, erases the least-privilege story `pick()` gives you (one scope containing everything is no scope at all), and turns every tessera change into an app-wide rebuild. The composition root listing every tessera in a single `bind` entry record is different in kind: `main.ts` is the *only* module that sees everything, and it immediately picks it apart into per-domain scopes.
 
 ### Reading outside the composition root
 
 ```ts
 // ✗ src/db/repo.ts — module-scope binding inside a leaf module
-import { bind } from "komirka/node";
-import { dbUrl } from "./zernos";
+import { bind } from "tessellum/node";
+import { dbUrl } from "./tesserae";
 
 const cfg = bind({ dbUrl });                  // hidden import-time work, and a
 export const pool = makePool(cfg.unwrap(dbUrl)); // second binding to drift from main.ts
 ```
 
-Values exist only inside explicit bindings — there is no ambient global to fall back on, so the temptation is to mint a private binding per module. Don't: it re-reads the environment at import time, dodges the aggregated boot check, and can disagree with the root about wiring. Leaf modules export zernos and factories; only the root binds.
+Values exist only inside explicit bindings — there is no ambient global to fall back on, so the temptation is to mint a private binding per module. Don't: it re-reads the environment at import time, dodges the aggregated boot check, and can disagree with the root about wiring. Leaf modules export tesserae and factories; only the root binds.
 
 The same discipline holds inside handlers. A scope will not let code wander past what it was given:
 
 ```ts
-const dbScope = root.pick(dbZernos);
+const dbScope = root.pick(dbTesserae);
 
 // ✗ a handler reaching past its scope
 app.get("/debug/billing", (_req, res) => {
@@ -284,19 +284,19 @@ To be honest about the boundary: `pick()` is least-privilege for mistakes and fo
 
 ## Testing the factories
 
-Because factories accept a scope rather than reading the environment, tests never touch `process.env` — a test binding is just `bind` with every entry a `literal`. Literals are input-typed, validation runs at bind, and exposure redaction still applies. All-literal entries need no natural sources, so the core `komirka` import is enough, and the result is a plain `Snapshot`:
+Because factories accept a scope rather than reading the environment, tests never touch `process.env` — a test binding is just `bind` with every entry a `literal`. Literals are input-typed, validation runs at bind, and exposure redaction still applies. All-literal entries need no natural sources, so the core `tessellum` import is enough, and the result is a plain `Snapshot`:
 
 ```ts
 // test/repo.spec.ts
-import { bind, literal } from "komirka";
-import { dbZernos, dbUrl, poolSize } from "../src/db/zernos";
+import { bind, literal } from "tessellum";
+import { dbTesserae, dbUrl, poolSize } from "../src/db/tesserae";
 import { createRepo } from "../src/db/repo";
 
 const cfg = bind({
   dbUrl: literal(dbUrl, "postgres://localhost/test"),
   poolSize: literal(poolSize, 2),
 });
-const repo = createRepo(cfg.pick(dbZernos)); // still validated — a bad literal fails here, not in CI at 2am
+const repo = createRepo(cfg.pick(dbTesserae)); // still validated — a bad literal fails here, not in CI at 2am
 ```
 
 Construct a fresh snapshot per test and pass it in. No mutation, no restore-after-each, no test-order coupling.

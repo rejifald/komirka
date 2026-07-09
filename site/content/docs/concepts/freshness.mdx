@@ -5,14 +5,14 @@ description: "Why config values are pinned by default, what live actually means 
 
 ## Pinned by default
 
-Every zerno defaults to `freshness: "snapshot"`. When you bind, the value is resolved and validated once; the resulting `Snapshot` returns the same value for the life of the binding, on every call, from every consumer.
+Every tessera defaults to `freshness: "snapshot"`. When you bind, the value is resolved and validated once; the resulting `Snapshot` returns the same value for the life of the binding, on every call, from every consumer.
 
 ```ts
-import { zerno } from "komirka";
-import { bind } from "komirka/node";
+import { tessera } from "tessellum";
+import { bind } from "tessellum/node";
 import { z } from "zod";
 
-const dbUrl = zerno({
+const dbUrl = tessera({
   key: "DATABASE_URL",
   schema: z.string().url(),
   doc: "Primary Postgres connection string",
@@ -33,14 +33,14 @@ So `freshness: "live"` on an env source emits a dev-mode warning and behaves as 
 - **Files.** Kubernetes ConfigMaps mounted as volumes update in place — kubelet swaps a `..data` symlink atomically, so a re-read sees the new content. (Caveat: `subPath` mounts never update. If your mount uses `subPath`, live reads will faithfully re-read a file that never changes.)
 - **Providers** (SSM, Vault-shaped functions) — re-resolved on demand via `refresh()`.
 
-## Declaring a live zerno
+## Declaring a live tessera
 
 ```ts
-import { zerno } from "komirka";
-import { bind } from "komirka/node";
+import { tessera } from "tessellum";
+import { bind } from "tessellum/node";
 import { z } from "zod";
 
-const upstreamUrl = zerno({
+const upstreamUrl = tessera({
   key: "UPSTREAM_URL",
   schema: z.string().url(),
   exposure: "public",
@@ -48,7 +48,7 @@ const upstreamUrl = zerno({
   freshness: "live",
 });
 
-const rateLimit = zerno({
+const rateLimit = tessera({
   key: "RATE_LIMIT",
   schema: z.coerce.number().int().positive(),
   exposure: "public",
@@ -59,7 +59,7 @@ const rateLimit = zerno({
 const live = bind([upstreamUrl, rateLimit]); // : LiveBinding
 ```
 
-The zernos declare their file refs themselves, so bare entries are all the bind site needs — under `komirka/node`, declared file refs resolve against the filesystem naturally. If any bound zerno is live, the bind result type is a `LiveBinding` instead of a `Snapshot`. This is a hard type split, and it is the point.
+The tesserae declare their file refs themselves, so bare entries are all the bind site needs — under `tessellum/node`, declared file refs resolve against the filesystem naturally. If any bound tessera is live, the bind result type is a `LiveBinding` instead of a `Snapshot`. This is a hard type split, and it is the point.
 
 ## LiveBinding is not a Snapshot — deliberately
 
@@ -67,21 +67,21 @@ The zernos declare their file refs themselves, so bare entries are all the bind 
 
 ```ts
 // A library types its API against pinned, scoped config:
-export function createProxy(cfg: Scope<ConfigOf<typeof proxyZernos>>) { /* ... */ }
+export function createProxy(cfg: Scope<ConfigOf<typeof proxyTesserae>>) { /* ... */ }
 
 createProxy(live);                          // ✗ compile error: LiveBinding is not a Scope
-createProxy(live.snapshot().pick(proxyZernos)); // ✓ pin first, then narrow
+createProxy(live.snapshot().pick(proxyTesserae)); // ✓ pin first, then narrow
 ```
 
 The consequence for DI: *the caller decides when time stops.* A dependency receives values from one coherent instant and cannot observe changes mid-call. Anything that wants fresh values must hold the `LiveBinding` itself — visible in its signature, auditable at the composition root.
 
 ## How a live read works
 
-`live.unwrap(zerno)` uses **poll-on-read** — there are no watchers, no timers, no background loops in core, ever. The cost of freshness is paid at the read site, and three mechanisms keep it cheap and coherent:
+`live.unwrap(tessera)` uses **poll-on-read** — there are no watchers, no timers, no background loops in core, ever. The cost of freshness is paid at the read site, and three mechanisms keep it cheap and coherent:
 
 - **Throttle:** raw re-reads are throttled per source by the `maxStalenessMs` bind option (files default to about one second). Reads inside the staleness window return the current value without touching the filesystem.
 - **Memoize-by-raw:** the validator only runs when the raw content actually changed. A hot loop calling `live.unwrap()` re-validates zero times while the file is stable.
-- **One coherent pass per source:** a single file read serves all zernos backed by that file, so two zernos from the same source never mix generations within one poll.
+- **One coherent pass per source:** a single file read serves all tesserae backed by that file, so two tesserae from the same source never mix generations within one poll.
 
 ```ts
 const live = bind([upstreamUrl, rateLimit], { maxStalenessMs: 5_000 });
@@ -117,27 +117,27 @@ Requests get per-request freshness; nothing inside a request ever tears.
 
 ## When the new value is invalid: current truth wins
 
-Someone fat-fingers the ConfigMap and `RATE_LIMIT` becomes `"unlimited"`. The default is **current truth wins**: there are no magically inherited values. A live re-read that yields an invalid value **poisons** that zerno — reads of it fail until the source is fixed. The honest trade, in one sentence: throw-by-default converts a bad config push from silent staleness into a loud *partial* outage that lasts exactly until the push is fixed — opt into `keepLastGood` per zerno where availability beats freshness.
+Someone fat-fingers the ConfigMap and `RATE_LIMIT` becomes `"unlimited"`. The default is **current truth wins**: there are no magically inherited values. A live re-read that yields an invalid value **poisons** that tessera — reads of it fail until the source is fixed. The honest trade, in one sentence: throw-by-default converts a bad config push from silent staleness into a loud *partial* outage that lasts exactly until the push is fixed — opt into `keepLastGood` per tessera where availability beats freshness.
 
-Partial is load-bearing. `live.snapshot()` never throws wholesale: pinning succeeds, and the poisoned zerno occupies an **error slot** in the snapshot. Only reading *that* zerno throws; every other zerno keeps serving:
+Partial is load-bearing. `live.snapshot()` never throws wholesale: pinning succeeds, and the poisoned tessera occupies an **error slot** in the snapshot. Only reading *that* tessera throws; every other tessera keeps serving:
 
 ```ts
 const cfg = live.snapshot(); // ✓ pins fine — the poison rides along in an error slot
 
-cfg.unwrap(upstreamUrl); // ✓ unaffected zernos keep working
+cfg.unwrap(upstreamUrl); // ✓ unaffected tesserae keep working
 cfg.unwrap(rateLimit);
 // ✗ InvalidLiveValueError: RATE_LIMIT is invalid
 //   carries { issues, lastValidAt, invalidSince, incidentId }
-//   (and the raw value — for non-secret zernos only)
+//   (and the raw value — for non-secret tesserae only)
 ```
 
-Blast radius is proportional to actual usage: one invalid zerno that nothing reads must never 500 the site.
+Blast radius is proportional to actual usage: one invalid tessera that nothing reads must never 500 the site.
 
 A revocation list or a kill switch — worse stale than absent — needs no spelling at all anymore: throw-on-invalid is simply the default.
 
 ### safe: the non-throwing read
 
-`safe(zerno)` returns `{ ok: true, value }` or `{ ok: false, error }`. It is the first thing epoch-consumer code should reach for, and the right shape anywhere you would otherwise wrap `unwrap` in try/catch:
+`safe(tessera)` returns `{ ok: true, value }` or `{ ok: false, error }`. It is the first thing epoch-consumer code should reach for, and the right shape anywhere you would otherwise wrap `unwrap` in try/catch:
 
 ```ts
 const r = live.safe(rateLimit);
@@ -150,7 +150,7 @@ if (r.ok) {
 
 ### Observation and consumption are different planes
 
-The `onInvalid` bind option is the **observation plane**: it fires once per `(zerno, distinct invalid raw)` — not once per failing read — so a hot loop can't melt your metrics. The throws are the **consumption plane**. Both carry the same `incidentId`, so the hook's log line and a request's stack trace join (and dedupe) on one id:
+The `onInvalid` bind option is the **observation plane**: it fires once per `(tessera, distinct invalid raw)` — not once per failing read — so a hot loop can't melt your metrics. The throws are the **consumption plane**. Both carry the same `incidentId`, so the hook's log line and a request's stack trace join (and dedupe) on one id:
 
 ```ts
 const live = bind([upstreamUrl, rateLimit], {
@@ -160,7 +160,7 @@ const live = bind([upstreamUrl, rateLimit], {
 });
 ```
 
-For secret zernos the hook receives `{ rawDigest, length }` instead of the raw — the invalid value never reaches your logging pipeline.
+For secret tesserae the hook receives `{ rawDigest, length }` instead of the raw — the invalid value never reaches your logging pipeline.
 
 ### Invalid is not unavailable
 
@@ -171,20 +171,20 @@ A source that serves garbage and a source that is down are different failures. I
 Some values genuinely prefer availability over freshness — a rate limit, a retry budget. Keep-last-good still exists, as a **bind-site opt-in** with a mandatory coasting budget:
 
 ```ts
-import { keepLastGood } from "komirka";
+import { keepLastGood } from "tessellum";
 
 const live = bind([upstreamUrl, rateLimit], {
   invalid: [keepLastGood(rateLimit, { maxCoastMs: 300_000 })],
 });
 ```
 
-`maxCoastMs` is required — there is no unbounded coasting. While the zerno coasts on its last good value, `health()` reports it as `"coasting"`; past the budget, reads throw `CoastBudgetExceededError` and the status flips to `"invalid-was-valid"`. Reach for this exactly where availability beats freshness, and nowhere else.
+`maxCoastMs` is required — there is no unbounded coasting. While the tessera coasts on its last good value, `health()` reports it as `"coasting"`; past the budget, reads throw `CoastBudgetExceededError` and the status flips to `"invalid-was-valid"`. Reach for this exactly where availability beats freshness, and nowhere else.
 
-Why a bind option and not a descriptor field? Identity. On the descriptor's identity class, two teams that disagree about coasting would hold *different zernos* — a descriptor mismatch over an operational preference. On the cosmetic class, real runtime behavior would hide from identity. How *this process* copes with a bad push belongs to this process's bind site.
+Why a bind option and not a descriptor field? Identity. On the descriptor's identity class, two teams that disagree about coasting would hold *different tesserae* — a descriptor mismatch over an operational preference. On the cosmetic class, real runtime behavior would hide from identity. How *this process* copes with a bad push belongs to this process's bind site.
 
 ### Never-valid is its own error
 
-Current-truth-wins semantics apply after a first valid value. With the default eager `bind`, an invalid-at-boot value still dies at bind inside the aggregated `MissingConfigError`. Through the lazy doors, a zerno that has *never* validated in this process throws `NoValidValueError`:
+Current-truth-wins semantics apply after a first valid value. With the default eager `bind`, an invalid-at-boot value still dies at bind inside the aggregated `MissingConfigError`. Through the lazy doors, a tessera that has *never* validated in this process throws `NoValidValueError`:
 
 ```ts
 const lazy = bind.unchecked([rateLimit]);
@@ -194,15 +194,15 @@ lazy.unwrap(rateLimit);
 
 ### Recovery is one read, not one poll
 
-Poisoned state bypasses the staleness memoization: while a zerno is poisoned, the next read re-reads the source immediately instead of waiting out `maxStalenessMs`. Fix the file or the row, and the very next read recovers. (On Kubernetes the `..data` symlink swap is atomic for single-file, single-pass reads, and multi-file sources are read in one resolved-dir pass — the genuine tear risk is plain files outside k8s, and the poisoned bypass collapses that window too.)
+Poisoned state bypasses the staleness memoization: while a tessera is poisoned, the next read re-reads the source immediately instead of waiting out `maxStalenessMs`. Fix the file or the row, and the very next read recovers. (On Kubernetes the `..data` symlink swap is atomic for single-file, single-pass reads, and multi-file sources are read in one resolved-dir pass — the genuine tear risk is plain files outside k8s, and the poisoned bypass collapses that window too.)
 
 ### What health() reports
 
-`live.health()` gives each zerno a status — `"valid"`, `"invalid-was-valid"`, `"never-valid"`, or `"coasting"` — plus `lastValidAt`, `lastInvalidAt`, `lastThrownAt`, and `throwCount`. Source observation and consumer impact stay distinct on purpose: a zerno that went invalid but nothing reads ("invalid but dormant") is a different incident than one actively failing requests, and that split is how operators triage. Two probe rules: **liveness probes must never consult zerno validity** — a bad config push must not get pods killed — and readiness may gate on `"never-valid"` at most.
+`live.health()` gives each tessera a status — `"valid"`, `"invalid-was-valid"`, `"never-valid"`, or `"coasting"` — plus `lastValidAt`, `lastInvalidAt`, `lastThrownAt`, and `throwCount`. Source observation and consumer impact stay distinct on purpose: a tessera that went invalid but nothing reads ("invalid but dormant") is a different incident than one actively failing requests, and that split is how operators triage. Two probe rules: **liveness probes must never consult tessera validity** — a bad config push must not get pods killed — and readiness may gate on `"never-valid"` at most.
 
 ```ts
 live.health();
-// per-zerno: status ("valid" | "invalid-was-valid" | "never-valid" | "coasting"),
+// per-tessera: status ("valid" | "invalid-was-valid" | "never-valid" | "coasting"),
 // lastValidAt, lastInvalidAt, lastThrownAt, throwCount
 ```
 
@@ -216,7 +216,7 @@ const client = makeUpstreamClient(live.unwrap(upstreamUrl));
 // captured it. Later file swaps change what live.unwrap() returns, not the client.
 ```
 
-There is deliberately no `watch()` or `subscribe()` — that's a background loop by another name. Instead, `live.epoch(zerno)` is a monotonic counter that bumps whenever the zerno's observable state changes: a newly accepted value **and** the transition to invalid alike. One clock — consumers observe validity changes through the same counter they already poll, and use `safe` to learn which kind of change fired:
+There is deliberately no `watch()` or `subscribe()` — that's a background loop by another name. Instead, `live.epoch(tessera)` is a monotonic counter that bumps whenever the tessera's observable state changes: a newly accepted value **and** the transition to invalid alike. One clock — consumers observe validity changes through the same counter they already poll, and use `safe` to learn which kind of change fired:
 
 ```ts
 let epoch = live.epoch(upstreamUrl);
@@ -245,7 +245,7 @@ Rebuild-on-epoch is the whole pattern: pools, agents, and SDK clients get recrea
 Files re-read themselves on poll; providers don't. `refresh(live)` re-resolves the binding's sources and returns a **new pinned Snapshot**:
 
 ```ts
-import { refresh } from "komirka";
+import { refresh } from "tessellum";
 
 const next = await refresh(live); // : Snapshot — a fresh, coherent generation
 ```
@@ -263,12 +263,12 @@ Since core never schedules anything, *you* decide the cadence: refresh on a depl
 On Cloudflare Workers, the env bag is part of the deployment. It never changes for a running deployment — updating a binding or secret rolls a new deployment, and isolates see the new env from birth. `freshness: "live"` on a Workers env source is therefore a no-op with a dev-mode warning:
 
 ```ts
-import { bind } from "komirka/workers";
+import { bind } from "tessellum/workers";
 
 export default {
   async fetch(request: Request, env: Env) {
     const cfg = bind([upstreamUrl, rateLimit], { env });
-    // Any freshness:"live" zerno here degrades to snapshot semantics
+    // Any freshness:"live" tessera here degrades to snapshot semantics
     // (dev-mode warning): workerd env is immutable per deployment.
     return handle(request, cfg);
   },

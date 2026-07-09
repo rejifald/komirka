@@ -3,23 +3,23 @@ title: Principles
 description: The project constitution — every hard constraint, every pitfall found in adversarial review, and the full security model.
 ---
 
-> **Canonical copy:** this page mirrors [`principles.md`](https://github.com/rejifald/komirka/blob/main/principles.md) at the repo root. If they ever disagree, the repo file wins.
+> **Canonical copy:** this page mirrors [`principles.md`](https://github.com/rejifald/tessellum/blob/main/principles.md) at the repo root. If they ever disagree, the repo file wins.
 
 > **Status: design phase.** No code exists yet. This document is the constitution for the
 > project: every hard constraint, every pitfall we have identified (many through adversarial
 > design review), and the full security model. Any future feature or PR must be checked
 > against this file first.
 >
-> **Package name: `komirka`** (комірка — diminutive of комора; the standard Ukrainian CS
-> term for a memory cell / spreadsheet cell: one small addressed slot holding one value).
-> Chosen 2026-07-05 after three verified naming rounds (~360 candidates checked against the
-> npm registry and GitHub); `komirka` was free on npm and github.com/komirka at that date.
-> Every previously parked candidate (`knob`/`knobs`, panel, bobbin, loom, confit, confetti,
-> grain, mote, weft, dial, setpoint, filament, quark) was taken on npm. The 0.0.0
-> name-reservation placeholder is published on npm and the repo lives at
-> [github.com/rejifald/komirka](https://github.com/rejifald/komirka). The primitive is
-> **`zerno`** (зерно — Ukrainian for a grain: one small unit of config; §6) — greppable and
-> on brand, free of the tuning/reactivity that `knob` and `atom` would imply.
+> **Package name: `tessellum`** — from Latin *tessella*, a small mosaic tile. The package is the
+> *tessellation*: many small config tiles composing one complete surface, no gaps and no overlaps.
+> The primitive is **`tessera`** (§6) — one tile, and in Rome a *token*: the watchword *tessera
+> militaris*, and the *tessera hospitalis* split between two parties so that rejoining the halves
+> proved a bond of trust. One config value is one tessera — a single tile that carries its own
+> identity and exposure, inert by design: a tile is *placed*, never *turned*, so there is no
+> runtime tuning and no subscription here (the reason `knob` and `atom` were both rejected).
+> These names replaced an earlier Ukrainian pair — `komirka` (a memory cell) and `zerno` (a
+> grain), chosen 2026-07-05 — on 2026-07-09, trading cultural resonance for decodability by an
+> English-speaking audience.
 
 ## 1. What this project is
 
@@ -50,7 +50,7 @@ Every feature must pass all of these. "It would be convenient" never overrides a
 
 - **P1 — The descriptor is inert data.** Constructing a config bit performs zero I/O, zero
   validation, zero registration, zero side effects. It is frozen and detected by a
-  structural brand field (`$zerno`), never `instanceof` (dual-package hazard).
+  structural brand field (`$tessera`), never `instanceof` (dual-package hazard).
 - **P2 — The descriptor round-trips as JSON.** Everything except the validator function
   serializes. Non-JSON values in descriptor fields (`default`, `sources`) are a
   construction-time `TypeError`.
@@ -72,7 +72,7 @@ Every feature must pass all of these. "It would be convenient" never overrides a
   explicit opt-in. The browser entry ships **no secret-capable sources at all** — this is a
   structural guarantee, not a policy check.
 - **P8 — Eager validation over the explicitly bound subset is the default.**
-  `bind(zernos, sources)` validates exactly the listed set, now, with one aggregated error.
+  `bind(tesserae, sources)` validates exactly the listed set, now, with one aggregated error.
   The lazy door is **half-lazy**: `bind.lazy()` still resolves raw *presence* eagerly
   (missing vars die at bind) and defers only validator execution. The truly-zero door is
   named `bind.unchecked()` so the name carries the warning.
@@ -85,12 +85,12 @@ Every feature must pass all of these. "It would be convenient" never overrides a
   create it.)
 - **P11 — Content-addressed identity with a frozen field list.** Identity =
   `{ key, exposure, sources (order-significant), default (presence + value), freshness, schemaId? }`,
-  canonicalized as `zernov1|` + RFC 8785 JSON, hashed with xxh128. The hash is an index, not
+  canonicalized as `tesserav1|` + RFC 8785 JSON, hashed with xxh128. The hash is an index, not
   a security boundary; structural equality of the identity subset is authoritative.
   `doc`, examples, deprecation metadata, and **all unknown fields** are cosmetic — excluded,
   so a changelog edit can never make two package versions unbindable. `freshness` is in the
   hash because live-vs-snapshot is behaviorally load-bearing: relations reference
-  discriminants by identity, and a live twin of a snapshot zerno must not be identity-equal.
+  discriminants by identity, and a live twin of a snapshot tessera must not be identity-equal.
 - **P12 — `pick()` runtime-restricts.** Narrowing is enforced at runtime (a new scope table
   containing only picked entries) and in the type system (a brand only `pick()` produces;
   the root `Snapshot` is deliberately *not* assignable to `Scope`). This is least-privilege
@@ -105,19 +105,19 @@ Every feature must pass all of these. "It would be convenient" never overrides a
   `process.env[keys[i]]` (dynamic computed property), never `process.env.KEY` — static
   member expressions get folded into literals by DefinePlugin/`define` and leak.
 - **P16 — "If it can change while the process runs, it's state, not config."** The only
-  exception is a zerno explicitly declared `freshness: "live"` over a *re-readable* source
+  exception is a tessera explicitly declared `freshness: "live"` over a *re-readable* source
   (files, providers). Feature-flag targeting, streaming updates, and subscriptions are out
   of scope forever.
 - **P17 — Honest claims.** Every guarantee we advertise states its boundary in the same
   breath: what the leak scan cannot see, what `pick()` does not defend against, what "live"
   cannot do on which runtime. A security story that overclaims is itself a vulnerability.
 - **P18 — Conditional structure is a relation, not a mutable descriptor.** Requiredness
-  that depends on another zerno (`EMAIL_SERVICE_TYPE` selecting smtp vs sendgrid, a
+  that depends on another tessera (`EMAIL_SERVICE_TYPE` selecting smtp vs sendgrid, a
   parameter required only when another is set, per-mode defaults/bounds) is expressed by
   composition objects — `variants()`, `when()`, `rule()` — never by making descriptor
   fields dynamic. Per-branch differences are *different descriptors*. Relations round-trip
   as recursive tagged JSON (`relv1|` content-addressed) even though nesting is rejected in
-  v1. Discriminants and `when()` condition zernos are `snapshot`-only and eagerly resolved
+  v1. Discriminants and `when()` condition tesserae are `snapshot`-only and eagerly resolved
   in **every** bind mode; `rule()` runs at bind and pin, never at `unwrap()`.
 - **P19 — Writes are operator-plane, input-typed, and write-through.** `set()` takes the
   schema's *input* type (Standard Schema has no inverse — parsed values can never
@@ -128,7 +128,7 @@ Every feature must pass all of these. "It would be convenient" never overrides a
   that keeps DB config from becoming a remote-config SDK, as four testable clauses:
   **pull-only** (no watch/subscribe/onChange ever; epoch is a number you compare),
   **context-free reads** (a `unwrap()` that takes per-request/per-user context is a flag SDK
-  — refuse), **uniform** (one value per process per zerno), **operator-plane writes**
+  — refuse), **uniform** (one value per process per tessera), **operator-plane writes**
   (`set()` is for admin panels, CLIs, migrations; request-path `set()` is using config as
   state). Writes may be **verified** (opt-in `verify: "report" | "revert"`): the store's
   kept value is confirmed via write-echo (`storedRaw` in the write's own round trip — the
@@ -138,23 +138,23 @@ Every feature must pass all of these. "It would be convenient" never overrides a
   protection remains the poisoned-slot machinery — except for **mangled-but-valid**
   values (a truncated URL that is still a URL), which only verification catches.
 
-- **P20 — Wiring is deployment reality, never contract.** A zerno's declared refs are the
+- **P20 — Wiring is deployment reality, never contract.** A tessera's declared refs are the
   library's contract (identity); *where that lives on this platform* is the deployment's
-  wiring, spelled inline per entry (`env(zerno, "NAME")` renames a declared ref in place,
+  wiring, spelled inline per entry (`env(tessera, "NAME")` renames a declared ref in place,
   preserving fallbacks; `chain()` is the only full-replacement spelling; group wiring is
   one entry with `{ prefix, overrides }`) — identity-preserving by definition. Wiring
-  combinators are **pure JSON-representable data** (zerno identity ref + ref kind +
+  combinators are **pure JSON-representable data** (tessera identity ref + ref kind +
   strings + provider impl *ids*; impls declare `{ id, color }`): capability is granted
   only by the bind entry point, never by wiring data — which is what keeps a per-request
   Workers bag out of "inert" values, keeps every wiring attestable by the bake manifest
   importing entry modules, and lets bake compute every effective name. Effective names
   propagate to *every* surface — `.env.example`, the lockfile (`declared → effective`,
   normative, the app-wide name → exposure authority), the leak scan's name union, and
-  every error message (effective name first, declared in parens). A non-secret zerno may
+  every error message (effective name first, declared in parens). A non-secret tessera may
   never be wired onto a name in the secret-name set (`WiringExposureError` — the
   laundering ban, backed by a well-known-secret-suffix denylist with an explicit
   allowlist); wiring-created convergence errors (`WiringCollisionError`); one entry per
-  zerno ever (`DuplicateWiringError` — no precedence hierarchy); wiring soundness checks
+  tessera ever (`DuplicateWiringError` — no precedence hierarchy); wiring soundness checks
   run in the eager phase of every door; bind-site transforms only restate
   manifest-declared data (`WiringSkewError` on divergence).
 
@@ -162,18 +162,18 @@ Every feature must pass all of these. "It would be convenient" never overrides a
   secrets flow through `class: "secret"` providers (same batch shape — payload forks are
   the dual-contract drift class, banned; the secret write result is *derived*:
   `Omit<WriteResult, "storedRaw">`). The classing buys three mechanisms, stated honestly:
-  **routing** (bidirectional pairing — a secret-class provider serves only secret zernos;
-  provider-sourced secret zernos require a secret-class store or an explicit, lockfile-
+  **routing** (bidirectional pairing — a secret-class provider serves only secret tesserae;
+  provider-sourced secret tesserae require a secret-class store or an explicit, lockfile-
   flagged `holdsSecrets` opt-in that inherits the *full* obligation set); a **quarantine
   perimeter** (error objects from secret-serving providers are never propagated — a store
-  client's connection error can embed the provider's own credential, which no zerno-value
+  client's connection error can embed the provider's own credential, which no tessera-value
   scrub can find; core substitutes `{providerId, key, errorName, messageDigest}`); and a
   **conformance profile** (poisoned-fake probes; `fakeSecretProvider()` ships
   pre-certified). It does *not* buy author infallibility — provider-internal caching or
   logging of raws remains kit-probed only. Core runtime-reshapes every slot/result from
   secret-serving providers (whitelist copy — the type is the lint, the reshape is the
-  enforcement), segregates batches by exposure, disables echo-verify for secret zernos
-  everywhere, gates `literal()` on secret zernos (`SecretLiteralError` outside tests), and
+  enforcement), segregates batches by exposure, disables echo-verify for secret tesserae
+  everywhere, gates `literal()` on secret tesserae (`SecretLiteralError` outside tests), and
   requires discriminants to be public (`DescriptorError` — branch selection is a function
   of the discriminant's value). `cacheUntil` on a slot bounds the *cache*, never promises
   lease handling: ceiling + provider-down fails closed, and leased/dynamic credentials
@@ -189,30 +189,30 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
   all members re-creates the god-object at the bundler level even if evaluation is lazy —
   and the boot ritual (`check(everything)`) re-imports every schema exactly where size
   matters. *Rule:* groups are plain arrays declared near call sites; docs never show a
-  central all-zernos module imported by runtime code; enumeration is bake's job (build-time),
+  central all-tesserae module imported by runtime code; enumeration is bake's job (build-time),
   never a runtime registry.
 - **Lazy validation's 3am 500.** Pure-lazy binding converts deploy-time failures into
   request-time failures on rarely-hit paths (the refund endpoint's key, unset for weeks).
   *Rule:* eager-over-bound-subset is the default; the lazy door is half-lazy (presence still
   eager); `bind.unchecked` is the only fully deferred form and is named to deter.
-- **Boot-validated green, invalid at 3am.** A `live` zerno re-validates when its raw value
+- **Boot-validated green, invalid at 3am.** A `live` tessera re-validates when its raw value
   changes; an operator typo can make reads fail on paths that boot-validated green.
-  *Decision (author):* **current truth wins** — no magically inherited values. The zerno
+  *Decision (author):* **current truth wins** — no magically inherited values. The tessera
   becomes *poisoned*: `unwrap()` throws `InvalidLiveValueError` (`issues`, `lastValidAt`,
   `invalidSince`, shared `incidentId`); `safe()` is the non-throwing form; `epoch` bumps
   on the invalid *transition* (single clock — epoch consumers use `safe`); `onInvalid`
-  fires once per (zerno, distinct invalid raw), receiving `{ rawDigest, length }` for
+  fires once per (tessera, distinct invalid raw), receiving `{ rawDigest, length }` for
   secrets. Keep-last-good is a **bind-site opt-in** —
-  `{ invalid: [keepLastGood(zerno, { maxCoastMs })] }`, `maxCoastMs` required, past budget
+  `{ invalid: [keepLastGood(tessera, { maxCoastMs })] }`, `maxCoastMs` required, past budget
   → `CoastBudgetExceededError` — never a descriptor field (identity-class would make two
   teams' staleness preferences a descriptor mismatch; cosmetic-class would hide a
   behavioral field). `NoValidValueError` stays reserved for never-valid. Poisoned state
   bypasses staleness memoization so recovery is one read, not one poll interval. The docs
   state the trade in one honest sentence: throw-default converts a bad config push from
   silent staleness into a loud partial outage lasting until the push is fixed.
-- **One bad zerno must not 500 the whole site.** All-or-nothing pins would turn one invalid
-  *unused* zerno into a 100% outage at the per-request pin. *Rule:* `snapshot()` never
-  throws wholesale — an invalid zerno occupies an **error slot**; only `unwrap()` of that zerno
+- **One bad tessera must not 500 the whole site.** All-or-nothing pins would turn one invalid
+  *unused* tessera into a 100% outage at the per-request pin. *Rule:* `snapshot()` never
+  throws wholesale — an invalid tessera occupies an **error slot**; only `unwrap()` of that tessera
   throws. Blast radius stays proportional to actual usage. (Restart asymmetry — eager bind
   at boot still fails whole-process — is inherent and accepted: a restarted pod and a
   running pod now at least fail on the *same values*.)
@@ -223,16 +223,16 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
   `SourceUnavailableError` + `onSourceError` (never routed through `onInvalid`). Otherwise
   the config store becomes a request-path availability dependency and fleet availability
   = min(app, config DB).
-- **Health probes amplify config failures.** "Any live zerno invalid" wired into readiness
+- **Health probes amplify config failures.** "Any live tessera invalid" wired into readiness
   takes every pod out of the LB simultaneously — connection failures instead of 500s.
   *Rule:* `health()` distinguishes `valid | invalid-was-valid | never-valid | coasting`
   (plus `lastThrownAt`/`throwCount` — "invalid but dormant" vs "actively failing" is the
-  operator's triage split); documented probe contract: liveness never consults zerno
+  operator's triage split); documented probe contract: liveness never consults tessera
   validity, readiness at most `never-valid`.
 - **Async validators detonating in sync paths.** Standard Schema's `validate()` may legally
   return a Promise, and async-ness can be input-dependent — one probe at bind proves
   nothing. *Rule:* every validation site (eager bind, lazy first-read, live re-validation)
-  checks for a thenable and throws `AsyncValidatorInSyncBindingError` naming the zerno and
+  checks for a thenable and throws `AsyncValidatorInSyncBindingError` naming the tessera and
   the remediation (an async provider entry — the binding becomes an `AsyncBinding` — or a sync validator).
 - **Shared mutable validated output.** Memoization hands every caller the same object; one
   caller's `hosts.pop()` corrupts config for the whole process. *Rule:* validated outputs
@@ -246,7 +246,7 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
   chains change provenance without changing the string). *Rule:* cache key =
   `(resolvedSourceIndex, rawString | ABSENT)`. With wiring overrides, any value-stability
   comparison keys on `(identity, effectiveRefsHash)` — two bindings may legally wire
-  the same zerno differently.
+  the same tessera differently.
 - **Iterable snapshots are a typed lie.** TypeScript destructures iterables by *element
   type*, never positionally — `const [url, size]` from an iterable types both slots as
   the union; faking it with a tuple intersection makes `.map`/`.length` typecheck and
@@ -256,11 +256,11 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
 - **`.values` is an aggregate leak surface.** One `logger.info({ cfg: cfg.values })`
   would dump every secret in the binding — a class `unwrap()` never enabled. *Rule:* the
   values bag is null-prototype with a redacting `toJSON` and Node inspect hook; spread is
-  documented as "`unwrap()` on every zerno"; record keys `toJSON`/`then`/`constructor` are
+  documented as "`unwrap()` on every tessera"; record keys `toJSON`/`then`/`constructor` are
   rejected; the client/library lint bans `cfg.values` as a function argument or spread.
   `Scope` carries the same `.values` view so the branded handoff is never worse
   ergonomics than naked strings.
-- **Type widening must fail safe, not freeze silently.** A `Zerno<string>` annotation
+- **Type widening must fail safe, not freeze silently.** A `Tessera<string>` annotation
   erases the freshness literal; if the sugar views survived widening, destructuring a
   live binding would silently freeze liveness. *Rule:* freshness is a type parameter
   defaulting to `'unknown'`, which gets *no* sugar (safe degradation) — plus the runtime
@@ -278,10 +278,10 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
   wiring; resolution capability enters only at the bind entry point — on workers the bag
   is a required bind option — and an inert-entry conformance test (every combinator
   output JSON-round-trips) mechanically enforces it.
-- **A rename that silently replaces is an outage deferred.** If `env(zerno, "CUSTOM")`
+- **A rename that silently replaces is an outage deferred.** If `env(tessera, "CUSTOM")`
   replaced the declared ref *set*, a deployment that only meant to rename would silently
-  drop the file fallback the zerno's author declared for outages. *Rule:*
-  `env`/`file`/`provider(zerno, …)` rename the matching declared ref in place; `chain()`
+  drop the file fallback the tessera's author declared for outages. *Rule:*
+  `env`/`file`/`provider(tessera, …)` rename the matching declared ref in place; `chain()`
   is the only replacement spelling and its errors enumerate every dropped ref; read
   provenance (which ref supplied each value) is recorded and surfaced.
 - **Chains must carry color.** A `chain()` whose link is an async provider must make the
@@ -300,7 +300,7 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
 
 - **"Live" env vars are physically impossible on Node.** The OS environment block of a
   running process never changes — k8s env edits require a pod restart. A `live` `{env}`
-  zerno works in unit tests (which mutate `process.env`) and silently does nothing in
+  tessera works in unit tests (which mutate `process.env`) and silently does nothing in
   production. *Rule:* the docs and the pitch say "live = poll-on-read of a **re-readable**
   source (files, providers)"; the real-world channel is k8s volume-mounted
   ConfigMaps/Secrets (updated in place via the `..data` symlink swap — note `subPath`
@@ -309,19 +309,19 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
   one request can observe different generations — first fetch hits the old host, the audit
   write hits the new one. *Rule:* per-request pinning (`binding.snapshot()` in middleware)
   is THE documented consumption pattern; pinning reads each source in a single coherent
-  pass (one file read serves all zernos from that file).
+  pass (one file read serves all tesserae from that file).
 - **Liveness poisoning the DI contract.** A library typed against `Snapshot` must be able
   to assume value stability. *Rule:* the type split is load-bearing — a binding containing
-  any live zerno is a `LiveBinding`, not assignable where `Snapshot` is expected; `pick()`
+  any live tessera is a `LiveBinding`, not assignable where `Snapshot` is expected; `pick()`
   pins.
 - **Workers global-state trap.** Module-scope binding is impossible on workerd (no env
   exists yet); stashing the first request's env serves it to every later request. *Rule:*
   the workers entry takes `env` as an explicit bind argument inside the handler; per-request
   eager bind is made ~free by a per-process validation cache keyed on
-  `(zerno identity hash, rawString)`.
-- **The syscall amplifier.** Live file sources re-read on every `unwrap()` — 3 zernos × 2k req/s
+  `(tessera identity hash, rawString)`.
+- **The syscall amplifier.** Live file sources re-read on every `unwrap()` — 3 tesserae × 2k req/s
   = 6k synchronous reads/s on the event loop. *Rule:* poll-on-read is throttled per source
-  (`maxStalenessMs`, default ~1s for files); one read per window serves all zernos fed by
+  (`maxStalenessMs`, default ~1s for files); one read per window serves all tesserae fed by
   that source.
 - **`refresh()` under-specification.** In-place swap tears config under consumers holding
   the snapshot; partial provider failure yields a snapshot mixing new and old values;
@@ -331,24 +331,24 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
   coalescing in core.
 - **Live buys nothing for constructed values.** `new Pool(cfg.unwrap(dbUrl))` at boot never
   sees a refresh; most real config consumption is construction-time. *Rule:* say so in the
-  docs (with the Pool example); ship `binding.epoch(zerno)` — a monotonic counter — so user
+  docs (with the Pool example); ship `binding.epoch(tessera)` — a monotonic counter — so user
   code rebuilds derived state cheaply; no watch/subscribe API in core.
 
 ### Identity & cross-package DI
 
-- **Schema-swap interchangeability.** The validator cannot be hashed, so two same-key zernos
+- **Schema-swap interchangeability.** The validator cannot be hashed, so two same-key tesserae
   with different schemas would collide silently and validation would depend on which copy
   was bound. *Rule:* schemaId via the fingerprint/version ladder when available, plus the
   always-on floor: any hash-fallback resolution **re-validates with the caller's schema**
   (memoized per descriptor-hash × caller instance).
 - **Cosmetics in the identity hash.** Hashing `doc` makes two semver-distinct installs
   unbindable over a changelog edit, with no remedy inside `node_modules`. *Rule:* the
-  identity field list is closed and versioned (`zernov1|`); everything else — including
+  identity field list is closed and versioned (`tesserav1|`); everything else — including
   unknown future fields — is cosmetic.
 - **Collisions that never meet.** Two bindings created in different modules never pass
   through one `bind()` call, so bind-time collision detection cannot fire; a later `unwrap()`
   with the "wrong" twin produces a bare not-bound error hours from the cause. *Rule:*
-  `unwrap()` has a three-way contract — hit / `UnboundZernoError` /
+  `unwrap()` has a three-way contract — hit / `UnboundTesseraError` /
   `DescriptorMismatchError` — and the mismatch error carries both canonical descriptors, a
   field-level diff, and a paste-able `unify` snippet. Key-based resolution never silently
   substitutes. An opt-in dev-mode registry warns on the first second-distinct-hash
@@ -356,14 +356,14 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
 - **Dual-package canonicalization drift.** The config library itself duplicated at two
   versions could hash byte-identical descriptors differently. *Rule:* canonicalization is a
   frozen wire format (RFC 8785 over the closed field list); structural equality is
-  authoritative and the hash is only an index; `$zerno` brand, never `instanceof`.
+  authoritative and the hash is only an index; `$tessera` brand, never `instanceof`.
 - **`pick()` as a type-only fiction.** If narrowing is types-only, any callee holding the
   root snapshot can mint a structurally identical descriptor and read anything — including
   provider-resolved values it could never get from `process.env`. *Rule:* `pick()` builds a
   runtime-restricted scope; non-members throw `NotInScopeError`; the `Scope` brand is the
   only type library signatures accept.
 - **Import-time source spoofing.** A mutable global `provide()` lets any dependency
-  redirect a zerno's source at import time. *Rule:* there is no global provide; providers
+  redirect a tessera's source at import time. *Rule:* there is no global provide; providers
   are supplied at bind, at the composition root, full stop.
 
 ### Conditional config (variants) & writes
@@ -373,25 +373,25 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
   defaults/bounds work — branches never co-bind); a naive key-collision check would fire
   `DescriptorMismatchError` telling the user to merge two intentionally different
   descriptors. *Rule:* normative lookup order — exact identity hit → inactive-branch
-  member → `InactiveVariantError` (a *subclass* of `UnboundZernoError`, so the three-way
-  contract is refined, not broken) → key collision vs direct/*active* zernos only →
-  `DescriptorMismatchError` → `UnboundZernoError`.
+  member → `InactiveVariantError` (a *subclass* of `UnboundTesseraError`, so the three-way
+  contract is refined, not broken) → key collision vs direct/*active* tesserae only →
+  `DescriptorMismatchError` → `UnboundTesseraError`.
 - **A live discriminant is torn topology.** A branch switch mid-process means half a
-  request on smtp, half on sendgrid. *Rule:* discriminants and `when()` condition zernos
+  request on smtp, half on sendgrid. *Rule:* discriminants and `when()` condition tesserae
   are `snapshot`-only, enforced at construction *and* at bind (`LiveDiscriminantError`) —
   and `freshness` sits in the identity hash so a live twin cannot pass identity matching.
   In `AsyncBinding`, the discriminant is pinned at `ready()` and exempt from staleness
   re-reads; `set()` on it is a *staged* write (fleet-visible, locally inert) that takes
   effect only via explicit `refresh()`, which re-reads discriminant + full active branch
   as one coherent batch.
-- **Branch zernos bound directly are contradictory membership.** `bind([email, smtp.host])`
+- **Branch tesserae bound directly are contradictory membership.** `bind([email, smtp.host])`
   claims smtp.host is both always-required and branch-conditional. *Rule:*
-  `AmbiguousZernoMembershipError` at bind.
+  `AmbiguousTesseraMembershipError` at bind.
 - **Sibling-branch exclusivity is intra-group only.** Two different groups' active
   branches can both claim `SMTP_PORT` with different descriptors. *Rule:* bind-time
   conflict pass over the *active* set (error carries the variant context); bake checks the
   cross-product of branch combinations statically.
-- **Defaults must not resurrect a dead subtree.** A condition zerno living in an inactive
+- **Defaults must not resurrect a dead subtree.** A condition tessera living in an inactive
   branch would resolve via its default and make its own group look active. *Rule:*
   transitive inactivity is specced; nesting is rejected in v1 (`VariantsNestingError`)
   but the relation wire format is recursive from day one, so enabling nesting later is a
@@ -407,7 +407,7 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
 - **Invalidate-and-refetch breaks read-your-writes.** Re-reading a lagging replica after a
   write serves the pre-write value to the operator who just saved. *Rule:* write-through
   cache; never re-read as part of `set()`.
-- **Multi-zerno writes tear durable state.** A crash between the discriminant write and its
+- **Multi-tessera writes tear durable state.** A crash between the discriminant write and its
   branch values leaves the *database itself* saying smtp-with-no-host — every replica
   poisons on next read. *Rule:* `setMany()` validates the post-state as a whole and is
   atomic only on providers declaring `atomicWrites` (one transaction, all-or-nothing
@@ -420,8 +420,8 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
 - **Write-time validation is writer-local.** A v1 replica's `set()` can write a value v2
   replicas reject at read time (rolling-deploy schema skew) — and operators can bypass
   `set()` entirely with raw SQL. *Rule:* documented plainly; containment = error slots +
-  `health()` + per-zerno `keepLastGood` recommended for DB-sourced zernos.
-- **Hot-zerno expiry is a thundering herd.** 500 concurrent requests one ms after staleness
+  `health()` + per-tessera `keepLastGood` recommended for DB-sourced tesserae.
+- **Hot-tessera expiry is a thundering herd.** 500 concurrent requests one ms after staleness
   expiry = 500 provider reads. *Rule:* per-key single-flight; expired reads block on the
   one in-flight read so `maxStalenessMs` stays an honest hard bound (stale-while-revalidate
   only ever as a loudly-named opt-in).
@@ -440,9 +440,9 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
   it. Core guarantees providers unique keys, never-empty batches, and no duplicate write
   keys. The sync source contract mirrors the same shape, making single-coherent-pass-
   per-source structural.
-- **The write path re-opens secret leaks.** `onInvalid(zerno, raw, …)` pipes raw secrets to
+- **The write path re-opens secret leaks.** `onInvalid(tessera, raw, …)` pipes raw secrets to
   log hooks; validator and DB-driver messages echo values; `set()` rethrows provider
-  errors to admin UIs. *Rule:* structural redaction for secret zernos — hooks receive
+  errors to admin UIs. *Rule:* structural redaction for secret tesserae — hooks receive
   `{ rawDigest, length }`; core scrubs the raw from every surfaced message (best-effort,
   documented); `WriteFailedError` carries a scrubbed cause.
 - **Auto-revert without version-confirmed corruption is data-losing.** A read-back through
@@ -456,13 +456,13 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
   installs the committed write — anything else recreates the "my save failed" false alarm.
 - **Byte-equality verification dies on normalizing stores.** JSONB reorders keys; triggers
   trim; the revert is normalized too, so `verify: "revert"` would brick every write with
-  no fixpoint. *Rule:* equality at the schema level (byte-equal OR parsed-equal), per-zerno
+  no fixpoint. *Rule:* equality at the schema level (byte-equal OR parsed-equal), per-tessera
   `equals()` escape hatch, and `normalizes: true` providers refuse revert. Revert results
   are reported as `revertWritten` + `revertVerified`, never a single overclaiming flag.
 - **Auto-revert of a secret un-rotates a leaked credential.** The store mangles the *new*
   key; revert silently puts the *compromised* one back in service while the error talks
-  about truncation. *Rule:* secret zernos refuse `verify: "revert"` unless opted in
-  per-zerno; `WriteMangledError` always states `nowLive: "prev" | "unknown"` with the
+  about truncation. *Rule:* secret tesserae refuse `verify: "revert"` unless opted in
+  per-tessera; `WriteMangledError` always states `nowLive: "prev" | "unknown"` with the
   previous value's digest so a rotation-undo is unmissable.
 
 ### Bundling & bake
@@ -475,12 +475,12 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
   second entrypoints sail through. *Rule:* the mandatory stack is: required `targets`
   declaration → generated-module-only delivery → no-secret-sources browser entry → AST lint
   banning raw env reads in client-designated code → bake coverage report (manifest vs
-  client-reachable zernos) → allowlist leak scan. No single mechanism is claimed as
+  client-reachable tesserae) → allowlist leak scan. No single mechanism is claimed as
   sufficient.
 - **Trusting the package author's `exposure` for the app's bundle.** A sloppy or hostile
   dependency can declare `exposure: "public"` over `{ env: "STRIPE_SECRET_KEY" }`. *Rule:*
   client-target membership requires **app-level attestation** in the manifest
-  (`targets.client` enumerates zerno groups explicitly) plus deny-by-default env-source
+  (`targets.client` enumerates tessera groups explicitly) plus deny-by-default env-source
   allowlisting for the client target. `exposure: "public"` is necessary, never sufficient.
 - **Build-once-deploy-many vs inlining.** Baking an env-varying value freezes the build
   env's value into promoted artifacts. *Rule:* baked = constant-per-build by contract;
@@ -488,7 +488,7 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
   JSON), not something we pretend inlining solves.
 - **Bake executes the manifest.** Evaluating a user module graph at build time is the
   build-time-RCE class StitchAPI already got bitten by (openapi codegen, PR #438). *Rule:*
-  the manifest must be side-effect-free (checked: zerno construction is inert, so a manifest
+  the manifest must be side-effect-free (checked: tessera construction is inert, so a manifest
   that does I/O is detectable); bake runs it in a constrained context and treats it as
   sensitive build input.
 - **Stale bake artifacts.** A library upgraded after baking silently serves stale-shaped
@@ -496,27 +496,27 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
   gate — client code imports schema-free handles, not the upgraded descriptor, so there is no
   runtime descriptor to compare in prod); the runtime `StaleBakeError` is a **dev-only**
   check, stripped from production builds (ADR 0003).
-- **Registry side effects.** Any runtime "all zernos" registry breaks tree-shaking and
+- **Registry side effects.** Any runtime "all tesserae" registry breaks tree-shaking and
   reintroduces import-order magic. *Rule:* enumeration happens only at bake time, from the
   explicit manifest. There is no runtime registry, period.
 - **The spread hides the attestation delta.** With a compose-only manifest
-  (`client: [...emailPublic]`), a dependency bump that adds a zerno to `emailPublic` leaves
-  the manifest byte-identical — CODEOWNERS never fires, and the new zerno ships to the
+  (`client: [...emailPublic]`), a dependency bump that adds a tessera to `emailPublic` leaves
+  the manifest byte-identical — CODEOWNERS never fires, and the new tessera ships to the
   browser unreviewed. *Rule:* the manifest is compose-only *source*; the **attestation
   artifact is a committed lockfile** (`config.manifest.lock.json` — RFC 8785 canonical,
   sorted by identity hash, per-entry provenance including defining module / package
-  version and source refs, so "this zerno became DB-mutable" shows up in review).
+  version and source refs, so "this tessera became DB-mutable" shows up in review).
   CODEOWNERS sits on the lockfile; `bake --check` is a frozen-diff CI gate
   (`--frozen-lockfile` semantics) with the client-target delta rendered human-readably.
-  Feature modules own their zerno groups next to their code; zerno definitions *inside* the
+  Feature modules own their tessera groups next to their code; tessera definitions *inside* the
   manifest draw a lint warning (hygiene — the lockfile is the enforcement).
 - **The CI gate is adversary-triggerable.** `bake --check` runs on every PR and executes
-  the manifest import closure — including zerno files inside dependency-bumped third-party
+  the manifest import closure — including tessera files inside dependency-bumped third-party
   packages — which is the PR-#438 build-time-RCE class relocated into CI. *Rule:*
   constrained execution is a security boundary in CI, not hygiene: no network, no fs
   writes outside declared output, no CI-secret env reads, and the check job runs with
   **zero credentials** (it needs only the checkout and the committed lockfile).
-- **Glob discovery captures the wrong zernos.** Repo-root globs pull sibling apps' secrets
+- **Glob discovery captures the wrong tesserae.** Repo-root globs pull sibling apps' secrets
   into this app's enumeration, execute test fixtures with intentionally broken
   descriptors, and order nondeterministically. *Rule:* import-graph or explicit package
   lists are the documented discovery path; glob is an authoring convenience, workspace-
@@ -526,7 +526,7 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
   descriptors and schemas (bundlers cannot DCE properties of a shared object) — a
   console-branch browser build would still carry smtp+sendgrid schema chains. *Rule:*
   split heavy branches into their own files; annotate constructors `/* @__PURE__ */`;
-  baked clients are immune (shim only), enforced by the client-graph lint (no `*.zernos.ts`
+  baked clients are immune (shim only), enforced by the client-graph lint (no `*.tesserae.ts`
   reachable from a client entry).
 
 ## 4. Security model
@@ -552,13 +552,13 @@ ones (provider-resolved: SSM, Vault) — and only if the root snapshot is never 
 | Hand-rolled `process.env.X` in client code | AST lint rule (raw env reads banned in client-designated code); allowlist scan catches the value |
 | Sourcemaps (`sourcesContent`), `.gz`/`.br` twins, HTML, JSON assets | Leak scan covers **all** emitted assets, decompresses known formats |
 | Request-time SSR payloads (`__NEXT_DATA__`, hydration JSON) | **Out of scope for any build-time scan** — closed at runtime: secret values throw on `JSON.stringify`/structured-clone |
-| Secrets echoed by validator error messages | For secret zernos, BYO validator text is untrusted: reports carry issue counts and paths only, never messages or values |
-| Secrets in CI logs via the scanner itself | Scan findings report location + zerno key with scrubbed context — never the value; bake never holds secret values at all (P14) |
+| Secrets echoed by validator error messages | For secret tesserae, BYO validator text is untrusted: reports carry issue counts and paths only, never messages or values |
+| Secrets in CI logs via the scanner itself | Scan findings report location + tessera key with scrubbed context — never the value; bake never holds secret values at all (P14) |
 | Config topology recon (env names, provider paths) via served manifest | The manifest and bake report are build artifacts, never served; docs say so explicitly |
 | Cross-request/tenant bleed on Workers | P3: no ambient binding, no fallback; per-request bind |
 | Window-injected config spoofing (XSS ordering) | Injected browser config is an untrusted input boundary: revalidated on read, never used for secret-tier values |
 | Prototype pollution via `decode: "json"` / nested-key sources | Null-prototype objects throughout decode/merge; `__proto__`/`constructor`/`prototype` keys rejected before any validator runs |
-| Supply chain: dependency-declared zernos entering the client bake | App attestation + deny-by-default source allowlist (never trust package-declared `exposure` alone) |
+| Supply chain: dependency-declared tesserae entering the client bake | App attestation + deny-by-default source allowlist (never trust package-declared `exposure` alone) |
 | Supply chain: import-time `provide()` spoofing | No global provide exists (P3) |
 | Build-time RCE via manifest execution | Side-effect-free manifest contract, constrained execution, sensitive-input handling |
 
@@ -566,7 +566,7 @@ ones (provider-resolved: SSM, Vault) — and only if the root snapshot is never 
 
 The scan is an **allowlist** model: flag any high-entropy string in a client-target
 artifact that is not a registered public value — this requires zero secret material in CI,
-catches hand-rolled secrets that never became zernos, and catches accidental `define`
+catches hand-rolled secrets that never became tesserae, and catches accidental `define`
 inlining. Key-name scanning matches whole tokens adjacent to env-access patterns (never
 bare substrings — `PORT` must not match `viewport`). Value-scanning, where used at all, is
 entropy/length-gated: a secret of `"8080"` is unscannable, and the scan says so
@@ -587,7 +587,7 @@ gate.
   exposure gates capture ~90% of real leak vectors at ~0 ceremony.
 - **No environment-cascade DSL** (dev/staging/prod profile merging) — environments are
   different sources plus overrides, one layer.
-- **No runtime registry, no derived-zerno expression language, no reachability-analysis
+- **No runtime registry, no derived-tessera expression language, no reachability-analysis
   codegen** (the manifest is explicit).
 - **No leased/dynamic credentials** — Vault dynamic DB creds, STS session tokens, and
   anything needing renewal must not be served through this library: `cacheUntil` bounds
@@ -614,7 +614,7 @@ gate.
   recorded in the lockfile so the attestation diff shows it).
 - Stale-while-revalidate for async reads: not in v1 (expired reads block on a single-flight
   re-read so `maxStalenessMs` stays honest); only ever as a loudly-named opt-in.
-- `cfg.update(zerno, fn, { retries })` read-modify-write helper: deferred — it is a
+- `cfg.update(tessera, fn, { retries })` read-modify-write helper: deferred — it is a
   five-line userland loop over `get`/`set`/`WriteConflictError`.
 - Provider impl ergonomics: required `{ id, color }` object contract (default) vs an
   id-keyed bind-opts provider table as the only form — revisit if impl authoring friction
@@ -624,8 +624,8 @@ gate.
   must be an explicit flag, never `NODE_ENV` sniffing.
 - Dynamic (non-literal) name/path arguments to combinators on bake-covered targets:
   banned in v1 (lint + bake refusal); revisit if a real case appears.
-- ~~Final naming~~ — decided: the package is `komirka` (see header). Still open: whether
-  the primitive stays `zerno` (with `$zerno` brand and `zernov1|` identity prefix) or takes a
+- ~~Final naming~~ — decided: the package is `tessellum` (see header). Still open: whether
+  the primitive stays `tessera` (with `$tessera` brand and `tesserav1|` identity prefix) or takes a
   cell-flavored name to match the package.
 
 ## 7. Relationship to StitchAPI

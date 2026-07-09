@@ -1,4 +1,4 @@
-# ADR 0001 — Zerno inheritance and derivation (value fallback and transform across descriptors)
+# ADR 0001 — Tessera inheritance and derivation (value fallback and transform across descriptors)
 
 - **Status:** Accepted (2026-07-08; design phase — no code yet)
 - **Date:** 2026-07-08
@@ -6,10 +6,10 @@
 - **Constitution touchpoints:** P2 (descriptors round-trip as JSON), P4 (BYO Standard
   Schema / no silent downgrade), P5 (sources are external data refs, impls injected), P7
   (fail-closed exposure), P11 (content-addressed identity), P13/P14 (bake, and it never
-  resolves secrets), P16 (config-not-state), P17 (honest claims), P18 (cross-zerno structure
+  resolves secrets), P16 (config-not-state), P17 (honest claims), P18 (cross-tessera structure
   is a relation), P20 (wiring is deployment reality, never contract), P21 (secret laundering
   ban)
-- **Related docs:** [`concepts/zerno`](../../site/content/docs/concepts/zerno.mdx),
+- **Related docs:** [`concepts/tessera`](../../site/content/docs/concepts/tessera.mdx),
   [`concepts/binding`](../../site/content/docs/concepts/binding.mdx),
   [`concepts/identity`](../../site/content/docs/concepts/identity.mdx),
   [`concepts/conditional`](../../site/content/docs/concepts/conditional.mdx),
@@ -47,30 +47,30 @@ This ADR resolves three questions raised against the first draft:
 
 ### The term "fallback chain" is already taken — and this is a *different axis*
 
-komirka already ships a "fallback chain," and it means something specific: the ordered
-`sources` list *within a single zerno* — `[{ env }, { file }, { provider }]` — where the
+tessellum already ships a "fallback chain," and it means something specific: the ordered
+`sources` list *within a single tessera* — `[{ env }, { file }, { provider }]` — where the
 first source that yields a raw value wins. The docs call this the **declared fallback
 chain**, and `chain()` is the deployment-wiring spelling that replaces it. That axis answers
 *"where does **this** value come from?"* across **external locations**.
 
-Inheritance is an **orthogonal axis**: *"when this value is absent, **which other zerno's**
-value takes its place, and how is it adapted?"* The two compose — a zerno resolves its own
+Inheritance is an **orthogonal axis**: *"when this value is absent, **which other tessera's**
+value takes its place, and how is it adapted?"* The two compose — a tessera resolves its own
 source chain first, and only then inherits — but they must not be conflated in the
-vocabulary. This ADR reserves **"inheritance/derivation"** for the zerno-to-zerno axis and
+vocabulary. This ADR reserves **"inheritance/derivation"** for the tessera-to-tessera axis and
 leaves **"fallback chain"** to mean the source-precedence list.
 
 ### Why today's primitives do not cover it
 
-- **`default`** is a static JSON literal (P2), the absolute floor of one zerno's resolution.
-  It cannot track another zerno's *resolved* value, and it certainly cannot transform one.
+- **`default`** is a static JSON literal (P2), the absolute floor of one tessera's resolution.
+  It cannot track another tessera's *resolved* value, and it certainly cannot transform one.
   Inlining `default: "info"` into both `LOG_LEVEL` and `AUTH_LOG_LEVEL` duplicates the floor
   and silently drifts the day someone changes one.
 - **`sources`** are *external* data refs whose implementations are injected at bind (P5). A
   source names a place in the world; it does not name another descriptor, and there is no
-  impl to inject for "resolve zerno A."
+  impl to inject for "resolve tessera A."
 - **`chain()`** is deployment wiring (P20) — deliberately *not* contract, identity-free. A
   library author declaring "`AUTH_LOG_LEVEL` inherits `LOG_LEVEL`" is stating part of what
-  the zerno *means*; that is contract, not a per-deployment choice.
+  the tessera *means*; that is contract, not a per-deployment choice.
 
 So inheritance is genuinely new surface. The questions are *what kind* of surface, *where* it
 lives, and *how* the transform and validation behave.
@@ -79,19 +79,19 @@ lives, and *how* the transform and validation behave.
 
 ## Decision drivers
 
-1. **P18 — cross-zerno structure is a relation, never a mutable descriptor field.**
-   Requiredness-that-depends-on-another-zerno is already `variants()` / `when()` / `rule()`,
+1. **P18 — cross-tessera structure is a relation, never a mutable descriptor field.**
+   Requiredness-that-depends-on-another-tessera is already `variants()` / `when()` / `rule()`,
    round-tripping as `relv1|` content-addressed recursive tagged JSON.
-   "Value-that-depends-on-another-zerno" is the same category.
+   "Value-that-depends-on-another-tessera" is the same category.
 2. **P2 / P11 — descriptors round-trip as JSON and are content-addressed.** Whatever the
    transform mechanism is, it must serialize and hash. A JavaScript function does neither —
-   which is exactly why komirka already dropped mapping functions from the wiring transform
+   which is exactly why tessellum already dropped mapping functions from the wiring transform
    API pre-1.0 in favor of data-only `prefix`/`rename` (decisions §10).
 3. **P4 — the schema is authoritative and validation never silently downgrades.** The
-   reading zerno's own schema must decide the reading zerno's type; the existing precedent is
+   reading tessera's own schema must decide the reading tessera's type; the existing precedent is
    "re-validate with the caller's schema."
 4. **P7 / P14 / P21 — fail-closed exposure.** Inheritance is a new path a value can travel.
-   A *public* zerno inheriting a *secret* one would surface a secret through a public read and
+   A *public* tessera inheriting a *secret* one would surface a secret through a public read and
    into bake's client inlining — the laundering vector `WiringExposureError` already bans.
 5. **P13 / P14 — bake.** A transform that runs at build time must be pure, serializable, and
    secret-free. Data ops satisfy this; arbitrary functions reopen the build-time-RCE class.
@@ -108,34 +108,34 @@ lives, and *how* the transform and validation behave.
 A new relation in the `variants`/`when`/`rule` family, declared on the contract side:
 
 ```ts
-inherit(targetZerno, baseZerno)                            // plain inheritance (one base)
-inherit(targetZerno, baseZerno, { /* data ops */ })        // derivation (transform)
-// transitive: baseZerno may itself inherit — towers are built by composition (single parent)
+inherit(targetTessera, baseTessera)                            // plain inheritance (one base)
+inherit(targetTessera, baseTessera, { /* data ops */ })        // derivation (transform)
+// transitive: baseTessera may itself inherit — towers are built by composition (single parent)
 ```
 
 It round-trips as `relv1|` tagged JSON, is identity-bearing, references its base by
 identity, and binds as **one entry** (the way a variants group does).
 
-- **For:** obeys P18; the relationship is identity-bearing (P11), so a zerno that inherits is
+- **For:** obeys P18; the relationship is identity-bearing (P11), so a tessera that inherits is
   a different contract than one that does not — a consumer that binds it gets the same
   relationship or a loud `DescriptorMismatchError`; reuses the recursive-tagged wire format,
   the bind-as-one-entry model, `explain()` provenance, and aggregated `MissingConfigError`;
   keeps `sources` flat (P5); bakeable when the chain is public and build-constant.
 - **Against:** the *base* must be referenceable at declaration time, so a library that
-  inherits across its own zernos imports one descriptor into another (bounded
+  inherits across its own tesserae imports one descriptor into another (bounded
   monolith-through-imports cost); a purely cross-cutting app-imposed inheritance is not
   expressible this way (see the deferred bind-time case under the Decision).
 
-### Option B — a new source-ref kind `{ zerno: <ref> }`
+### Option B — a new source-ref kind `{ tessera: <ref> }`
 
 Reference another descriptor inside `sources`.
 
-- **Against — rejected:** breaks P5's ref = external-location / impl-injected model (a zerno
+- **Against — rejected:** breaks P5's ref = external-location / impl-injected model (a tessera
   ref has no impl to inject — resolution is *core's* job); turns the flat `sources` list into
   a recursive graph; conflates two axes the Context keeps separate; and it has nowhere clean
   to put a transform.
 
-### Option C — overload `default` to accept a zerno reference
+### Option C — overload `default` to accept a tessera reference
 
 - **Against — rejected:** `default` is JSON-only, static, and the *final* floor by
   construction (P2). Overloading it forfeits that simplicity, cannot express a base that wins
@@ -146,14 +146,14 @@ Reference another descriptor inside `sources`.
 This is question 2's "binding" horn: the app declares inheritance at its composition root,
 identity-free, like wiring.
 
-- **For:** flexible — an app could wire two mutually-unaware library zernos to inherit a
+- **For:** flexible — an app could wire two mutually-unaware library tesserae to inherit a
   shared base without either author's involvement; keeps descriptors maximally decoupled.
 - **Against — rejected as the *primary* mechanism:** wiring is deployment reality and is
   deliberately **identity-free** (P20); its one job is changing *where a value is read*,
   never *what the value is or means*. Inheritance-with-transform plainly changes the resolved
-  value, so making it identity-free would let the same zerno resolve to materially different
+  value, so making it identity-free would let the same tessera resolve to materially different
   values at two composition roots with **no identity signal** — the silent-divergence class
-  komirka exists to prevent. And a bind-time transform is precisely the serialized-function
+  tessellum exists to prevent. And a bind-time transform is precisely the serialized-function
   hazard the wiring API already refused. The legitimate cross-cutting use case is preserved
   as a **deferred, constrained** feature (below), not by weakening identity here.
 
@@ -166,10 +166,10 @@ Adopt **Option A**. The three questions become sub-decisions **D1–D3**; a four
 
 ### D1 — Location: inheritance is **declaration** (contract), not binding
 
-Zerno inheritance is a **declared relation**, constructed with an **`inherit()`** combinator,
+Tessera inheritance is a **declared relation**, constructed with an **`inherit()`** combinator,
 joining `variants()` / `when()` / `rule()` and sharing their `relv1|` content-addressed wire
-format. It is **identity-bearing**: whether a zerno inherits, from what, and through what
-transform is part of what the zerno *means*, so it lives in the identity subset alongside
+format. It is **identity-bearing**: whether a tessera inherits, from what, and through what
+transform is part of what the tessera *means*, so it lives in the identity subset alongside
 `sources` and `default`.
 
 > **On the name.** The combinator is `inherit()` *because* "fallback" and `chain()` already
@@ -177,24 +177,24 @@ transform is part of what the zerno *means*, so it lives in the identity subset 
 > Final naming is an open question below, but it will not be `fallback`.
 
 The cross-cutting **app-imposed** case (an application wiring independent, mutually-unaware
-zernos to inherit a shared base) is **deferred**, not folded into wiring. If built later it is
+tesserae to inherit a shared base) is **deferred**, not folded into wiring. If built later it is
 a wiring-family combinator subject to the *full* wiring guardrails — data-only (no bind-time
 function transforms), recorded in the committed lockfile as effective wiring, exposure-ban
 enforced — and its identity/attestation story is worked out then. v1 does not ship it.
 
 ```ts
-import { zerno, inherit } from "komirka";
-import { bind } from "komirka/node";
+import { tessera, inherit } from "tessellum";
+import { bind } from "tessellum/node";
 import { z } from "zod";
 
-const logLevel = zerno({
+const logLevel = tessera({
   key: "LOG_LEVEL",
   schema: z.enum(["debug", "info", "warn", "error"]),
   exposure: "public",
   default: "info",
 });
 
-const authLogLevel = zerno({
+const authLogLevel = tessera({
   key: "AUTH_LOG_LEVEL",
   schema: z.enum(["debug", "info", "warn", "error"]),
   exposure: "public",
@@ -212,12 +212,12 @@ cfg.unwrap(authLogLevel);
 ### D2 — Transform: derivation is allowed, but **data-only** — never a serialized function
 
 A base may be adapted before adoption by an optional third argument to `inherit()` — a **small,
-declarative, JSON-representable op set** — the same data-only discipline komirka already
+declarative, JSON-representable op set** — the same data-only discipline tessellum already
 chose for the wiring transform API (decisions §10):
 
 ```ts
-const cdnOrigin = zerno({ key: "CDN_ORIGIN", schema: z.string().url(), exposure: "public" });
-const readTimeout = zerno({ key: "READ_TIMEOUT_MS", schema: z.coerce.number().int(), exposure: "public" });
+const cdnOrigin = tessera({ key: "CDN_ORIGIN", schema: z.string().url(), exposure: "public" });
+const readTimeout = tessera({ key: "READ_TIMEOUT_MS", schema: z.coerce.number().int(), exposure: "public" });
 
 bind([
   // string massage
@@ -235,10 +235,10 @@ The *shape* (data, not function) is non-negotiable regardless.
 
 **Two homes for a transform, chosen by scope:**
 
-- **Applies to *every* value of the zerno (direct or inherited):** put it in the target's own
+- **Applies to *every* value of the tessera (direct or inherited):** put it in the target's own
   Standard Schema (`z.string().transform(...)`). This already runs on the inherited value
   via D3's pipeline — no new mechanism, and it is the natural home for a transform intrinsic
-  to the zerno's meaning.
+  to the tessera's meaning.
 - **Applies *only on the inherited path*:** put it in the ops argument on the relation. A directly
   set `READ_TIMEOUT_MS` must not be silently doubled; only the *inherited* value is.
 
@@ -267,9 +267,9 @@ Resolution of `inherit(T, B, ops)` — one base, resolved transitively through B
 
 So **both** validations apply, in order: the **inherited** declaration validates first (you
 never inherit a value the base itself would reject), the data-only transform adapts, and the
-**current** declaration validates last and fixes `Zerno<T>`'s type. Key properties:
+**current** declaration validates last and fixes `Tessera<T>`'s type. Key properties:
 
-- **The current declaration is authoritative for the reading zerno's type** (P4). `Zerno<T>`
+- **The current declaration is authoritative for the reading tessera's type** (P4). `Tessera<T>`
   always returns `T`, regardless of the base's type.
 - **A base value valid for the base but invalid for the target fails loudly at bind** — e.g.
   `LOG_LEVEL` permits `"trace"` but `AUTH_LOG_LEVEL` does not: inheriting `"trace"` passes
@@ -285,7 +285,7 @@ never inherit a value the base itself would reject), the data-only transform ada
 
 ```json
 {
-  "zerno": "CDN_ORIGIN",
+  "tessera": "CDN_ORIGIN",
   "resolved": {
     "kind": "inherit",
     "from": "API_ORIGIN",
@@ -305,15 +305,15 @@ no silent escape hatch the rest of the library is denied — "invalid is not una
 "current truth wins" hold unchanged.
 
 Resilience is available as an **explicit bind-site opt-in**, in the same hook family and
-location komirka already chose for `keepLastGood` — never a descriptor field:
+location tessellum already chose for `keepLastGood` — never a descriptor field:
 
 ```ts
 bind(entries, { invalid: [useDefault(authLogLevel)] });
 // on an invalid resolution, coast to authLogLevel's (validated) default instead of poisoning
-// — a sibling of keepLastGood(zerno, { maxCoastMs }) in the { invalid: [...] } family
+// — a sibling of keepLastGood(tessera, { maxCoastMs }) in the { invalid: [...] } family
 ```
 
-A descriptor `strict`/`resilient` field was **rejected**: it repeats the dilemma komirka
+A descriptor `strict`/`resilient` field was **rejected**: it repeats the dilemma tessellum
 settled for `keepLastGood` — identity-class fractures two teams' policy preferences into
 `DescriptorMismatchError`; cosmetic-class hides a behavioral field. Failure-mode policy is a
 deployment decision and lives at the composition root.
@@ -325,7 +325,7 @@ and `useDefault` is not opted in" — is possible and deferred as polish.)
 
 ### Guardrails (each a named, fail-closed error)
 
-- **`InheritanceExposureError` — a public zerno may not inherit from a secret zerno.**
+- **`InheritanceExposureError` — a public tessera may not inherit from a secret tessera.**
   Downward inheritance across the exposure boundary would surface a secret through a public
   read and into bake's client inlining (P14). Secret-inherits-public is fine (a secret may
   hold anything); public-inherits-secret fails at construction/bind. The effective exposure
@@ -333,8 +333,8 @@ and `useDefault` is not opted in" — is possible and deferred as polish.)
   path.
 
   ```ts
-  const publicOrigin = zerno({ key: "PUBLIC_ORIGIN", exposure: "public" });
-  const internalHost = zerno({ key: "INTERNAL_HOST", exposure: "secret" });
+  const publicOrigin = tessera({ key: "PUBLIC_ORIGIN", exposure: "public" });
+  const internalHost = tessera({ key: "INTERNAL_HOST", exposure: "secret" });
 
   bind([inherit(publicOrigin, internalHost)]);
   // InheritanceExposureError: public "PUBLIC_ORIGIN" cannot inherit from
@@ -348,7 +348,7 @@ and `useDefault` is not opted in" — is possible and deferred as polish.)
 - **`InheritanceFreshnessError` — a `snapshot` target may not inherit a `live` base (v1).**
   The rule is asymmetric: `live`-inherits-`snapshot` (a pinned base; the target re-reads its
   own source) and `live`-inherits-`live` (coherent pins via `.snapshot()`) are both fine —
-  only *`snapshot`-inherits-`live`* throws. Pinning a moving value into a zerno declared
+  only *`snapshot`-inherits-`live`* throws. Pinning a moving value into a tessera declared
   never-to-move is subtle enough (provenance, operator expectation) that v1 punts loudly
   rather than guess. Escape today: declare the target `live` too. **Promotion is rejected
   outright** — silently upgrading the target's freshness mutates an identity field by spooky
@@ -356,8 +356,8 @@ and `useDefault` is not opted in" — is possible and deferred as polish.)
   bind-time value — the literal reading of "snapshot" — behind a dev-warning and
   frozen-from-live `explain()` provenance).
 
-- **Membership.** `inherit()` is the target's single entry (P20's one-entry-per-zerno). A base
-  is *referenced*, not re-wired — exactly as a `when()` condition zerno is — so a base also
+- **Membership.** `inherit()` is the target's single entry (P20's one-entry-per-tessera). A base
+  is *referenced*, not re-wired — exactly as a `when()` condition tessera is — so a base also
   bound standalone is not a `DuplicateWiringError`. The relation pulls any unbound base into
   the binding so its value is resolvable; an unresolvable base surfaces in the aggregated
   `MissingConfigError`.
@@ -370,7 +370,7 @@ data-only transform ops into the relation's identity, and therefore into the tar
 
 ```ts
 identityOf(inherit(cdnOrigin, apiOrigin, { replace: ["api.", "cdn."] }));
-// "relv1:xxh128:…"  — folds in both zernos' identities and the transform ops
+// "relv1:xxh128:…"  — folds in both tesserae' identities and the transform ops
 ```
 
 Consequence (accepted — Resolved §1): changing a base's identity (a schema `version` bump, a
@@ -416,7 +416,7 @@ new source) or the transform ops cascades a new identity to the inheritor. Consi
 - **A blessed op vocabulary is a maintenance surface** and will attract "just one more op"
   pressure — the same slope the wiring transform API sits on. The mitigation is the same:
   hold the line at data massaging; push real logic into the target's schema.
-- **Declaration-time base references** couple descriptors (one zerno imports another). Bounded,
+- **Declaration-time base references** couple descriptors (one tessera imports another). Bounded,
   but it is the monolith-through-imports hazard in miniature; keep inherited pairs in the
   same module where possible.
 
@@ -445,12 +445,12 @@ The sub-questions raised while reviewing this ADR, with outcomes — §1–§7 r
 3. **Resolved (2026-07-08): layered validation, carrying the base's validated *output*.**
    The base resolves and validates through its own declaration; that output is transformed
    and re-validated through the target's schema. Carrying the base's *raw* instead — skipping
-   the base's own validation — was rejected: it would let a zerno inherit a value the base
+   the base's own validation — was rejected: it would let a tessera inherit a value the base
    itself rejects.
 4. **Resolved (2026-07-08).** Ordering is `T.sources → base (fully resolved) → T.default`.
    An *invalid* inherited value is **loud by default** (D4), never silently defaulted;
    resilience (coast to the target's default) is a bind-site opt-in
-   (`{ invalid: [useDefault(zerno)] }`), never a descriptor `strict` field. The default thus
+   (`{ invalid: [useDefault(tessera)] }`), never a descriptor `strict` field. The default thus
    serves as both absence-floor and resilience target — not dead code.
 5. **Resolved (2026-07-08): reject `snapshot`-inherits-`live`** (`InheritanceFreshnessError`),
    asymmetric — `live`-inherits-`snapshot`/`live` are fine. Promotion rejected (spooky
@@ -459,10 +459,10 @@ The sub-questions raised while reviewing this ADR, with outcomes — §1–§7 r
    handles a base that is flaky at boot better than snapshot-at-bind. `latch` is a *general*
    freshness concern in its own right (a third type-state between `Snapshot` and `LiveBinding`;
    poll-on-read detection under P10; config-vs-state per P16), not inheritance-specific — so it
-   is tracked as its own item (rejifald/komirka#14), not designed here. Today's escape is to declare the target `live`.
-   Accepted cost: a boot-only `snapshot` zerno can't inherit a `live` base without being forced
+   is tracked as its own item (rejifald/tessellum#14), not designed here. Today's escape is to declare the target `live`.
+   Accepted cost: a boot-only `snapshot` tessera can't inherit a `live` base without being forced
    into `live`.
-6. **Resolved (2026-07-08): single-base `inherit(T, B)`, transitive.** One parent per zerno
+6. **Resolved (2026-07-08): single-base `inherit(T, B)`, transitive.** One parent per tessera
    (B may itself inherit), so the inheritance graph is a forest — **no diamonds**; cycles are
    caught at any depth by `InheritanceCycleError`. Towers are built by composition and cascade
    to one value (the consistency property). *Multiple* inheritance (multi-base
@@ -485,14 +485,14 @@ The sub-questions raised while reviewing this ADR, with outcomes — §1–§7 r
 
 ## Scope — what this ADR is *not*
 
-- **Not descriptor-field / template inheritance.** Reusing another zerno's *schema*,
-  *exposure*, or *doc* at construction is already possible because a zerno is plain frozen data
+- **Not descriptor-field / template inheritance.** Reusing another tessera's *schema*,
+  *exposure*, or *doc* at construction is already possible because a tessera is plain frozen data
   built from an options object — userland object spread covers it
-  (`zerno({ ...baseOpts, key: "…" })`). That is a construction-time convenience, not a
+  (`tessera({ ...baseOpts, key: "…" })`). That is a construction-time convenience, not a
   relation. This ADR is strictly about **value** inheritance/derivation at *resolution* time.
 - **Not per-request / per-user / context-dependent inheritance.** A `unwrap()` whose inherited
   value depends on request context is a feature-flag / targeting SDK, which P16 and the P19
-  scope line refuse. Inheritance here is uniform: one value per process per zerno, through a
+  scope line refuse. Inheritance here is uniform: one value per process per tessera, through a
   static chain.
 - **Not a computed-expression language.** The transform is data-only massaging, not a DSL.
   Logic that a data op cannot express belongs in the target's Standard Schema, which is
