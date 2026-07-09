@@ -237,10 +237,11 @@ Factor handler logic to accept a `Snapshot` (or a `Scope` via `pick()`), keep th
 
 ```ts
 import { bind, literal } from "tessellum";
+import { secretLiteral } from "tessellum/testing";
 import { dbUrl, poolSize } from "./tesserae";
 
 const cfg = bind({
-  dbUrl: literal(dbUrl, "postgres://user:pw@localhost:5432/test"),
+  dbUrl: secretLiteral(dbUrl, "postgres://user:pw@localhost:5432/test"),
   poolSize: literal(poolSize, 2),
 });
 // Still validated, at bind: a non-URL literal here fails exactly like

@@ -246,8 +246,9 @@ This is also what makes testing boring, in the good way — construct a literal 
 
 ```ts
 import { bind, literal } from "tessellum"; // core bind: literal entries only — nothing ambient
+import { secretLiteral } from "tessellum/testing"; // secret-safe literal(), test-scoped
 
-const cfg = bind([literal(dbUrl, "pg://localhost/test"), literal(poolSize, 2)]);
+const cfg = bind([secretLiteral(dbUrl, "pg://localhost/test"), literal(poolSize, 2)]);
 const pool = createPool(cfg.pick(dbTesserae)); // still validated — a bad literal fails here
 ```
 
@@ -299,9 +300,10 @@ const cfg = await bind(provider(sendgridKey, ssm)).snapshot();
 import { bind } from "tessellum/workers";
 const cfg = bind(sendgridKey, { env });
 
-// tests: a literal entry — validated like any source, zero process.env mutation
-import { bind, literal } from "tessellum";
-const cfg = bind(literal(sendgridKey, "SG.test-key"));
+// tests: a secret literal entry — validated like any source, zero process.env mutation
+import { bind } from "tessellum";
+import { secretLiteral } from "tessellum/testing";
+const cfg = bind(secretLiteral(sendgridKey, "SG.test-key"));
 ```
 
 This split is also the browser-safety story, stated precisely: the universal `tessellum`
