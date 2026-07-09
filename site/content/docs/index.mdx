@@ -76,9 +76,10 @@ export default {
 
 ```ts
 // Tests — literal entries, zero process.env mutation
-import { bind, literal } from "tessellum";
+import { bind } from "tessellum";
+import { secretLiteral } from "tessellum/testing";
 
-const cfg = bind({ db: literal(dbUrl, "postgres://localhost:5432/test") });
+const cfg = bind({ db: secretLiteral(dbUrl, "postgres://localhost:5432/test") });
 ```
 
 ```ts

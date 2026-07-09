@@ -3,10 +3,13 @@
   "version": "0.0.0",
   "private": true,
   "scripts": {
+    "sync:principles": "node scripts/gen-principles.mjs",
+    "predev": "node scripts/gen-principles.mjs",
+    "prebuild": "node scripts/gen-principles.mjs",
     "build": "next build",
     "dev": "next dev",
     "start": "next start",
-    "types:check": "fumadocs-mdx && next typegen && tsc --noEmit"
+    "types:check": "node scripts/gen-principles.mjs && fumadocs-mdx && next typegen && tsc --noEmit"
   },
   "dependencies": {
     "cnfast": "^0.0.8",

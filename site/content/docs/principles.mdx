@@ -3,7 +3,10 @@ title: Principles
 description: The project constitution — every hard constraint, every pitfall found in adversarial review, and the full security model.
 ---
 
-> **Canonical copy:** this page mirrors [`principles.md`](https://github.com/rejifald/tessellum/blob/main/principles.md) at the repo root. If they ever disagree, the repo file wins.
+{/* GENERATED FILE — do not edit. Single source of truth: principles.md at the repo root.
+    Regenerate with `pnpm --filter site sync:principles` (runs automatically on dev/build, #25). */}
+
+> **Canonical copy.** This page is generated from [`principles.md`](https://github.com/rejifald/tessellum/blob/main/principles.md) at the repo root — the single source of truth. Edits made directly here are overwritten on the next build.
 
 > **Status: design phase.** No code exists yet. This document is the constitution for the
 > project: every hard constraint, every pitfall we have identified (many through adversarial
@@ -490,7 +493,9 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
 - **Fail-closed-by-missing-module has holes.** It only fails builds for code that imports
   the generated module; hand-written `process.env.SECRET` in a client component and un-baked
   second entrypoints sail through. *Rule:* the mandatory stack is: required `targets`
-  declaration → generated-module-only delivery → no-secret-sources browser entry → AST lint
+  declaration → secret-name bake gate (client-target declared key / effective source name vs
+  the secret-suffix denylist, whole-token, refused even at `exposure: "public"`) →
+  generated-module-only delivery → no-secret-sources browser entry → AST lint
   banning raw env reads in client-designated code → bake coverage report (manifest vs
   client-reachable tesserae) → allowlist leak scan. No single mechanism is claimed as
   sufficient.
@@ -498,7 +503,12 @@ Catalogued from adversarial review. Each entry: the failure, then the rule that 
   dependency can declare `exposure: "public"` over `{ env: "STRIPE_SECRET_KEY" }`. *Rule:*
   client-target membership requires **app-level attestation** in the manifest
   (`targets.client` enumerates tessera groups explicitly) plus deny-by-default env-source
-  allowlisting for the client target. `exposure: "public"` is necessary, never sufficient.
+  allowlisting for the client target — **and** bake refuses any client-target tessera whose
+  declared key or effective source name matches the secret-suffix denylist (whole-token,
+  anywhere in the name) even at `exposure: "public"` (`SecretNameInClientTargetError`),
+  escapable only by a reviewed per-name entry in the manifest attestation, never a global
+  flag. That closes the `{ env: "STRIPE_SECRET_KEY" }` case by name as well as by flag:
+  `exposure: "public"` is necessary, never sufficient.
 - **Build-once-deploy-many vs inlining.** Baking an env-varying value freezes the build
   env's value into promoted artifacts. *Rule:* baked = constant-per-build by contract;
   env-varying browser values are an explicitly documented open problem (runtime-injected
@@ -575,7 +585,8 @@ ones (provider-resolved: SSM, Vault) — and only if the root snapshot is never 
 | Cross-request/tenant bleed on Workers | P3: no ambient binding, no fallback; per-request bind |
 | Window-injected config spoofing (XSS ordering) | Injected browser config is an untrusted input boundary: revalidated on read, never used for secret-tier values |
 | Prototype pollution via `decode: "json"` / nested-key sources | Null-prototype objects throughout decode/merge; `__proto__`/`constructor`/`prototype` keys rejected before any validator runs |
-| Supply chain: dependency-declared tesserae entering the client bake | App attestation + deny-by-default source allowlist (never trust package-declared `exposure` alone) |
+| Supply chain: dependency-declared tesserae entering the client bake | App attestation + deny-by-default source allowlist (never trust package-declared `exposure` alone) + secret-name bake gate (`SecretNameInClientTargetError`) on the declared key / effective source name |
+| Secret laundered into a public read via the inheritance relation | `InheritanceExposureError` — a public tessera may not inherit a secret base; a chain's effective exposure is the max secrecy of any link (fail-closed at construction/bind) |
 | Supply chain: import-time `provide()` spoofing | No global provide exists (P3) |
 | Build-time RCE via manifest execution | Side-effect-free manifest contract, constrained execution, sensitive-input handling |
 
@@ -615,36 +626,14 @@ gate.
 
 ## 6. Open decisions
 
-- `default` in the identity hash: currently **yes** (a changed default is a different
-  config; loud acknowledgeable error beats silent wrong value).
-- Env-varying public values for build-once-promote-many SPAs: runtime-injected JSON
-  document (`/config.json`, SSR script tag) as a fourth delivery mode — shape TBD.
-- Whether v0.1 ships the node file source (leaning yes — it is what makes `live` real).
-- Server-target zero-runtime-dep vs runtime validation: they are mutually exclusive for
-  runtime-varying values (validators don't serialize). Two-tier story: baked constants =
-  zero-dep; runtime values = tiny runtime core. Say it plainly.
-- Nested `variants()`/`when()`: rejected in v1 (`VariantsNestingError`, compose two flat
-  groups) — but the recursive tagged wire format ships from day one so enabling nesting is
-  a flag, not a format break.
-- Client escape hatch for variants: v1 = whole-group ineligible; v2 design = *attested
-  branch-freeze* (`{ group, frozenBranch }` in the manifest, frozen discriminant value
-  recorded in the lockfile so the attestation diff shows it).
-- Stale-while-revalidate for async reads: not in v1 (expired reads block on a single-flight
-  re-read, bounded by `readTimeoutMs`, so `maxStalenessMs` stays honest); only ever as a
-  loudly-named opt-in.
-- `cfg.update(tessera, fn, { retries })` read-modify-write helper: deferred — it is a
-  five-line userland loop over `get`/`set`/`WriteConflictError`.
-- Provider impl ergonomics: required `{ id, color }` object contract (default) vs an
-  id-keyed bind-opts provider table as the only form — revisit if impl authoring friction
-  shows up.
-- Server-side wiring-digest verification default: fail-closed in production on every
-  target (recommended for client-covered targets) vs opt-in `attest` — and the mechanism
-  must be an explicit flag, never `NODE_ENV` sniffing.
-- Dynamic (non-literal) name/path arguments to combinators on bake-covered targets:
-  banned in v1 (lint + bake refusal); revisit if a real case appears.
-- ~~Final naming~~ — decided: the package is `tessellum` (see header). Still open: whether
-  the primitive stays `tessera` (with `$tessera` brand and `tesserav1|` identity prefix) or takes a
-  cell-flavored name to match the package.
+The live list of open design questions — their options and current leans — lives in the
+design site's **[Open decisions](/docs/reference/decisions)** registry, which
+doubles as the index of decisions that have graduated to a full record under
+**[`docs/adr/`](https://github.com/rejifald/tessellum/tree/main/docs/adr)**. That registry is the single source of truth.
+
+This section used to mirror the list; the mirror is retired to avoid the drift a registry
+exists to prevent. The hard constraints above (P1–P21) are the contract; what is still open,
+and what an ADR has since settled, is tracked in the registry.
 
 ## 7. Relationship to StitchAPI
 

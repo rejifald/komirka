@@ -40,11 +40,12 @@ export const dbTesserae = defineTesserae([dbUrl, poolSize]);
 ```ts
 import { it, expect } from "vitest";
 import { bind, literal } from "tessellum";
+import { secretLiteral } from "tessellum/testing";
 import { dbUrl, poolSize } from "../app/config/db";
 
 it("reads typed values from a literal snapshot", () => {
   const cfg = bind({
-    dbUrl: literal(dbUrl, "postgres://127.0.0.1:5432/app_test"),
+    dbUrl: secretLiteral(dbUrl, "postgres://127.0.0.1:5432/app_test"),
     poolSize: literal(poolSize, 2),
   });
 
@@ -59,7 +60,7 @@ The result is an ordinary `Snapshot` — the binding type is computed from the e
 import { MissingConfigError } from "tessellum";
 
 it("a bad test value fails loudly", () => {
-  expect(() => bind({ dbUrl: literal(dbUrl, "not-a-url") })).toThrow(
+  expect(() => bind({ dbUrl: secretLiteral(dbUrl, "not-a-url") })).toThrow(
     MissingConfigError,
   );
 });
@@ -95,7 +96,7 @@ const pool = createPool(root.pick(dbTesserae));
 // db.test.ts — the same seam, fed by a literal snapshot
 it("caps the pool at the configured size", () => {
   const cfg = bind({
-    dbUrl: literal(dbUrl, "postgres://127.0.0.1:5432/app_test"),
+    dbUrl: secretLiteral(dbUrl, "postgres://127.0.0.1:5432/app_test"),
     poolSize: literal(poolSize, 2),
   });
 
@@ -111,7 +112,7 @@ Because there is no global state at all, two tests holding contradictory config 
 ```ts
 it.concurrent("small pool behaviour", () => {
   const cfg = bind({
-    dbUrl: literal(dbUrl, "postgres://127.0.0.1:5432/a"),
+    dbUrl: secretLiteral(dbUrl, "postgres://127.0.0.1:5432/a"),
     poolSize: literal(poolSize, 1),
   });
   expect(createPool(cfg.pick(dbTesserae)).options.max).toBe(1);
@@ -119,7 +120,7 @@ it.concurrent("small pool behaviour", () => {
 
 it.concurrent("large pool behaviour", () => {
   const cfg = bind({
-    dbUrl: literal(dbUrl, "postgres://127.0.0.1:5432/b"),
+    dbUrl: secretLiteral(dbUrl, "postgres://127.0.0.1:5432/b"),
     poolSize: literal(poolSize, 64),
   });
   expect(createPool(cfg.pick(dbTesserae)).options.max).toBe(64);
@@ -191,7 +192,7 @@ import { ExposureError } from "tessellum";
 
 it("secrets cannot ride a serialized payload", () => {
   const cfg = bind({
-    dbUrl: literal(dbUrl, "postgres://127.0.0.1:5432/app_test"),
+    dbUrl: secretLiteral(dbUrl, "postgres://127.0.0.1:5432/app_test"),
   });
 
   // the snapshot redacts secrets by construction
@@ -205,7 +206,7 @@ it("secrets cannot ride a serialized payload", () => {
 
 ## Testing live config
 
-`freshness: "live"` only means anything for re-readable refs — files and providers. That makes live behavior easy to test: point a tessera's file ref at a temp file you control and bind it as a bare entry under `tessellum/node`. Don't sleep past the poll throttle (`maxStalenessMs`, a `bind` option — roughly one second for files by default) — that's how flaky tests are born. `refresh(live)` forces one coherent re-read pass and returns a new pinned `Snapshot`, so the test is deterministic.
+`freshness: "live"` only means anything for re-readable refs — files and providers. That makes live behavior easy to test: point a tessera's file ref at a temp file you control and bind it as a bare entry under `tessellum/node`. Two seams keep these tests deterministic and fast. `refresh(live)` forces one coherent re-read pass and returns a new pinned `Snapshot`. And for anything gated on *elapsed time* — the `maxStalenessMs` poll throttle (roughly one second for files by default) or a `keepLastGood` coast budget — pass a `manualClock` as the `clock` bind option and advance it by hand. Never race the real wall clock; that is how flaky tests are born.
 
 ```ts
 import { mkdtemp, writeFile } from "node:fs/promises";
@@ -247,6 +248,7 @@ Invalid content after boot poisons the tessera — current truth wins, and the e
 
 ```ts
 import { InvalidLiveValueError, keepLastGood } from "tessellum";
+import { manualClock } from "tessellum/testing";
 
 it("poisons the tessera when the file goes bad", async () => {
   const { file, upstreamUrl } = await tempUpstream();
@@ -265,17 +267,23 @@ it("poisons the tessera when the file goes bad", async () => {
   expect(rejected).toHaveLength(1);                          // once per distinct raw
 });
 
-it("keepLastGood is the explicit opt-in, bounded by maxCoastMs", async () => {
+it("keepLastGood coasts, then expires at maxCoastMs — clock advanced by hand, no real waiting", async () => {
   const { file, upstreamUrl } = await tempUpstream();
+  const clock = manualClock(0); // t = 0 ms; nothing here ever touches the real wall clock
   const live = bind([upstreamUrl], {
+    clock, // the injection seam: every staleness/coast comparison reads this
     invalid: [keepLastGood(upstreamUrl, { maxCoastMs: 60_000 })],
   });
 
   await writeFile(file, "not a url");
   await refresh(live).catch(() => {});
 
-  expect(live.unwrap(upstreamUrl)).toBe("https://api.internal.test"); // coasting
+  clock.advance(30_000); // 30s in — still inside the coast budget
+  expect(live.unwrap(upstreamUrl)).toBe("https://api.internal.test"); // coasting on last-good
   expect(live.health()[upstreamUrl.key].status).toBe("coasting");
+
+  clock.advance(30_001); // now past maxCoastMs — the budget is spent
+  expect(() => live.unwrap(upstreamUrl)).toThrow(InvalidLiveValueError); // current truth wins again
 });
 ```
 
@@ -293,17 +301,61 @@ it("a never-yet-valid live tessera throws NoValidValueError", async () => {
 });
 ```
 
+## Testing async (provider-backed) config with `fakeProvider`
+
+DB- and SSM-backed config is async, but its test double need not be. `fakeProvider()` is an in-memory general `AsyncProvider` that already passes `verifyProvider()`, so a test seeds values and captures writes instead of re-implementing the batch/version/slot contract by hand. It mirrors `fakeSecretProvider()` (the secret-class sibling); pair either with `manualClock` and the whole async surface is deterministic — no database, no network, no sleeping.
+
+```ts
+import { tessera, WriteConflictError } from "tessellum";
+import { bind, provider } from "tessellum/async";
+import { fakeProvider } from "tessellum/testing";
+import { z } from "zod";
+
+const rateLimit = tessera({
+  key: "RATE_LIMIT",
+  schema: z.coerce.number().int().positive(),
+  exposure: "public",
+  sources: [{ provider: "config-store" }],
+});
+
+it("reads and writes a provider-backed tessera without a real database", async () => {
+  const store = fakeProvider({
+    reads: { RATE_LIMIT: { raw: "100", version: "1" } }, // seed the slot (raw + optional version)
+    capabilities: { versionTokens: "unique", atomicWrites: true, consistentReads: true },
+  });
+
+  const cfg = bind({ rateLimit: provider(rateLimit, store) }); // async-colored → AsyncBinding
+  await cfg.ready();                       // one batched read + validate, at boot
+  expect(await cfg.unwrap(rateLimit)).toBe(100);
+
+  await cfg.set(rateLimit, "250");         // operator-plane, input-typed, write-through (CAS on the pinned version)
+  expect(store.writes.at(-1)).toMatchObject({ key: "RATE_LIMIT", raw: "250", ifVersion: "1" });
+});
+
+it("surfaces a write conflict when the version moved under you", async () => {
+  const store = fakeProvider({ reads: { RATE_LIMIT: { raw: "100", version: "1" } } });
+  const cfg = bind({ rateLimit: provider(rateLimit, store) });
+  await cfg.ready();
+
+  store.set("RATE_LIMIT", { raw: "500", version: "2" }); // a concurrent writer moved it
+  await expect(cfg.set(rateLimit, "250", { ifVersion: "1" })).rejects.toThrow(WriteConflictError);
+});
+```
+
+The `absent` and `error` branches are just as easy: `fakeProvider({ reads: { RATE_LIMIT: { absent: true } } })` drives the boot `MissingConfigError`, and `{ error: new Error("store down") }` drives `SourceUnavailableError` — so the failure paths that used to need a live outage become ordinary unit tests.
+
 ## Testing library code that takes a `Scope`
 
 A library ships its tesserae as inert descriptors and types its factory against `Scope<ConfigOf<typeof itsTesserae>>`. Testing it is the same move the app makes at its composition root: build an all-literal binding, `pick`, pass it in. An all-literal `bind` returns a real `Snapshot`, so `pick` works on it directly.
 
 ```ts
 import { bind, literal, defineTesserae, NotInScopeError } from "tessellum";
+import { secretLiteral } from "tessellum/testing";
 import { createMailer, mailerTesserae, smtpUrl, smtpFrom } from "@acme/mailer";
 
 it("wires the mailer from a picked scope", () => {
   const cfg = bind({
-    smtpUrl: literal(smtpUrl, "smtp://127.0.0.1:1025"),
+    smtpUrl: secretLiteral(smtpUrl, "smtp://127.0.0.1:1025"),
     smtpFrom: literal(smtpFrom, "noreply@test.local"),
   });
 
@@ -314,7 +366,7 @@ it("wires the mailer from a picked scope", () => {
 
 it("a scope is runtime-restricted, not just typed", () => {
   const cfg = bind({
-    smtpUrl: literal(smtpUrl, "smtp://127.0.0.1:1025"),
+    smtpUrl: secretLiteral(smtpUrl, "smtp://127.0.0.1:1025"),
     smtpFrom: literal(smtpFrom, "noreply@test.local"),
   });
 
@@ -356,7 +408,7 @@ This mocks a shape, not a contract: validation is skipped entirely (`"64"` where
 ```ts
 // Instead: a real, validated snapshot per test
 const cfg = bind({
-  dbUrl: literal(dbUrl, "postgres://127.0.0.1:5432/app_test"),
+  dbUrl: secretLiteral(dbUrl, "postgres://127.0.0.1:5432/app_test"),
   poolSize: literal(poolSize, 2),
 });
 const pool = createPool(cfg.pick(dbTesserae));
