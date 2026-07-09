@@ -18,3 +18,4 @@ the registry links to each one as its question gets settled.
 | [0004](./0004-async-snapshot-coherence.md) | Async snapshot cross-key coherence (coherence groups) | Accepted |
 | [0005](./0005-async-read-deadline-and-boot-outage.md) | Async re-read deadline and boot-outage policy (`readTimeoutMs` / `readyTimeoutMs`) | Accepted |
 | [0006](./0006-atomic-setmany-vs-write-batch.md) | Atomic `setMany` vs. `maxWriteBatch` (an atomic write cannot span chunks) | Accepted |
+| [0007](./0007-cross-install-identity-and-library-consumption.md) | Cross-install branded-type identity and library-author consumption (structural `Scope` brand, peer-dep, escape) | Accepted |

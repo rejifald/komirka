@@ -89,7 +89,12 @@ Every feature must pass all of these. "It would be convenient" never overrides a
 - **P12 — `pick()` runtime-restricts.** Narrowing is enforced at runtime (a new scope table
   containing only picked entries) and in the type system (a brand only `pick()` produces;
   the root `Snapshot` is deliberately *not* assignable to `Scope`). This is least-privilege
-  and mistake-prevention — see §4 for what it is *not*.
+  and mistake-prevention — see §4 for what it is *not*. The `Scope` brand is **structural** (a
+  well-known string key), never a `unique symbol`: that is the only representation under which
+  branded identity survives duplicate installs (ADR 0007) — a nominal brand fails cross-install —
+  while `Snapshot` stays un-assignable, and it is what makes a library's `Scope<...>` signature accept a baked shim's scope
+  across installs (ADR 0003). Structural means forgeable, which is fine: this is
+  mistake-prevention, not a sandbox.
 - **P13 — Bake is the only client delivery channel.** Client-targeted code receives config
   exclusively via the bake-generated module. The manifest must declare targets explicitly;
   a declared client target with no completed bake fails the build.

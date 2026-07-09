@@ -139,6 +139,24 @@ cfg.unwrap(smtpUrlCopyB);
 
 The same rule holds for reads through a `unify` alias: the aliased caller's value is validated by the aliased caller's schema. The point is invariant either way — a package that typed its API against its schema's output gets exactly that guarantee, no matter which physical copy of the descriptor happened to be bound first. Validation can never silently downgrade across package copies.
 
+## Branded-type identity across installs
+
+Everything above is the *runtime* story, and it holds no matter how many copies of tessellum are installed. The type system has a companion guarantee, and it is load-bearing for library authors who type their API `Scope<ConfigOf<typeof tesserae>>`: does that branded `Scope` still line up when a consumer's dependency graph hoists two copies of tessellum?
+
+It does — but only because the `Scope` brand is **structural** (a well-known string key), never a `unique symbol`. A `unique symbol` brand is a *distinct type in every install*, so a `Scope` produced by one copy's `pick()` would not be assignable to a parameter typed against another copy's `Scope` — branded identity would silently evaporate in exactly the diamond-install case identity exists to survive. A string-keyed brand is the same type across copies, so cross-install assignment type-checks, while the root `Snapshot` — which lacks the brand key — stays un-assignable to `Scope` (the P12 least-privilege gate). It also governs the client path: a baked client shim is typed `Scope` through an erased `import type`, so a library's `Scope<...>` signature accepts that shim's scope even when the library carries its own copy of tessellum — the "accepts it unchanged" bake promise holds across installs only because the brand is structural.
+
+The trade is honest: a structural brand is forgeable by writing the key by hand. That is acceptable because the brand is mistake-prevention, not a sandbox — its one job is to stop a caller *accidentally* handing you their whole configuration, and a `Snapshot` can never be passed where a `Scope` is required. The load-bearing cross-install guarantee stays the runtime content-addressed identity above; the type brand is a compile-time convenience that composes across installs *because* it is structural. This was settled, with a `tsc` spike proving the nominal brand breaks and the structural one holds, in [ADR 0007](https://github.com/rejifald/tessellum/blob/main/docs/adr/0007-cross-install-identity-and-library-consumption.md).
+
+## Install once: the peer-dependency
+
+Because duplication is a type-level and bundle-level cost as well as a runtime one, a library that ships tesserae declares `tessellum` a `peerDependency`, not a plain `dependency`:
+
+```jsonc
+{ "peerDependencies": { "tessellum": "^1.0.0" }, "devDependencies": { "tessellum": "^1.0.0" } }
+```
+
+A peer-dep lets the consumer's package manager dedupe to a single copy and keeps a second copy out of their bundle. It is the right default — but it is *ergonomics, not a guarantee*: peer-deps do not prevent duplication (pnpm's isolated store, incompatible version ranges, CJS/ESM dual-load, and monorepos all still produce copies). When a copy slips through, correctness is held by everything above — content-addressed identity, caller-schema revalidation, and `DescriptorMismatchError` on real drift — not by the manifest. Declare the peer-dep to make duplication *rare*; rely on identity to make it *safe*. The [library-authors guide](/docs/guides/library-authors) has the full checklist, and an escape for consumers who don't use tessellum at all.
+
 ## Collisions that never happen — and the ones that warn
 
 Two packages using the same key are not automatically in conflict. `@acme/http` and `@acme/queue` can both ship a tessera named `TIMEOUT_MS`; bound in separate bindings, they never interact, because there is nothing global for them to collide in:
