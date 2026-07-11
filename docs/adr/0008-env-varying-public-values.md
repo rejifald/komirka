@@ -109,59 +109,80 @@ so no secrets are needed in the pipeline. The cost, stated plainly: the artifact
 bit-identical across environments. For teams that can rebuild, this remains the simplest correct
 answer and needs no new machinery.
 
-### D2 — Exactly **one** runtime-injected mode is blessed, as a userland recipe
+### D2 — The blessed escape is a **synchronously-injected** public document
 
-A small **public** JSON document, conventionally `/config.json`, is deployed next to the artifact
-per environment. The client fetches it **once at boot** through an async provider entry and pins;
-every read after boot is synchronous.
+The deploy environment writes a small **public** JSON document into the page **before the app
+boots** — a server-rendered `<script>window.__APP_CONFIG__ = { … }</script>` (or an equivalent
+pre-boot global). Because the values are present synchronously at boot, the app reads them and
+binds them through a **synchronous, browser-safe** entry — no `await`, no provider, no
+`tessellum/async`, and nothing from `tessellum/node`:
 
 ```ts
 const apiBase = tessera({
   key: "API_BASE_URL",
   schema: z.string().url(),
-  exposure: "public",                                  // public or the bind is an ExposureError
-  sources: [{ provider: "runtime-config" }, { env: "API_BASE_URL" }],
+  exposure: "public",                 // public, or wiring it is refused (property 2)
+  sources: [{ env: "API_BASE_URL" }], // the declared ref; the injected value overrides it at the root
 });
 
-// browser boot: runtimeConfigProvider fetches /config.json once; reads are sync forever after
-const cfg = await bind({ apiBase: provider(apiBase, runtimeConfigProvider) }).snapshot();
+// browser boot — synchronous; the server injected window.__APP_CONFIG__ before this script ran
+import { bind, literal } from "tessellum";
+const injected = window.__APP_CONFIG__ ?? {};
+const cfg = bind({ apiBase: literal(apiBase, injected.API_BASE_URL) }); // validated at bind, sync
 ```
+
+This is the decisive property: **the production browser bundle never needs `tessellum/async` or
+any Node import.** The value is already on the page; reading it is synchronous; wiring it is the
+same `literal()` combinator tests use, through the universal core entry.
 
 Four properties are normative:
 
-1. **Values still validate.** The document's values go through the same tessera schemas at boot —
-   one aggregated `MissingConfigError` if the deploy served a bad document.
-2. **Secrets are structurally impossible.** The browser entry ships no secret-capable sources
-   (P7), so a `exposure: "secret"` tessera pointed at the document fails with `ExposureError`.
-   This is construction, not policy: the document cannot become a secret channel.
-3. **It is an untrusted input boundary.** The document is revalidated on read and never used for
-   secret-tier values — the existing §4 leak-vector rule for injected browser config, now with a
-   sanctioned mechanism attached to it.
-4. **It never touches bake's identity hash.** Runtime-injected tesserae are *not* in the bake
-   `client` target: they are never inlined, carry no baked handle, and therefore can never raise
-   `StaleBakeError`. `StaleBakeError` remains exactly what ADR 0003 made it — a build-time
-   `bake --check` gate over **baked** handles. The two mechanisms do not overlap, and this ADR
-   does not extend the identity hash to runtime-arriving values.
+1. **Values still validate.** The injected value runs the tessera's schema at bind — one
+   aggregated `MissingConfigError` if the deploy injected a bad document.
+2. **Secrets cannot ride the document.** A secret wired from the injected value via `literal()`
+   is `SecretLiteralError` (a literal on a secret is refused outside tests); and on the fetch
+   fallback (D3) the browser entry ships no secret-capable source, so that route is
+   `ExposureError`. Either way the document is structurally incapable of carrying a secret (P7) —
+   construction, not policy.
+3. **It is an untrusted input boundary.** Injected browser config is revalidated on read and never
+   used for secret-tier values — the existing §4 leak-vector rule, now with a sanctioned mechanism.
+4. **It never touches bake's identity hash.** These values are not in the bake `client` target:
+   never inlined, no baked handle, so they can never raise `StaleBakeError`. `StaleBakeError`
+   stays exactly what ADR 0003 made it — a build-time gate over **baked** handles. This ADR does
+   not extend the identity hash to runtime-arriving values.
 
-**Bake emits a JSON Schema for the document.** Because the tesserae routed to `runtime-config`
-are declared and public, bake can emit a JSON Schema describing the expected document, so the
-*deploy* pipeline validates `/config.json` **before serving it** rather than discovering the
-error in a browser at boot. This is the one new bake output this ADR adds, and it emits names and
-types only — never values (P14).
+**Bake emits a JSON Schema for the document**, so the deploy pipeline validates it **before
+serving** rather than discovering the error in a browser at boot. Names and types only, never
+values (P14).
 
-### D3 — HTML script-tag injection is a documented **variant** of D2
+The read-and-wire step uses `literal()` today (the combinator tests already use). A dedicated
+synchronous "injected" source (`{ injected: "API_BASE_URL" }` reading a configured global) would
+read more cleanly, but it is new core surface and is deferred (D4).
 
-The server templates the same JSON into a script tag; the provider reads it from the DOM instead
-of fetching. It saves a request and couples you to a serving layer. Same schemas, same
-`ExposureError` guard, same "untrusted input boundary, revalidated on read" rule. It is a variant,
-not a second mode: one document shape, two transports.
+### D3 — Async fetch is the fallback for pure-static hosting — and the *only* path that needs `tessellum/async` in the browser
+
+When nothing can inject before boot — a purely static SPA with no serving layer — the escape is
+to **fetch** `/config.json` at boot through an async provider entry and pin:
+
+```ts
+import { provider } from "tessellum";
+import { bind } from "tessellum/async"; // the async door — needed ONLY on this fallback path
+const cfg = await bind({ apiBase: provider(apiBase, runtimeConfigProvider) }).snapshot();
+```
+
+Same four properties as D2 (the secret guard here is `ExposureError`, since a browser provider is
+a source the browser entry does not supply for secrets). This is the **one** path that requires
+`tessellum/async` to be reachable from a browser build (see Scope). It is deliberately **secondary
+and opt-in**: the default is rebuild-per-env (D1), the blessed escape is synchronous injection
+(D2), and this exists only for the static-hosting corner that can neither rebuild nor inject.
 
 ### D4 — No first-class core browser source in v0.1
 
-D2 stays a **userland recipe** composed from existing contract pieces (a `provider` source ref +
-the async pin). Core grows no new browser source. Revisit only if the §12 proof-gate demo
-demands it. Rationale: P6, and the refusal to ship a browser source whose shape invites the
-assumption that it can carry secrets.
+Both D2 and D3 stay **userland recipes** composed from existing contract pieces (`literal()`, or a
+`provider` + the async pin). Core grows no new browser source — including the cleaner synchronous
+"injected" source D2 gestures at. Revisit only if the §12 proof-gate demo demands it. Rationale:
+P6, and the refusal to ship a browser source whose shape invites the assumption it can carry
+secrets.
 
 ### D5 — **P13 is narrowed** (the constitutional reconciliation)
 
@@ -170,10 +191,10 @@ amended to say what it actually protects:
 
 > Bake is the only channel that **inlines** client config. Build-constant client-targeted values
 > reach the browser exclusively via the bake-generated module. The one sanctioned alternative is a
-> **runtime-injected public document** (this ADR): bound through a declared source at the
-> composition root, never inlined, always an untrusted input boundary revalidated on read, and
-> structurally incapable of carrying secrets because the browser entry ships no secret-capable
-> sources (P7).
+> **runtime-injected public document** (this ADR): bound at the composition root, never inlined,
+> always an untrusted input boundary revalidated on read, and structurally incapable of carrying
+> secrets (P7 — a runtime literal on a secret is `SecretLiteralError`, and the browser ships no
+> secret-capable source for the fetch path).
 
 This is a *narrowing to what was always meant*, not a weakening: nothing about attestation,
 deny-by-default client targets, or the secret-name bake gate changes. A runtime-injected document
@@ -188,9 +209,13 @@ carries only public values that a schema validates on arrival.
 - The predicted #1 issue has a recorded answer, and `guides/browser` no longer says "under
   consideration, not a promised feature." Both audiences are served: rebuild-per-env for teams
   that can rebuild, a blessed runtime mode for bit-identical promotion pipelines.
-- Zero new core API surface (D4). The recipe is the async door that already exists.
-- The exposure guarantee stays *structural*, not procedural: P7 makes a secret in `/config.json`
-  unrepresentable, so blessing the mode costs nothing in the secret model.
+- **Zero new core API surface, and the production browser bundle stays sync-only** (D2): no
+  `tessellum/async`, no Node import on the default runtime path. The async door is a fallback for
+  static hosting (D3), not the blessed path — so the P5 browser-safety edge is off the critical
+  path (see Scope).
+- The exposure guarantee stays *structural*, not procedural: a secret can't ride the document
+  (`SecretLiteralError` on the sync path, `ExposureError` on the fetch path), so blessing the mode
+  costs nothing in the secret model.
 - The `StaleBakeError` boundary gets sharper, not fuzzier: baked values are hash-checked at build
   time; runtime-injected values are schema-checked at boot. Neither mechanism reaches into the other.
 - The spec stops contradicting itself: P13's absolute phrasing is reconciled with the leak-vector
@@ -198,20 +223,24 @@ carries only public values that a schema validates on arrival.
 
 **Negative / costs**
 
-- **The runtime mode reintroduces a network read on the boot path** — the exact thing the baked
-  path exists to avoid — and an availability dependency at boot. Stated in the guide, not buried.
+- **Synchronous injection couples you to a serving layer** that can write the document into the
+  page before boot. A purely static SPA cannot do that and must fall back to D3 (fetch) or to
+  rebuild-per-env (D1). Stated in the guide, not buried.
+- **The fetch fallback (D3) reintroduces a network read on the boot path** — the exact thing the
+  baked path avoids — and pulls `tessellum/async` into that build. Which is why it is the fallback,
+  not the default.
 - **Two documented paths is more doc surface**, and a reader must choose. Mitigated by naming D1
-  the default and D2 the escape, with the trade-off in one line each.
-- **The document is an untrusted input boundary.** An attacker who can serve `/config.json` can
-  serve a *valid-but-wrong* `API_BASE_URL`. Schemas constrain shape, not intent. This is the same
-  trust you already place in whoever serves your JS bundle — said out loud, per P17.
+  the default, D2 the blessed escape, and D3 the static-hosting fallback — each with its cost in a line.
+- **The document is an untrusted input boundary.** An attacker who can serve the document can serve
+  a *valid-but-wrong* `API_BASE_URL`. Schemas constrain shape, not intent — the same trust you
+  already place in whoever serves your JS bundle, said out loud (P17).
 - **A new bake output** (the JSON Schema for the document) is one more artifact to keep correct.
 
 **Security posture**
 
-- No new secret surface: P7 makes secret-tier values in the document structurally impossible
-  (`ExposureError`), so D2/D3 cannot become a laundering channel. Bake still never resolves a
-  secret value (P14), and the emitted JSON Schema carries names and types only.
+- No new secret surface: a secret cannot ride the document (`SecretLiteralError` on the sync path,
+  `ExposureError` on the fetch path), so neither D2 nor D3 can become a laundering channel. Bake
+  still never resolves a secret value (P14), and the emitted JSON Schema carries names and types only.
 - Injected config remains an untrusted input boundary, revalidated on read — the existing §4 rule,
   now with a sanctioned mechanism rather than an unspecified one.
 
@@ -226,13 +255,13 @@ carries only public values that a schema validates on arrival.
 - **Not an extension of the identity hash.** Runtime-injected values are not baked and are not
   identity-hashed; `StaleBakeError` keeps its ADR-0003 meaning exactly.
 - **Not a core browser source** in v0.1 (D4) — that promotion is deferred, not rejected forever.
-- **Not a new bind entry point — but it does impose one constraint on an existing one.** The recipe
-  needs an async-capable `bind` reachable from a *browser* build. `reference/api` currently
-  describes `tessellum/async` as "async-capable (providers); re-exports node combinators," and
-  `env`/`file` live in `tessellum/node`, which imports `node:process`/`node:fs` — bundling that for
-  a browser fails at build (P5). For this recipe to be browser-safe, that re-export must be
-  **data-only** (combinators are pure JSON wiring data; capability enters only at the bind entry
-  point, which is already the stated rule), or the browser async door needs its own subpath.
-  Recorded here as a constraint this ADR *imposes* on the async entry's implementation — named
-  rather than assumed, because a browser build that transitively pulls `node:fs` would fail the
-  flagship browser story (P17).
+- **Not dependent on `tessellum/async` in the browser — except on the D3 fallback.** The blessed
+  path (D2) is synchronous and uses only the core entry, so it pulls no async machinery and no Node
+  import. The async fetch fallback (D3) *does* need `tessellum/async` reachable from a browser
+  build, and `reference/api` describes that entry as "re-exports node combinators," while `env`/
+  `file` live in `tessellum/node` (which imports `node:process`/`node:fs`, failing a browser build,
+  P5). So for D3 to be browser-safe, that re-export must be **data-only** (combinators are pure JSON
+  wiring data; capability enters only at the bind entry point — already the stated rule) or the
+  browser async door needs its own subpath. This is now a **fallback-only** constraint, not a
+  blocker on the default path — named rather than assumed (P17), and to be resolved if/when the D3
+  fetch fallback is implemented.

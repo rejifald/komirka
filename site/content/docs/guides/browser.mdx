@@ -213,41 +213,48 @@ The constant-per-build contract has a real cost, and it has a decided answer ([A
 
 **The default: re-bake per environment.** Run `tessellum bake` once per environment in the promote step. Only public values are resolved, so no secrets are needed in the pipeline. The cost, stated plainly: you give up bit-identical artifacts. For teams that can rebuild, this is the simplest correct answer and needs no new machinery.
 
-**The escape: a runtime-injected public document.** For pipelines that must promote one bit-identical artifact, deploy a small **public** JSON document — conventionally `/config.json` — next to the artifact, one per environment. The client fetches it **once at boot** through an async provider entry and pins; every read after that is synchronous.
+**The escape: a synchronously-injected public document.** For pipelines that must promote one bit-identical artifact, have the deploy environment inject a small **public** JSON document into the page **before your app boots** — a server-rendered script tag is the usual shape. Because the values are already present at boot, you read them synchronously and bind them through the universal core entry. No fetch, no `await`, no `tessellum/async`, nothing from `tessellum/node` — the production bundle stays sync-only:
+
+```html
+<!-- served per environment, before your app bundle -->
+<script>window.__APP_CONFIG__ = { "API_BASE_URL": "https://api.example.com" };</script>
+```
 
 ```ts
-import { tessera, provider } from "tessellum"; // descriptor + wiring data (pure, universal)
-import { bind } from "tessellum/async";        // the async door: provider entries
+import { tessera } from "tessellum";
+import { bind, literal } from "tessellum"; // core entry: universal, synchronous, browser-safe
 import { z } from "zod";
 
 const apiBase = tessera({
   key: "API_BASE_URL",
   schema: z.string().url(),
-  exposure: "public", // public, or the bind is an ExposureError
-  sources: [{ provider: "runtime-config" }, { env: "API_BASE_URL" }],
+  exposure: "public", // public — wiring a secret this way is refused (see below)
+  sources: [{ env: "API_BASE_URL" }], // declared ref; the injected value overrides it at the root
 });
 
-// runtimeConfigProvider is a userland provider that fetches /config.json exactly once
-const cfg = await bind({ apiBase: provider(apiBase, runtimeConfigProvider) }).snapshot();
-// one await at boot; every read after this line is synchronous
-```
-
-```json
-{ "API_BASE_URL": "https://api.example.com", "CDN_ORIGIN": "https://cdn.example.com" }
+const injected = window.__APP_CONFIG__ ?? {};
+const cfg = bind({ apiBase: literal(apiBase, injected.API_BASE_URL) }); // validated at bind, synchronous
 ```
 
 Four properties make this a sanctioned mode rather than a hole in the model:
 
-- **Values still validate.** The document flows through the same tessera schemas at boot, so a bad deploy is one aggregated `MissingConfigError` — not a mystery at first use.
-- **Secrets are structurally impossible.** The browser entry ships no secret-capable sources, so an `exposure: "secret"` tessera pointed at the document fails with `ExposureError`. The document cannot become a secret channel; that is construction, not policy.
-- **It is an untrusted input boundary.** Injected browser config is revalidated on read and never used for secret-tier values. Whoever can serve `/config.json` can serve a *valid-but-wrong* URL — the same trust you already place in whoever serves your JS bundle.
-- **It never touches `StaleBakeError`.** Runtime-injected tesserae are not in the `client` bake target: never inlined, no baked handle, no identity hash. `StaleBakeError` stays exactly what it is — a build-time `bake --check` gate over baked handles.
+- **Values still validate.** The injected value runs the tessera's schema at bind, so a bad deploy is one aggregated `MissingConfigError` — not a mystery at first use.
+- **Secrets cannot ride the document.** A secret wired from the injected value via `literal()` is `SecretLiteralError` (a literal on a secret is refused outside tests), and the browser entry ships no secret-capable source for the fetch fallback either. The document cannot become a secret channel; that is construction, not policy.
+- **It is an untrusted input boundary.** Injected browser config is revalidated on read and never used for secret-tier values. Whoever can inject the document can inject a *valid-but-wrong* URL — the same trust you already place in whoever serves your JS bundle.
+- **It never touches `StaleBakeError`.** These values are not in the `client` bake target: never inlined, no baked handle, no identity hash. `StaleBakeError` stays exactly what it is — a build-time `bake --check` gate over baked handles.
 
-Bake emits a **JSON Schema** for the document, so your deploy pipeline can validate `/config.json` *before serving it* rather than discovering the error in someone's browser.
+Bake emits a **JSON Schema** for the document, so your deploy pipeline can validate it *before serving* rather than discovering the error in someone's browser.
 
-**Variant: HTML injection.** Your server can template the same JSON into a script tag and have the provider read it from the DOM instead of fetching. It saves a request and couples you to a serving layer. Same schemas, same `ExposureError` guard, same untrusted-input rule — one document shape, two transports.
+**Fallback for pure-static hosting: fetch.** If nothing can inject before boot — a fully static SPA with no serving layer — fetch the document at boot instead. This is the one path that needs the async door, so it is deliberately the fallback, not the default:
 
-The honest cost of the escape, in one line: it reintroduces a network read on the boot path that the baked path exists to avoid, and it makes boot depend on that document being served. That is why re-baking is the default.
+```ts
+import { provider } from "tessellum";
+import { bind } from "tessellum/async"; // async door — needed only on this fallback path
+const cfg = await bind({ apiBase: provider(apiBase, runtimeConfigProvider) }).snapshot();
+// one await at boot; every read after this line is synchronous
+```
+
+The honest costs, in a line each: synchronous injection couples you to a serving layer that writes the document before boot; the fetch fallback reintroduces a network read on the boot path (and pulls `tessellum/async` into that build). Either way boot depends on the document being served — which is why re-baking per environment is the default.
 
 ## Upgrading a dependency after baking: StaleBakeError
 
