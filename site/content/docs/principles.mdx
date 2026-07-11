@@ -107,10 +107,11 @@ Every feature must pass all of these. "It would be convenient" never overrides a
   client-targeted values reach the browser exclusively via the bake-generated module. The
   manifest must declare targets explicitly; a declared client target with no completed bake
   fails the build. The one sanctioned alternative is a **runtime-injected public document**
-  (ADR 0008): bound through a declared source at the composition root, never inlined, always an
-  untrusted input boundary revalidated on read, and structurally incapable of carrying secrets
-  because the browser entry ships no secret-capable sources (P7). Narrowing, not weakening —
-  attestation, deny-by-default client targets, and the secret-name bake gate are unchanged.
+  (ADR 0008): the deploy environment injects a public JSON document into the page before boot,
+  read synchronously and bound at the composition root — never inlined, always an untrusted input
+  boundary revalidated on read, and structurally incapable of carrying secrets (P7). Narrowing,
+  not weakening — attestation, deny-by-default client targets, and the secret-name bake gate are
+  unchanged.
 - **P14 — Bake never resolves secret values.** It resolves public values and secret *key
   names* only. Secrets are validated at runtime, where the value actually lives. This also
   preserves build-once-deploy-many and keeps prod secrets out of CI.
