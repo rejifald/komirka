@@ -38,6 +38,7 @@ export const dbUrl = tessera({
   doc: "Primary Postgres connection string",
   // exposure defaults to "secret" — fail closed
 });
+// → Tessera<string>  (frozen descriptor, zero I/O)
 
 export const poolSize = tessera({
   key: "DB_POOL_SIZE",
@@ -45,12 +46,20 @@ export const poolSize = tessera({
   default: 10,
   exposure: "public",
 });
+// → Tessera<number>  (type inferred from schema output)
 ```
 
 ```ts
 // Node — eager validation of exactly what this entrypoint binds, at boot
 import { bind, env } from "tessellum/node";
 const cfg = bind({ db: env(dbUrl, "PLATFORM_PG_URL"), pool: poolSize });
+// → LiveBinding  (env source → live polling)
+
+cfg.unwrap(dbUrl);
+// → "postgres://localhost:5432/mydb"  (T, the validated string)
+
+cfg.safe(poolSize);
+// → { ok: true, value: 10 }  or  { ok: false, error: ConfigReadError }
 ```
 
 ```ts
@@ -58,18 +67,58 @@ const cfg = bind({ db: env(dbUrl, "PLATFORM_PG_URL"), pool: poolSize });
 // (the case import-time validators structurally cannot serve)
 import { bind } from "tessellum/workers";
 const cfg = bind(dbUrl, { env }); // inside fetch(req, env) — the bag is required, never ambient
+// → Snapshot  (single-read pin for this request)
+
+cfg.unwrap(dbUrl);
+// → "postgres://prod:5432/app"  (string)
 ```
 
 ```ts
 // Tests — literal values, zero process.env mutation
 import { bind, literal } from "tessellum";
 const cfg = bind({ db: literal(dbUrl, "postgres://localhost:5432/test") });
+// → Snapshot
+
+cfg.unwrap(dbUrl);
+// → "postgres://localhost:5432/test"  (validated, typed)
 ```
 
 ```ts
 // Browser — no binding at all: config arrives as baked literals, secrets structurally excluded
 import { config } from "./config.baked";
+// → Scope<{ DATABASE_URL: string, DB_POOL_SIZE: number }>  (type-only, baked shim)
+
+config.unwrap(dbUrl);
+// → "https://api.example.com"  (public literal, baked at build time)
 ```
+
+## Return values
+
+| Function | Returns |
+|---|---|
+| `tessera(config)` | `Tessera<T>` — frozen descriptor (type inferred from schema output; `string` if no schema) |
+| `bind(entries, opts?)` | `Snapshot` · `LiveBinding` · or `AsyncBinding` — computed from entries (any async → AsyncBinding; any live → LiveBinding; else Snapshot) |
+| `bind.lazy(entries, opts?)` | `Snapshot` or `LiveBinding` — presence checked now, validation deferred |
+| `bind.unchecked(entries, opts?)` | `Snapshot` or `LiveBinding` — fully deferred validation |
+| `Snapshot.unwrap(k)` | `T` — the validated value; throws `UnboundTesseraError` if not in binding |
+| `Snapshot.safe(k)` | `{ ok: true; value: T } \| { ok: false; error: ConfigReadError }` |
+| `Snapshot.pick(tesserae)` | `Scope<ConfigOf<T>>` — runtime-restricted scope |
+| `Snapshot.explain(k)` | `{ zerno: string; identity: string; resolved: { source; key }; value: string }` |
+| `Snapshot.toJSON()` | `Json` — secrets redacted by construction |
+| `LiveBinding.unwrap(k)` | `T` — re-reads from source (throttled by `maxStalenessMs`) |
+| `LiveBinding.snapshot()` | `Snapshot` — pinned immutable view |
+| `LiveBinding.epoch(k)` | `number` — monotonic counter, bumps on each change |
+| `LiveBinding.health()` | `HealthReport` — per-tessera status + timestamps |
+| `refresh(binding, opts?)` | `Promise<Snapshot>` — new pinned snapshot; never mutates in place |
+| `identityOf(tessera)` | `string` — content-addressed identity (`"tessv1:xxh128:..."`) |
+| `literal(entry, value)` | `WiredEntry` — input-typed, validation runs |
+| `env(tessera, name)` | `WiredEntry` — ref rename, patches the declared ref in place |
+| `chain(tessera, ...links)` | `WiredEntry` — first-present fallback chain |
+| `provider(tessera, impl, key?)` | `WiredEntry` — wires to a named provider |
+| `variants(discriminant, branches)` | `Variants<D, B>` — conditional config group |
+| `rule(deps, fn, meta)` | `Rule` — custom validation relation |
+| `keepLastGood(tessera, opts)` | `KeepLastGood` — availability-over-freshness guard |
+| `config` (baked) | `Scope<{ ... }>` — exported from `./config.baked` |
 
 tessellum has zero runtime dependencies; validators plug in through the Standard Schema interface,
 so any schema library that implements it works.
